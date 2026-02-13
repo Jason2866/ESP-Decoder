@@ -1,3 +1,10 @@
+# [0.3.0](https://github.com/dankeboy36/trbr/compare/0.2.2...0.3.0) (2026-02-13)
+
+
+### Features
+
+* add capturer API to decode streaming input ([#68](https://github.com/dankeboy36/trbr/issues/68)) ([398cdd9](https://github.com/dankeboy36/trbr/commit/398cdd9d49ba90d9399fe1a43cae0f4ee75bd139))
+
 ## [0.2.2](https://github.com/dankeboy36/trbr/compare/0.2.1...0.2.2) (2026-01-19)
 
 
