@@ -89,6 +89,8 @@ Backtrace stopped: previous frame inner to this frame (corrupt stack?)
 
 const miFramesOutput =
   '^done,stack=[frame={level="0",addr="0x4200007e",func="a::geta",file="/path/sketch.ino",fullname="/path/sketch.ino",line="11"},frame={level="1",addr="0x42000088",func="loop",file="/path/sketch.ino",line="21"},frame={level="2",addr="0x4c1c0042"}]'
+const miFramesOutputWindows =
+  '^done,stack=[frame={level="0",addr="0x420000a0",func="functionC",fullname="C:\\\\Users\\\\xxx\\\\dev\\\\git\\\\boardlab\\\\test_workspace\\\\esp32backtracetest\\\\module2.cpp",line="9"}]'
 
 const miArgsOutput =
   '^done,stack-args=[frame={level="0",args=[{name="this",type="a *",value="0x0"}]},frame={level="1",args=[{name="pvParameters",value="<optimized out>"}]}]'
@@ -591,6 +593,20 @@ Stack memory:
           lineNumber: '??',
         },
       ])
+    })
+
+    it('should preserve Windows path separators when parsing MI frames', () => {
+      const frames = parseMiFrames(miFramesOutputWindows)
+      const parsed = frames.map(toParsedFrame)
+      expect(parsed).toStrictEqual([
+        {
+          regAddr: '0x420000a0',
+          method: 'functionC',
+          file: String.raw`C:\Users\xxx\dev\git\boardlab\test_workspace\esp32backtracetest\module2.cpp`,
+          lineNumber: '9',
+        },
+      ])
+      expect(parsed[0].file.includes('\t')).toBe(false)
     })
 
     it('should parse MI stack arguments', () => {

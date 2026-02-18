@@ -248,12 +248,45 @@ function splitMiListItems(listContent) {
  * @returns {string}
  */
 function unescapeMiString(value) {
-  return value
-    .replace(/\\\\/g, '\\')
-    .replace(/\\"/g, '"')
-    .replace(/\\n/g, '\n')
-    .replace(/\\r/g, '\r')
-    .replace(/\\t/g, '\t')
+  let result = ''
+
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i]
+    if (char !== '\\') {
+      result += char
+      continue
+    }
+
+    const next = value[i + 1]
+    if (!next) {
+      result += '\\'
+      continue
+    }
+    i++
+
+    switch (next) {
+      case '\\':
+        result += '\\'
+        break
+      case '"':
+        result += '"'
+        break
+      case 'n':
+        result += '\n'
+        break
+      case 'r':
+        result += '\r'
+        break
+      case 't':
+        result += '\t'
+        break
+      default:
+        result += next
+        break
+    }
+  }
+
+  return result
 }
 
 /**
