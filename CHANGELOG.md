@@ -1,3 +1,10 @@
+## [0.3.1](https://github.com/dankeboy36/trbr/compare/0.3.0...0.3.1) (2026-02-18)
+
+
+### Bug Fixes
+
+* **riscv:** preserve Windows MI frame paths ([#70](https://github.com/dankeboy36/trbr/issues/70)) ([4e379be](https://github.com/dankeboy36/trbr/commit/4e379be9b1edf9de15cf1873b9ca271751573167)), closes [#69](https://github.com/dankeboy36/trbr/issues/69)
+
 # [0.3.0](https://github.com/dankeboy36/trbr/compare/0.2.2...0.3.0) (2026-02-13)
 
 
