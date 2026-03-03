@@ -84,7 +84,16 @@ async function detectToolFromPioEnv(
   const targetArch = getChipTarget(board || envName, workspaceFolder);
   const isRiscV = isRiscVArch(targetArch);
 
-  // Check idedata for the environment — but validate tool matches expected arch
+  // Find GDB from PlatformIO tool packages (tool-riscv32-esp-elf-gdb / tool-xtensa-esp-elf-gdb)
+  const packagesDir = getPioPackagesDir();
+  if (packagesDir) {
+    const toolPath = findGdbPackage(packagesDir, isRiscV);
+    if (toolPath) {
+      return { toolPath, targetArch };
+    }
+  }
+
+  // Fallback: try idedata.json cc_path directory — validate tool matches expected arch
   const ideDataPath = path.join(workspaceFolder, '.pio', 'build', envName, 'idedata.json');
   if (fs.existsSync(ideDataPath)) {
     try {
@@ -94,7 +103,6 @@ async function detectToolFromPioEnv(
         const toolPath = findGdbInDir(toolDir);
         if (toolPath) {
           const toolIsRiscV = /riscv|risc-v/i.test(path.basename(toolPath));
-          // Only use this tool if it matches the expected arch
           if (toolIsRiscV === isRiscV) {
             return { toolPath, targetArch };
           }
@@ -103,18 +111,6 @@ async function detectToolFromPioEnv(
     } catch {
       // ignore parse errors
     }
-  }
-
-  // Fallback: scan PlatformIO packages for GDB tools
-  const packagesDir = getPioPackagesDir();
-  if (!packagesDir || !fs.existsSync(packagesDir)) {
-    return undefined;
-  }
-
-  // Find GDB tool in packages matching the target arch
-  const toolPath = await findGdbFromPackages(packagesDir, targetArch);
-  if (toolPath) {
-    return { toolPath, targetArch };
   }
 
   return undefined;
@@ -305,31 +301,48 @@ function findGdbInDir(dir: string): string | undefined {
 }
 
 /**
- * Find GDB tool from PlatformIO packages directory.
+ * Find GDB binary from PlatformIO tool packages by well-known package name.
+ * Looks for: tool-riscv32-esp-elf-gdb / tool-xtensa-esp-elf-gdb
+ * with binary: riscv32-esp-elf-gdb / xtensa-esp32-elf-gdb (+ .exe on Windows)
  */
-async function findGdbFromPackages(
-  packagesDir: string,
-  targetArch: string
-): Promise<string | undefined> {
+function findGdbPackage(packagesDir: string, isRiscV: boolean): string | undefined {
+  const isWindows = process.platform === 'win32';
+  const ext = isWindows ? '.exe' : '';
+
+  if (isRiscV) {
+    const gdbBin = path.join(packagesDir, 'tool-riscv32-esp-elf-gdb', 'bin', 'riscv32-esp-elf-gdb' + ext);
+    if (fs.existsSync(gdbBin)) {
+      return gdbBin;
+    }
+  } else {
+    // Xtensa: try the dedicated GDB tool package first
+    const gdbBin = path.join(packagesDir, 'tool-xtensa-esp-elf-gdb', 'bin', 'xtensa-esp32-elf-gdb' + ext);
+    if (fs.existsSync(gdbBin)) {
+      return gdbBin;
+    }
+    // Fallback: try xtensa-esp-elf-gdb package with generic binary name
+    const gdbBinAlt = path.join(packagesDir, 'tool-xtensa-esp-elf-gdb', 'bin');
+    const found = findGdbInDir(gdbBinAlt);
+    if (found) {
+      return found;
+    }
+  }
+
+  // Last resort: scan all tool-*gdb* packages
   try {
     const entries = fs.readdirSync(packagesDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) {
         continue;
       }
-
       const pkgName = entry.name.toLowerCase();
-      const isRiscV = targetArch !== 'xtensa';
-      const isToolchain =
-        pkgName.includes('toolchain') &&
-        (isRiscV
-          ? pkgName.includes('riscv') || pkgName.includes('risc-v')
-          : pkgName.includes('xtensa') || pkgName.includes('esp'));
-
-      if (!isToolchain) {
+      if (!pkgName.startsWith('tool-') || !pkgName.includes('gdb')) {
         continue;
       }
-
+      const pkgIsRiscV = pkgName.includes('riscv') || pkgName.includes('risc-v');
+      if (pkgIsRiscV !== isRiscV) {
+        continue;
+      }
       const binDir = path.join(packagesDir, entry.name, 'bin');
       const toolPath = findGdbInDir(binDir);
       if (toolPath) {
@@ -339,6 +352,7 @@ async function findGdbFromPackages(
   } catch {
     // ignore
   }
+
   return undefined;
 }
 
