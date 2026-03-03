@@ -103,9 +103,14 @@
           "enum": [
             "auto",
             "xtensa",
-            "riscv32"
+            "esp32c2",
+            "esp32c3",
+            "esp32c6",
+            "esp32h2",
+            "esp32h4",
+            "esp32p4"
           ],
-          "description": "Target architecture for decoding (auto will try to detect from ELF)"
+          "description": "Target architecture for decoding (auto will try to detect from ELF/board)"
         },
         "esp-decoder.serialMonitor.maxLines": {
           "type": "number",

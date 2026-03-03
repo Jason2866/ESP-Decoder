@@ -208,26 +208,29 @@ export async function decodeCrash(
 ): Promise<DecodedCrash> {
   const abortController = new AbortController();
 
+  if (!toolPath) {
+    console.warn('[ESP Decoder] No toolPath (GDB/addr2line) configured — returning raw decode');
+    return createRawDecode(crashEvent.rawText);
+  }
+
   try {
-    // Resolve target architecture
+    // Resolve target architecture to a value trbr understands
     const resolvedArch = resolveTargetArch(targetArch, crashEvent.kind);
 
-    // Build DecodeParams via trbr's createDecodeParams if we have a toolPath
+    // Build DecodeParams via trbr's createDecodeParams
     let params: any;
-    if (toolPath) {
-      try {
-        params = await createDecodeParams({
-          elfPath,
-          toolPath,
-          targetArch: resolvedArch as any,
-        });
-      } catch {
-        // Fallback to raw params
-        params = { elfPath, toolPath, targetArch: resolvedArch };
-      }
-    } else {
-      params = { elfPath, toolPath: '', targetArch: resolvedArch };
+    try {
+      params = await createDecodeParams({
+        elfPath,
+        toolPath,
+        targetArch: resolvedArch as any,
+      });
+    } catch (e) {
+      console.warn('[ESP Decoder] createDecodeParams failed, using raw params:', e);
+      params = { elfPath, toolPath, targetArch: resolvedArch };
     }
+
+    console.log('[ESP Decoder] Calling trbr decode with params:', JSON.stringify({ elfPath: params.elfPath, toolPath: params.toolPath, targetArch: params.targetArch }));
 
     // Use trbr's decode() with the crash text as input
     const result = await decode(params, crashEvent.rawText, {
@@ -238,24 +241,39 @@ export async function decodeCrash(
     return convertDecodeResult(result, crashEvent.rawText);
   } catch (err) {
     // If trbr decode fails, return a raw parse as fallback
-    console.error('trbr decode error:', err);
+    console.error('[ESP Decoder] trbr decode error:', err);
     return createRawDecode(crashEvent.rawText);
   }
 }
 
 /**
+ * Valid trbr target architectures.
+ */
+const VALID_TRBR_TARGETS = ['xtensa', 'esp32c2', 'esp32c3', 'esp32c6', 'esp32h2', 'esp32h4', 'esp32p4'] as const;
+
+/**
  * Resolve the target architecture from config and crash kind.
+ * Must return a value from trbr's supported arches:
+ *   'xtensa' | 'esp32c2' | 'esp32c3' | 'esp32c6' | 'esp32h2' | 'esp32h4' | 'esp32p4'
  */
 function resolveTargetArch(
   configArch: string | undefined,
   crashKind: 'xtensa' | 'riscv' | 'unknown'
 ): string {
   if (configArch && configArch !== 'auto') {
-    return configArch;
+    // Map legacy 'riscv32' to a concrete trbr target (default esp32c3)
+    if (configArch === 'riscv32') {
+      return 'esp32c3';
+    }
+    // Pass through if it's already a valid trbr target
+    if ((VALID_TRBR_TARGETS as readonly string[]).includes(configArch)) {
+      return configArch;
+    }
+    // Unknown arch, fall through to auto-detect
   }
   switch (crashKind) {
     case 'riscv':
-      return 'riscv32';
+      return 'esp32c3'; // default RISC-V target
     case 'xtensa':
       return 'xtensa';
     default:

@@ -132,26 +132,42 @@ export class EspDecoderWebviewPanel {
 
         // Auto-decode if configured
         if (this.config.elfPath) {
-          try {
-            const decoded = await decodeCrash(
-              event,
-              this.config.elfPath,
-              this.config.toolPath,
-              this.config.targetArch
-            );
-            event.decoded = decoded;
-            this.postMessage({
-              type: 'crashDecoded',
-              eventId: event.id,
-              decoded: this.serializeDecodedCrash(decoded),
-            });
-          } catch (err) {
+          if (!this.config.toolPath) {
+            this.log.appendLine('[ESP Decoder] Crash detected but no GDB/addr2line tool path configured — cannot decode');
             this.postMessage({
               type: 'crashDecodeError',
               eventId: event.id,
-              error: err instanceof Error ? err.message : String(err),
+              error: 'No GDB/addr2line tool path found. Select an ELF file from a PlatformIO environment or set esp-decoder.toolPath manually.',
             });
+          } else {
+            try {
+              const decoded = await decodeCrash(
+                event,
+                this.config.elfPath,
+                this.config.toolPath,
+                this.config.targetArch
+              );
+              event.decoded = decoded;
+              this.postMessage({
+                type: 'crashDecoded',
+                eventId: event.id,
+                decoded: this.serializeDecodedCrash(decoded),
+              });
+            } catch (err) {
+              this.postMessage({
+                type: 'crashDecodeError',
+                eventId: event.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
           }
+        } else {
+          this.log.appendLine('[ESP Decoder] Crash detected but no ELF file configured — cannot decode');
+          this.postMessage({
+            type: 'crashDecodeError',
+            eventId: event.id,
+            error: 'No ELF file configured. Use "ESP Decoder: Select ELF File" to select one.',
+          });
         }
       })
     );

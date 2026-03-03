@@ -108,7 +108,7 @@ async function detectToolFromPioEnv(
 
   // Determine arch from board/platform
   const isRiscV = isRiscVBoard(board, platform);
-  const targetArch = isRiscV ? 'riscv32' : 'xtensa';
+  const targetArch = isRiscV ? detectRiscVTarget(board) : 'xtensa';
 
   // Find GDB tool in packages
   const toolPath = await findGdbFromPackages(packagesDir, targetArch);
@@ -206,9 +206,27 @@ function findGdbInDir(dir: string): string | undefined {
 function detectArchFromToolPath(toolPath: string): string {
   const name = path.basename(toolPath).toLowerCase();
   if (name.includes('riscv') || name.includes('risc-v')) {
-    return 'riscv32';
+    return 'esp32c3'; // default RISC-V target for trbr
   }
   return 'xtensa';
+}
+
+/**
+ * Detect specific RISC-V target from board name for trbr.
+ * trbr expects: 'esp32c2' | 'esp32c3' | 'esp32c6' | 'esp32h2' | 'esp32h4' | 'esp32p4'
+ */
+function detectRiscVTarget(board?: string): string {
+  if (!board) {
+    return 'esp32c3';
+  }
+  const boardLower = board.toLowerCase();
+  const targets = ['esp32c2', 'esp32c3', 'esp32c5', 'esp32c6', 'esp32h2', 'esp32p4'];
+  for (const target of targets) {
+    if (boardLower.includes(target)) {
+      return target;
+    }
+  }
+  return 'esp32c3'; // default RISC-V target
 }
 
 /**
@@ -226,9 +244,10 @@ async function findGdbFromPackages(
       }
 
       const pkgName = entry.name.toLowerCase();
+      const isRiscV = targetArch !== 'xtensa';
       const isToolchain =
         pkgName.includes('toolchain') &&
-        (targetArch === 'riscv32'
+        (isRiscV
           ? pkgName.includes('riscv') || pkgName.includes('risc-v')
           : pkgName.includes('xtensa') || pkgName.includes('esp'));
 
