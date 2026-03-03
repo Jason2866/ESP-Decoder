@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "Jason2866",
   "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Jason2866/ESP-Decoder.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },

@@ -1,18 +1,4 @@
-# ===========================================
-# Ignore everything from the old trbr project.
-# Only vscode-extension/ (ESP Decoder) is kept.
-# ===========================================
-
-# Ignore ALL files in the repo root by default
-/*
-
-# …but keep these:
-!.gitignore
-!LICENSE
-!vscode-extension/
-
-# ----- Generic ignores inside vscode-extension -----
-vscode-extension/node_modules/
-vscode-extension/dist/
-vscode-extension/*.vsix
+node_modules/
+dist/
+*.vsix
 .DS_Store
