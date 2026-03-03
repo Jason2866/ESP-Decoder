@@ -29,7 +29,7 @@
     "riscv",
     "trbr"
   ],
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
@@ -118,31 +118,13 @@
           "description": "Automatically scroll to bottom on new serial data"
         }
       }
-    },
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "esp-decoder-sidebar",
-          "title": "ESP Decoder",
-          "icon": "$(bug)"
-        }
-      ]
-    },
-    "views": {
-      "esp-decoder-sidebar": [
-        {
-          "type": "webview",
-          "id": "esp-decoder.sidebarView",
-          "name": "Crash Events"
-        }
-      ]
     }
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
-    "package": "npx @vscode/vsce package --no-dependencies",
+    "package": "npx @vscode/vsce package",
     "lint": "eslint src"
   },
   "dependencies": {

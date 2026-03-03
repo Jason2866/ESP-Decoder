@@ -287,7 +287,7 @@ export async function selectElfFile(
 
   const picked = await vscode.window.showQuickPick(items, {
     placeHolder: 'Select PlatformIO environment or ELF file',
-    title: 'TRBR: Select ELF File',
+    title: 'ESP Decoder: Select ELF File',
   });
 
   if (!picked) {

@@ -8,15 +8,16 @@ interface SessionConfig {
   targetArch?: string;
 }
 
-export class TrbrWebviewPanel {
+export class EspDecoderWebviewPanel {
   public static readonly viewType = 'esp-decoder.monitorPanel';
-  private static currentPanel: TrbrWebviewPanel | undefined;
+  private static currentPanel: EspDecoderWebviewPanel | undefined;
 
   private readonly panel: vscode.WebviewPanel;
   private readonly extensionUri: vscode.Uri;
   private readonly serialManager: SerialPortManager;
   private readonly crashDetector: CrashDetector;
   private readonly disposables: vscode.Disposable[] = [];
+  private readonly log: vscode.OutputChannel;
 
   private serialLines: string[] = [];
   private crashEvents: CrashEvent[] = [];
@@ -26,25 +27,26 @@ export class TrbrWebviewPanel {
   public static createOrShow(
     extensionUri: vscode.Uri,
     serialManager: SerialPortManager,
-    config?: SessionConfig
-  ): TrbrWebviewPanel {
+    config?: SessionConfig,
+    outputChannel?: vscode.OutputChannel
+  ): EspDecoderWebviewPanel {
     const column = vscode.window.activeTextEditor
       ? vscode.window.activeTextEditor.viewColumn
       : undefined;
 
-    if (TrbrWebviewPanel.currentPanel) {
-      TrbrWebviewPanel.currentPanel.panel.reveal(column);
+    if (EspDecoderWebviewPanel.currentPanel) {
+      EspDecoderWebviewPanel.currentPanel.panel.reveal(column);
       if (config) {
-        TrbrWebviewPanel.currentPanel.config = {
-          ...TrbrWebviewPanel.currentPanel.config,
+        EspDecoderWebviewPanel.currentPanel.config = {
+          ...EspDecoderWebviewPanel.currentPanel.config,
           ...config,
         };
       }
-      return TrbrWebviewPanel.currentPanel;
+      return EspDecoderWebviewPanel.currentPanel;
     }
 
     const panel = vscode.window.createWebviewPanel(
-      TrbrWebviewPanel.viewType,
+      EspDecoderWebviewPanel.viewType,
       'ESP Decoder — Crash Monitor',
       column || vscode.ViewColumn.One,
       {
@@ -54,32 +56,45 @@ export class TrbrWebviewPanel {
       }
     );
 
-    TrbrWebviewPanel.currentPanel = new TrbrWebviewPanel(
+    EspDecoderWebviewPanel.currentPanel = new EspDecoderWebviewPanel(
       panel,
       extensionUri,
       serialManager,
-      config
+      config,
+      outputChannel
     );
-    return TrbrWebviewPanel.currentPanel;
+    return EspDecoderWebviewPanel.currentPanel;
   }
 
   private constructor(
     panel: vscode.WebviewPanel,
     extensionUri: vscode.Uri,
     serialManager: SerialPortManager,
-    config?: SessionConfig
+    config?: SessionConfig,
+    outputChannel?: vscode.OutputChannel
   ) {
     this.panel = panel;
     this.extensionUri = extensionUri;
     this.serialManager = serialManager;
     this.crashDetector = new CrashDetector();
     this.config = config || {};
+    this.log = outputChannel || vscode.window.createOutputChannel('ESP Decoder');
 
     this.panel.webview.html = this.getHtmlContent();
 
     // Handle messages from webview
     this.panel.webview.onDidReceiveMessage(
-      (message) => this.handleMessage(message),
+      (message) => {
+        this.log.appendLine(`[Webview → Extension] message: ${JSON.stringify(message)}`);
+        this.handleMessage(message).catch((err) => {
+          this.log.appendLine(`[ERROR] message handler error: ${err}`);
+          this.postMessage({
+            type: 'error',
+            message: err instanceof Error ? err.message : String(err),
+          });
+          this.syncState();
+        });
+      },
       null,
       this.disposables
     );
@@ -146,6 +161,10 @@ export class TrbrWebviewPanel {
   }
 
   private sendInitialState(): void {
+    this.syncState();
+  }
+
+  private syncState(): void {
     this.postMessage({
       type: 'initialState',
       connected: this.serialManager.isConnected,
@@ -195,27 +214,67 @@ export class TrbrWebviewPanel {
   }
 
   private async handleMessage(message: any): Promise<void> {
+    this.log.appendLine(`handleMessage: ${message.type}`);
     switch (message.type) {
-      case 'connect':
-        await this.serialManager.connect();
+      case 'connect': {
+        try {
+          this.log.appendLine(`connect: selectedPath=${this.serialManager.selectedPath || '(none)'}`);
+          if (!this.serialManager.selectedPath) {
+            const port = await this.serialManager.selectPort();
+            if (!port) {
+              this.postMessage({
+                type: 'error',
+                message: 'No serial port selected. Please select a port first.',
+              });
+              this.syncState();
+              break;
+            }
+            this.postMessage({ type: 'portSelected', port });
+          }
+          const success = await this.serialManager.connect();
+          if (!success) {
+            this.postMessage({
+              type: 'error',
+              message: `Failed to connect to ${this.serialManager.selectedPath || 'unknown port'}.`,
+            });
+          }
+        } catch (err) {
+          this.postMessage({
+            type: 'error',
+            message: `Connect error: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+        this.syncState();
         break;
-      case 'disconnect':
-        await this.serialManager.disconnect();
+      }
+      case 'disconnect': {
+        try {
+          await this.serialManager.disconnect();
+        } catch (err) {
+          this.postMessage({
+            type: 'error',
+            message: `Disconnect error: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+        this.syncState();
         break;
-      case 'selectPort':
-        await this.serialManager.selectPort();
-        this.postMessage({
-          type: 'portSelected',
-          port: this.serialManager.selectedPath,
-        });
+      }
+      case 'selectPort': {
+        const port = await this.serialManager.selectPort();
+        this.syncState();
+        if (port) {
+          this.postMessage({ type: 'portSelected', port });
+        }
         break;
-      case 'selectBaudRate':
-        await this.serialManager.selectBaudRate();
-        this.postMessage({
-          type: 'baudRateSelected',
-          baudRate: this.serialManager.baudRate,
-        });
+      }
+      case 'selectBaudRate': {
+        const rate = await this.serialManager.selectBaudRate();
+        this.syncState();
+        if (rate) {
+          this.postMessage({ type: 'baudRateSelected', baudRate: rate });
+        }
         break;
+      }
       case 'selectElf':
         await vscode.commands.executeCommand('esp-decoder.selectElfFile');
         break;
@@ -309,7 +368,7 @@ export class TrbrWebviewPanel {
   }
 
   public dispose(): void {
-    TrbrWebviewPanel.currentPanel = undefined;
+    EspDecoderWebviewPanel.currentPanel = undefined;
     this.crashDetector.dispose();
     this.panel.dispose();
     while (this.disposables.length) {
@@ -789,8 +848,29 @@ export class TrbrWebviewPanel {
       });
     });
 
+    // Event delegation for dynamic elements (crash headers, file links)
+    document.addEventListener('click', function(e) {
+      var target = e.target;
+      // Crash header click - toggle expand
+      var header = target.closest('.crash-header');
+      if (header) {
+        var crashId = header.getAttribute('data-crash-id');
+        if (crashId) { toggleCrash(crashId); }
+        return;
+      }
+      // File link click - open in editor
+      var fileLink = target.closest('.frame-file');
+      if (fileLink) {
+        var file = fileLink.getAttribute('data-file');
+        var line = fileLink.getAttribute('data-line');
+        if (file && line) { openFile(file, line); }
+        return;
+      }
+    });
+
     // Button handlers
     document.getElementById('btn-port').addEventListener('click', () => {
+      console.log('[ESP Decoder Webview] Port button clicked');
       vscode.postMessage({ type: 'selectPort' });
     });
 
@@ -799,10 +879,14 @@ export class TrbrWebviewPanel {
     });
 
     document.getElementById('btn-connect').addEventListener('click', () => {
+      console.log('[ESP Decoder Webview] Connect button clicked');
+      document.getElementById('btn-connect').textContent = 'Connecting...';
+      document.getElementById('btn-connect').disabled = true;
       vscode.postMessage({ type: 'connect' });
     });
 
     document.getElementById('btn-disconnect').addEventListener('click', () => {
+      console.log('[ESP Decoder Webview] Disconnect button clicked');
       vscode.postMessage({ type: 'disconnect' });
     });
 
@@ -875,8 +959,21 @@ export class TrbrWebviewPanel {
           updateConnectionState(msg.connected, msg.port, msg.baudRate);
           updateConfigDisplay(msg);
           break;
+        case 'error':
+          appendError(msg.message);
+          break;
       }
     });
+
+    function appendError(text) {
+      const span = document.createElement('span');
+      span.style.color = 'var(--error-fg)';
+      span.textContent = '[ERROR] ' + text + '\\n';
+      serialOutput.appendChild(span);
+      if (autoscroll) {
+        serialOutput.scrollTop = serialOutput.scrollHeight;
+      }
+    }
 
     function appendSerialData(text) {
       const span = document.createElement('span');
@@ -894,6 +991,7 @@ export class TrbrWebviewPanel {
     }
 
     function updateConnectionState(isConnected, port, baudRate) {
+      console.log('[ESP Decoder Webview] updateConnectionState:', isConnected, port, baudRate);
       connected = isConnected;
       const dot = document.getElementById('status-dot');
       const text = document.getElementById('status-text');
@@ -903,11 +1001,13 @@ export class TrbrWebviewPanel {
       if (isConnected) {
         dot.className = 'status-indicator connected';
         text.textContent = 'Connected: ' + (port || '?') + ' @ ' + (baudRate || '?');
+        btnConnect.textContent = 'Connect';
         btnConnect.disabled = true;
         btnDisconnect.disabled = false;
       } else {
         dot.className = 'status-indicator disconnected';
         text.textContent = 'Disconnected';
+        btnConnect.textContent = 'Connect';
         btnConnect.disabled = false;
         btnDisconnect.disabled = true;
       }
@@ -922,7 +1022,8 @@ export class TrbrWebviewPanel {
 
     function updateConfigDisplay(config) {
       if (config.elfPath) {
-        const name = config.elfPath.split('/').pop().split('\\\\').pop();
+        var parts = config.elfPath.split('/');
+        var name = parts[parts.length - 1];
         document.getElementById('btn-elf').textContent = 'ELF: ' + name;
         document.getElementById('btn-elf').title = config.elfPath;
       }
@@ -943,24 +1044,28 @@ export class TrbrWebviewPanel {
 
       const time = new Date(event.timestamp).toLocaleTimeString();
 
-      el.innerHTML = \`
-        <div class="crash-header" onclick="toggleCrash('\${event.id}')">
-          <div class="crash-title">
-            <span class="crash-kind">\${escapeHtml(event.kind)}</span>
-            <span>\${escapeHtml(event.id)}</span>
-          </div>
-          <span class="crash-time">\${time}</span>
-        </div>
-        <div class="crash-body">
-          <div class="crash-section">
-            <div class="crash-section-title">Raw Crash Output</div>
-            <div class="raw-output">\${escapeHtml(event.rawText)}</div>
-          </div>
-          <div id="decode-section-\${event.id}">
-            <div class="decode-status">Decoding...</div>
-          </div>
-        </div>
-      \`;
+      el.innerHTML = 
+        '<div class="crash-header" data-crash-id="' + event.id + '">' +
+          '<div class="crash-title">' +
+            '<span class="crash-kind">' + escapeHtml(event.kind) + '</span>' +
+            '<span>' + escapeHtml(event.id) + '</span>' +
+          '</div>' +
+          '<span class="crash-time">' + time + '</span>' +
+        '</div>' +
+        '<div class="crash-body">' +
+          '<div class="crash-section">' +
+            '<div class="crash-section-title">Raw Crash Output</div>' +
+            '<div class="raw-output">' + escapeHtml(event.rawText) + '</div>' +
+          '</div>' +
+          '<div id="decode-section-' + event.id + '">' +
+            '<div class="decode-status">Decoding...</div>' +
+          '</div>' +
+        '</div>';
+
+      // Use event delegation for crash header clicks
+      el.querySelector('.crash-header').addEventListener('click', function() {
+        toggleCrash(event.id);
+      });
 
       crashList.insertBefore(el, crashList.firstChild);
 
@@ -1017,10 +1122,10 @@ export class TrbrWebviewPanel {
           html += '<td class="frame-func">' + escapeHtml(frame.function || '??') + '</td>';
 
           if (frame.file && frame.line) {
-            const shortFile = frame.file.split('/').pop().split('\\\\').pop();
-            html += '<td><span class="frame-file" onclick="openFile(\'' +
-              escapeAttr(frame.file) + "', '" + escapeAttr(frame.line) +
-              '\\')">' + escapeHtml(shortFile + ':' + frame.line) + '</span></td>';
+            const shortFile = frame.file.split('/').pop();
+            html += '<td><span class="frame-file" data-file="' +
+              escapeHtml(frame.file) + '" data-line="' + escapeHtml(frame.line) +
+              '">' + escapeHtml(shortFile + ':' + frame.line) + '</span></td>';
           } else if (frame.file) {
             html += '<td>' + escapeHtml(frame.file) + '</td>';
           } else {
@@ -1073,7 +1178,7 @@ export class TrbrWebviewPanel {
 
     function escapeAttr(text) {
       if (!text) return '';
-      return String(text).replace(/'/g, "\\\\'").replace(/"/g, '&quot;');
+      return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
     }
   </script>
 </body>

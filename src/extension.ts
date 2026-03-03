@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
-import { TrbrWebviewPanel } from './webviewPanel';
+import { EspDecoderWebviewPanel } from './webviewPanel';
 import { selectElfFile } from './pioIntegration';
 
 let serialManager: SerialPortManager;
-let currentPanel: TrbrWebviewPanel | undefined;
+let currentPanel: EspDecoderWebviewPanel | undefined;
+let outputChannel: vscode.OutputChannel;
 
 // Session state
 let sessionConfig: {
@@ -14,7 +15,18 @@ let sessionConfig: {
 } = {};
 
 export function activate(context: vscode.ExtensionContext) {
-  serialManager = new SerialPortManager();
+  outputChannel = vscode.window.createOutputChannel('ESP Decoder');
+  context.subscriptions.push(outputChannel);
+  outputChannel.appendLine('ESP Decoder activating...');
+
+  try {
+    serialManager = new SerialPortManager();
+    outputChannel.appendLine('SerialPortManager created successfully');
+  } catch (err) {
+    outputChannel.appendLine(`FATAL: Failed to create SerialPortManager: ${err}`);
+    vscode.window.showErrorMessage(`ESP Decoder: Failed to initialize serial port manager: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
   context.subscriptions.push(serialManager);
 
   // Status bar items
@@ -32,7 +44,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.StatusBarAlignment.Left,
     99
   );
-  statusBarConnection.command = 'trbr.connect';
+  statusBarConnection.command = 'esp-decoder.connect';
   statusBarConnection.text = '$(circle-slash) Disconnected';
   statusBarConnection.tooltip = 'Connect/Disconnect serial port';
   statusBarConnection.show();
@@ -53,10 +65,12 @@ export function activate(context: vscode.ExtensionContext) {
   // Register commands
   context.subscriptions.push(
     vscode.commands.registerCommand('esp-decoder.openMonitor', () => {
-      currentPanel = TrbrWebviewPanel.createOrShow(
+      outputChannel.appendLine('Opening monitor panel...');
+      currentPanel = EspDecoderWebviewPanel.createOrShow(
         context.extensionUri,
         serialManager,
-        sessionConfig
+        sessionConfig,
+        outputChannel
       );
     })
   );
@@ -78,10 +92,21 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('esp-decoder.connect', async () => {
-      const success = await serialManager.connect();
-      if (success) {
-        vscode.window.showInformationMessage(
-          `Connected to ${serialManager.selectedPath} @ ${serialManager.baudRate}`
+      try {
+        outputChannel.appendLine(`Connecting to ${serialManager.selectedPath || '(no port)'} @ ${serialManager.baudRate}...`);
+        const success = await serialManager.connect();
+        if (success) {
+          outputChannel.appendLine(`Connected successfully to ${serialManager.selectedPath}`);
+          vscode.window.showInformationMessage(
+            `Connected to ${serialManager.selectedPath} @ ${serialManager.baudRate}`
+          );
+        } else {
+          outputChannel.appendLine('Connection returned false');
+        }
+      } catch (err) {
+        outputChannel.appendLine(`Connection error: ${err}`);
+        vscode.window.showErrorMessage(
+          `Connection failed: ${err instanceof Error ? err.message : String(err)}`
         );
       }
     })
@@ -89,8 +114,14 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('esp-decoder.disconnect', async () => {
-      await serialManager.disconnect();
-      vscode.window.showInformationMessage('Serial port disconnected');
+      try {
+        await serialManager.disconnect();
+        vscode.window.showInformationMessage('Serial port disconnected');
+      } catch (err) {
+        vscode.window.showErrorMessage(
+          `Disconnect failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
     })
   );
 
