@@ -66,7 +66,25 @@ async function detectToolFromPioEnv(
   workspaceFolder: string,
   envName: string
 ): Promise<DetectedTool | undefined> {
-  // Check idedata for the environment
+  // First, determine the target arch from platformio.ini board info
+  let board: string | undefined;
+  let platform: string | undefined;
+
+  const platformIniPath = path.join(workspaceFolder, 'platformio.ini');
+  if (fs.existsSync(platformIniPath)) {
+    const iniContent = fs.readFileSync(platformIniPath, 'utf8');
+    const envSection = extractEnvSection(iniContent, envName);
+    if (envSection) {
+      board = extractIniValue(envSection, 'board');
+      platform = extractIniValue(envSection, 'platform');
+    }
+  }
+
+  // Determine target arch from board JSON (MCU) or board/env name
+  const targetArch = getChipTarget(board || envName, workspaceFolder);
+  const isRiscV = isRiscVArch(targetArch);
+
+  // Check idedata for the environment — but validate tool matches expected arch
   const ideDataPath = path.join(workspaceFolder, '.pio', 'build', envName, 'idedata.json');
   if (fs.existsSync(ideDataPath)) {
     try {
@@ -75,8 +93,11 @@ async function detectToolFromPioEnv(
         const toolDir = path.dirname(ideData.cc_path);
         const toolPath = findGdbInDir(toolDir);
         if (toolPath) {
-          const arch = detectArchFromToolPath(toolPath);
-          return { toolPath, targetArch: arch };
+          const toolIsRiscV = /riscv|risc-v/i.test(path.basename(toolPath));
+          // Only use this tool if it matches the expected arch
+          if (toolIsRiscV === isRiscV) {
+            return { toolPath, targetArch };
+          }
         }
       }
     } catch {
@@ -90,27 +111,7 @@ async function detectToolFromPioEnv(
     return undefined;
   }
 
-  // Try to determine the platform from platformio.ini
-  const platformIniPath = path.join(workspaceFolder, 'platformio.ini');
-  if (!fs.existsSync(platformIniPath)) {
-    return undefined;
-  }
-
-  const iniContent = fs.readFileSync(platformIniPath, 'utf8');
-  const envSection = extractEnvSection(iniContent, envName);
-  if (!envSection) {
-    return undefined;
-  }
-
-  const framework = extractIniValue(envSection, 'framework');
-  const board = extractIniValue(envSection, 'board');
-  const platform = extractIniValue(envSection, 'platform');
-
-  // Determine arch from board/platform
-  const isRiscV = isRiscVBoard(board, platform);
-  const targetArch = isRiscV ? detectRiscVTarget(board) : 'xtensa';
-
-  // Find GDB tool in packages
+  // Find GDB tool in packages matching the target arch
   const toolPath = await findGdbFromPackages(packagesDir, targetArch);
   if (toolPath) {
     return { toolPath, targetArch };
@@ -120,13 +121,13 @@ async function detectToolFromPioEnv(
 }
 
 /**
- * Get PlatformIO packages directory.
+ * Get PlatformIO core directory (~/.platformio or ~/.pioarduino).
  */
-function getPioPackagesDir(): string | undefined {
+function getPioCoreDir(): string | undefined {
   const homeDir = os.homedir();
   const candidates = [
-    path.join(homeDir, '.platformio', 'packages'),
-    path.join(homeDir, '.pioarduino', 'packages'),
+    path.join(homeDir, '.platformio'),
+    path.join(homeDir, '.pioarduino'),
   ];
 
   for (const dir of candidates) {
@@ -135,6 +136,18 @@ function getPioPackagesDir(): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Get PlatformIO packages directory.
+ */
+function getPioPackagesDir(): string | undefined {
+  const coreDir = getPioCoreDir();
+  if (!coreDir) {
+    return undefined;
+  }
+  const packagesDir = path.join(coreDir, 'packages');
+  return fs.existsSync(packagesDir) ? packagesDir : undefined;
 }
 
 /**
@@ -160,22 +173,113 @@ function extractIniValue(section: string, key: string): string | undefined {
 }
 
 /**
- * Determine if a board is RISC-V based.
+ * Map of chip key → trbr target arch.
+ * Keys are sorted longest-first during lookup so "esp32s3" isn't confused with "esp32".
  */
-function isRiscVBoard(board?: string, platform?: string): boolean {
-  if (!board) {
-    return false;
+const CHIP_TARGET_MAP: Record<string, string> = {
+  'esp32s3': 'xtensa',
+  'esp32s2': 'xtensa',
+  'esp32c2': 'esp32c2',
+  'esp32c3': 'esp32c3',
+  'esp32c5': 'esp32c3',  // no dedicated trbr target, closest match
+  'esp32c6': 'esp32c6',
+  'esp32h2': 'esp32h2',
+  'esp32h4': 'esp32h4',
+  'esp32p4': 'esp32p4',
+  'esp8266': 'xtensa',
+  'esp32':   'xtensa',
+};
+
+const RISCV_TARGETS = new Set(['esp32c2', 'esp32c3', 'esp32c5', 'esp32c6', 'esp32h2', 'esp32h4', 'esp32p4']);
+
+/**
+ * Determine the chip name (trbr target arch) from a board name by reading its
+ * board JSON from PlatformIO's boards directories.
+ *
+ * Falls back to matching against the board/env name directly.
+ * Longest chip keys are compared first so that "esp32s3" is not confused with "esp32".
+ */
+function getChipTarget(boardName: string | undefined, workspaceFolder?: string): string {
+  const sortedKeys = Object.keys(CHIP_TARGET_MAP).sort((a, b) => b.length - a.length);
+
+  // Try reading MCU from board JSON
+  if (boardName) {
+    const mcu = readBoardMcu(boardName, workspaceFolder);
+    if (mcu) {
+      const mcuNorm = mcu.toLowerCase().replace(/[-_]/g, '');
+      for (const key of sortedKeys) {
+        if (mcuNorm.includes(key)) {
+          return CHIP_TARGET_MAP[key];
+        }
+      }
+    }
+
+    // Fallback: match against the board name itself
+    const boardNorm = boardName.toLowerCase().replace(/[-_]/g, '');
+    for (const key of sortedKeys) {
+      if (boardNorm.includes(key)) {
+        return CHIP_TARGET_MAP[key];
+      }
+    }
   }
-  const riscvBoards = [
-    'esp32c3',
-    'esp32c6',
-    'esp32h2',
-    'esp32c2',
-    'esp32c5',
-    'esp32p4',
-  ];
-  const boardLower = board.toLowerCase();
-  return riscvBoards.some((rb) => boardLower.includes(rb));
+
+  return 'xtensa'; // default to esp32 (xtensa)
+}
+
+/**
+ * Read the build.mcu field from a PlatformIO board JSON file.
+ * Searches project boards_dir, then PlatformIO core boards directory.
+ */
+function readBoardMcu(boardName: string, workspaceFolder?: string): string | undefined {
+  const boardsDirs: string[] = [];
+
+  // Project-local boards directory
+  if (workspaceFolder) {
+    boardsDirs.push(path.join(workspaceFolder, 'boards'));
+  }
+
+  // PlatformIO/pioarduino core boards directory
+  const coreDir = getPioCoreDir();
+  if (coreDir) {
+    boardsDirs.push(path.join(coreDir, 'boards'));
+    // Also check inside platforms for board definitions
+    const platformsDir = path.join(coreDir, 'platforms');
+    if (fs.existsSync(platformsDir)) {
+      try {
+        for (const plat of fs.readdirSync(platformsDir, { withFileTypes: true })) {
+          if (plat.isDirectory()) {
+            boardsDirs.push(path.join(platformsDir, plat.name, 'boards'));
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  for (const dir of boardsDirs) {
+    const boardJson = path.join(dir, boardName + '.json');
+    if (fs.existsSync(boardJson)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(boardJson, 'utf8'));
+        const mcu = data?.build?.mcu;
+        if (typeof mcu === 'string' && mcu) {
+          return mcu;
+        }
+      } catch {
+        // ignore parse errors
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Check if a trbr target arch is RISC-V.
+ */
+function isRiscVArch(targetArch: string): boolean {
+  return RISCV_TARGETS.has(targetArch);
 }
 
 /**
@@ -198,35 +302,6 @@ function findGdbInDir(dir: string): string | undefined {
     // ignore
   }
   return undefined;
-}
-
-/**
- * Detect architecture from tool path name.
- */
-function detectArchFromToolPath(toolPath: string): string {
-  const name = path.basename(toolPath).toLowerCase();
-  if (name.includes('riscv') || name.includes('risc-v')) {
-    return 'esp32c3'; // default RISC-V target for trbr
-  }
-  return 'xtensa';
-}
-
-/**
- * Detect specific RISC-V target from board name for trbr.
- * trbr expects: 'esp32c2' | 'esp32c3' | 'esp32c6' | 'esp32h2' | 'esp32h4' | 'esp32p4'
- */
-function detectRiscVTarget(board?: string): string {
-  if (!board) {
-    return 'esp32c3';
-  }
-  const boardLower = board.toLowerCase();
-  const targets = ['esp32c2', 'esp32c3', 'esp32c5', 'esp32c6', 'esp32h2', 'esp32p4'];
-  for (const target of targets) {
-    if (boardLower.includes(target)) {
-      return target;
-    }
-  }
-  return 'esp32c3'; // default RISC-V target
 }
 
 /**
