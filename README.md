@@ -2,7 +2,7 @@
 
 Decode ESP32/ESP8266 crash dumps directly from the serial port in VS Code.  
 Powered by [TraceBreaker (trbr)](https://github.com/dankeboy36/trbr) as a library dependency.  
-Designed to work with **PlatformIO** and **pioarduino**.
+Designed to work with **pioarduino**.
 
 ## Features
 
@@ -63,7 +63,7 @@ Designed to work with **PlatformIO** and **pioarduino**.
 The extension auto-detects:
 
 - **ELF file**: `<workspace>/.pio/build/<env>/firmware.elf`
-- **Toolchain**: From PlatformIO packages (`~/.platformio/packages/` or `~/.pioarduino/packages/`)
+- **Toolchain**: From PlatformIO packages (`~/.platformio/packages/`)
 - **Architecture**: From board configuration in `platformio.ini`
 
 Make sure you have built your project at least once before connecting the monitor.
