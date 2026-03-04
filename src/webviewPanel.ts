@@ -148,13 +148,6 @@ export class EspDecoderWebviewPanel {
                 this.config.targetArch
               );
               event.decoded = decoded;
-              
-              // Send decoded output to serial monitor
-              this.postMessage({
-                type: 'serialData',
-                data: '\n\n========== DECODED CRASH ==========\n' + decoded.rawOutput + '\n===================================\n\n'
-              });
-              
               this.postMessage({
                 type: 'crashDecoded',
                 eventId: event.id,
@@ -1107,6 +1100,12 @@ export class EspDecoderWebviewPanel {
       const section = document.getElementById('decode-section-' + eventId);
       if (!section) return;
 
+      // Auto-expand the crash event when decoded data arrives
+      const crashEl = document.getElementById('crash-' + eventId);
+      if (crashEl && !crashEl.classList.contains('expanded')) {
+        crashEl.classList.add('expanded');
+      }
+
       let html = '';
 
       // Fault info
@@ -1175,6 +1174,14 @@ export class EspDecoderWebviewPanel {
         html += '</div></div>';
       }
 
+      // Show raw decoded output from trbr
+      if (decoded.rawOutput) {
+        html += '<div class="crash-section">';
+        html += '<div class="crash-section-title">Decoded Output</div>';
+        html += '<div class="raw-output">' + escapeHtml(decoded.rawOutput) + '</div>';
+        html += '</div>';
+      }
+
       if (!html) {
         html = '<div class="decode-status">No decoded information available</div>';
       }
@@ -1185,6 +1192,13 @@ export class EspDecoderWebviewPanel {
     function updateCrashError(eventId, error) {
       const section = document.getElementById('decode-section-' + eventId);
       if (!section) return;
+
+      // Auto-expand so user sees the error
+      const crashEl = document.getElementById('crash-' + eventId);
+      if (crashEl && !crashEl.classList.contains('expanded')) {
+        crashEl.classList.add('expanded');
+      }
+
       section.innerHTML = '<div class="decode-error">Decode error: ' + escapeHtml(error) + '</div>';
     }
 
