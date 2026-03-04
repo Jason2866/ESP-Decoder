@@ -411,7 +411,7 @@ function extractStackCandidateAddresses(crashText: string): string[] {
 /**
  * Derive the addr2line binary path from a GDB binary path.
  *
- * Strategy (mirrors exec_decode.py's setup_paths approach):
+ * Strategy (mirrors pioarduino/filter_exception_decoder.py's setup_paths approach):
  *   1. Replace '-gdb' with '-addr2line' in the filename and check the same directory.
  *   2. Navigate up to the PlatformIO packages directory and search toolchain-* packages
  *      for a matching addr2line binary.
@@ -458,7 +458,8 @@ function deriveAddr2linePath(gdbPath: string, log?: DecodeLogger): string | unde
 }
 
 /**
- * Regex matching addr2line address header lines (same as exec_decode.py _ADDR2LINE_HEADER_RE).
+ * Regex matching addr2line address header lines
+ * (same as pioarduino/filter_exception_decoder.py's _ADDR2LINE_HEADER_RE).
  */
 const ADDR2LINE_HEADER_RE = /^0x[0-9a-fA-F]+$/;
 
@@ -470,7 +471,7 @@ const DISCRIMINATOR_RE = /\s*\(discriminator \d+\)/;
 /**
  * Resolve candidate addresses to function/file/line using addr2line in batch mode.
  *
- * Uses the same `-fiaC` flags and output parsing as exec_decode.py's _decode_batch().
+ * Uses the same `-fiaC` flags and output parsing as pioarduino/filter_exception_decoder.py's _decode_batch().
  * Each address is decremented by 1 (return-address convention) so addr2line reports
  * the call site instead of the instruction after the call.
  *
@@ -489,7 +490,7 @@ async function resolveAddressesViaAddr2line(
   // Limit to 200 addresses to keep command-line length reasonable
   const addrs = candidateAddrs.slice(0, 200);
 
-  // Decrement each address by 1 (return-address → call-site, like exec_decode.py)
+  // Decrement each address by 1 (return-address → call-site, like pioarduino/filter_exception_decoder.py)
   const lookupAddrs = addrs.map(a => {
     const val = parseInt(a, 16) - 1;
     return `0x${(val >>> 0).toString(16).padStart(8, '0')}`;
@@ -504,7 +505,7 @@ async function resolveAddressesViaAddr2line(
       `[ESP Decoder] addr2line batch: ${stdout.length} chars output for ${addrs.length} addresses`
     );
 
-    // Parse output using exec_decode.py's state-machine approach:
+    // Parse output using pioarduino/filter_exception_decoder.py's state-machine approach:
     //   Split into sections by address header lines (0x...),
     //   then parse function / file:line pairs from each section body.
     const rawLines = stdout.split('\n');
@@ -532,7 +533,7 @@ async function resolveAddressesViaAddr2line(
       const originalAddr = addrs[i];
       const body = bodySections[i];
 
-      // Parse function / file:line pairs (same logic as exec_decode.py _finalize_batch_entry)
+      // Parse function / file:line pairs (same logic as pioarduino/filter_exception_decoder.py's _finalize_batch_entry)
       let j = 0;
       let funcName: string | undefined;
       let file: string | undefined;
@@ -674,7 +675,7 @@ async function enhanceWithHeuristicStackFrames(
     `[ESP Decoder] RISC-V heuristic: only ${decoded.stacktrace.length} GDB frames — resolving ${newAddrs.length} candidate stack addresses`
   );
 
-  // Prefer addr2line (fast, like exec_decode.py) — fall back to GDB batch if not found
+  // Prefer addr2line (fast, like pioarduino/filter_exception_decoder.py) — fall back to GDB batch if not found
   let heuristicFrames: StackFrame[] = [];
   const addr2linePath = deriveAddr2linePath(toolPath, log);
 
