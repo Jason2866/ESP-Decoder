@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
-import { CrashDetector, CrashEvent, DecodedCrash, decodeCrash } from './crashDecoder';
+import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash } from './crashDecoder';
 
 interface SessionConfig {
   elfPath?: string;
@@ -15,7 +15,7 @@ export class EspDecoderWebviewPanel {
   private readonly panel: vscode.WebviewPanel;
   private readonly extensionUri: vscode.Uri;
   private readonly serialManager: SerialPortManager;
-  private readonly crashDetector: CrashDetector;
+  private readonly crashCapturer: TrbrCrashCapturer;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly log: vscode.OutputChannel;
 
@@ -76,7 +76,7 @@ export class EspDecoderWebviewPanel {
     this.panel = panel;
     this.extensionUri = extensionUri;
     this.serialManager = serialManager;
-    this.crashDetector = new CrashDetector();
+    this.crashCapturer = new TrbrCrashCapturer();
     this.config = config || {};
     this.log = outputChannel || vscode.window.createOutputChannel('ESP Decoder');
 
@@ -121,10 +121,11 @@ export class EspDecoderWebviewPanel {
       })
     );
 
-    // Listen to crash events
+    // Listen to crash events from trbr's capturer
     this.disposables.push(
-      this.crashDetector.onCrashDetected(async (event) => {
+      this.crashCapturer.onCrashDetected(async (event) => {
         this.crashEvents.push(event);
+        this.log.appendLine(`[ESP Decoder] Crash detected: id=${event.id}, kind=${event.kind}, lines=${event.lines.length}`);
         this.postMessage({
           type: 'crashDetected',
           event: this.serializeCrashEvent(event),
@@ -145,7 +146,8 @@ export class EspDecoderWebviewPanel {
                 event,
                 this.config.elfPath,
                 this.config.toolPath,
-                this.config.targetArch
+                this.config.targetArch,
+                this.log
               );
               event.decoded = decoded;
               this.postMessage({
@@ -154,6 +156,7 @@ export class EspDecoderWebviewPanel {
                 decoded: this.serializeDecodedCrash(decoded),
               });
             } catch (err) {
+              this.log.appendLine(`[ESP Decoder] Decode error for ${event.id}: ${err instanceof Error ? err.message : String(err)}`);
               this.postMessage({
                 type: 'crashDecodeError',
                 eventId: event.id,
@@ -207,7 +210,12 @@ export class EspDecoderWebviewPanel {
     // Feed raw text to webview
     this.postMessage({ type: 'serialData', data: text });
 
-    // Process line by line for crash detection
+    // Feed raw bytes to trbr's capturer for crash detection.
+    // trbr handles line decoding, crash framing (including Stack memory:
+    // sections for RISC-V), and deduplication internally.
+    this.crashCapturer.pushData(data);
+
+    // Track lines for serial monitor display
     this.lineBuffer += text;
     const lines = this.lineBuffer.split(/\r?\n/);
 
@@ -220,7 +228,6 @@ export class EspDecoderWebviewPanel {
 
     for (const line of lines) {
       this.serialLines.push(line);
-      this.crashDetector.pushLine(line);
     }
 
     // Trim serial lines
@@ -308,7 +315,7 @@ export class EspDecoderWebviewPanel {
       case 'clear':
         this.serialLines = [];
         this.crashEvents = [];
-        this.crashDetector.reset();
+        this.crashCapturer.reset();
         break;
       case 'decodeCrash': {
         const event = this.crashEvents.find((e) => e.id === message.eventId);
@@ -318,7 +325,8 @@ export class EspDecoderWebviewPanel {
               event,
               this.config.elfPath,
               this.config.toolPath,
-              this.config.targetArch
+              this.config.targetArch,
+              this.log
             );
             event.decoded = decoded;
             this.postMessage({
@@ -385,7 +393,7 @@ export class EspDecoderWebviewPanel {
 
   public dispose(): void {
     EspDecoderWebviewPanel.currentPanel = undefined;
-    this.crashDetector.dispose();
+    this.crashCapturer.dispose();
     this.panel.dispose();
     while (this.disposables.length) {
       const d = this.disposables.pop();
