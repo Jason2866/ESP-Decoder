@@ -144,56 +144,60 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
   );
 
   it.skipIf(!fs.existsSync(ELF_PATH) || !fs.existsSync(GDB_PATH))(
-    'resolves panic_abort in the stack trace or MEPC annotation',
+    'resolves panic_abort in the stack trace',
     async () => {
       const event = makeCrashEvent();
       const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
 
       // MEPC (0x4080c1aa) resolves to panic_abort in esp_system/panic.c
-      const hasPanicAbort =
-        decoded.stacktrace.some((f) => f.function?.includes('panic_abort')) ||
-        Object.values(decoded.regAnnotations ?? {}).some((a) => a.includes('panic_abort'));
-
-      expect(hasPanicAbort).toBe(true);
+      // With ESPHome-style resolution (no address decrement), the address
+      // appears directly in the heuristic stacktrace.
+      expect(
+        decoded.stacktrace.some((f) => f.function?.includes('panic_abort'))
+      ).toBe(true);
     }
   );
 
   it.skipIf(!fs.existsSync(ELF_PATH) || !fs.existsSync(GDB_PATH))(
-    'resolves __assert_func from the stack memory or stack trace',
+    'resolves assert function from the stack trace (ESPHome-compatible)',
     async () => {
       const event = makeCrashEvent();
       const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
 
-      // Address 0x4081107c in the stack resolves to __assert_func (assert.c:80).
-      // It appears either in the resolved stacktrace or in the raw output.
-      const hasFuncInTrace = decoded.stacktrace.some(
-        (f) => f.function?.includes('assert') || f.function?.includes('abort')
+      // 0x4081107c resolves to esp_libc_include_assert_impl (assert.c:96)
+      // with ESPHome-style resolution (no address decrement).
+      const hasAssertInTrace = decoded.stacktrace.some(
+        (f) => f.function?.includes('assert')
       );
-      const hasFuncInRaw =
-        decoded.rawOutput.includes('assert') || decoded.rawOutput.includes('abort');
 
-      expect(hasFuncInTrace || hasFuncInRaw).toBe(true);
+      expect(hasAssertInTrace).toBe(true);
     }
   );
 
   it.skipIf(!fs.existsSync(ELF_PATH) || !fs.existsSync(GDB_PATH))(
-    'heuristic resolves stack memory addresses (ble_hs, vPortTaskWrapper)',
+    'matches ESPHome decoder output: all expected functions resolved',
     async () => {
       const event = makeCrashEvent();
       const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
 
-      // These addresses are in the stack memory dump and should be resolved
-      // by the heuristic stack analysis:
-      //   0x4200cf9e → ble_hs_event_rx_hci_ev
+      // Expected resolved addresses matching ESPHome esp-stacktrace-decoder:
+      //   0x4080c1aa → panic_abort
+      //   0x4080c16e → esp_vApplicationTickHook (NOT esp_system_abort — no decrement)
+      //   0x40800001 → _vector_table
+      //   0x4081107c → esp_libc_include_assert_impl
+      //   0x4200cf9e → ble_hs_event_rx_hci_ev (appears twice)
       //   0x4200d57e → ble_hs_enqueue_hci_event
       //   0x4200e2fa → ble_hs_hci_rx_evt
       //   0x4080d2da → vPortTaskWrapper
       const resolvedFuncs = decoded.stacktrace
         .map((f) => f.function ?? '')
-        .join(' ');
+        .join('\n');
 
-      expect(resolvedFuncs).toMatch(/ble_hs/i);
-      expect(resolvedFuncs).toMatch(/vPortTaskWrapper/i);
+      expect(resolvedFuncs).toMatch(/panic_abort/);
+      expect(resolvedFuncs).toMatch(/ble_hs_event_rx_hci_ev/);
+      expect(resolvedFuncs).toMatch(/ble_hs_enqueue_hci_event/);
+      expect(resolvedFuncs).toMatch(/ble_hs_hci_rx_evt/);
+      expect(resolvedFuncs).toMatch(/vPortTaskWrapper/);
     }
   );
 

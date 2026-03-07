@@ -598,8 +598,24 @@ function stringifyAddrLocation(location: any): string {
 }
 
 /**
+ * Extract all candidate code addresses from crash text.
+ * Finds all 8-hex-digit values starting with '4' (ESP code space 0x40000000–0x4FFFFFFF).
+ * Preserves duplicates and order of appearance.
+ */
+function extractAllCandidateAddresses(crashText: string): string[] {
+  const addresses: string[] = [];
+  const re = /4[0-9a-fA-F]{7}\b/g;
+  let match;
+  while ((match = re.exec(crashText)) !== null) {
+    addresses.push(`0x${match[0].toLowerCase()}`);
+  }
+  return addresses;
+}
+
+/**
  * Extract candidate return addresses from a RISC-V Stack memory hex dump.
  * Returns addresses (preserving duplicates) that fall within ESP code space (0x40000000–0x4FFFFFFF).
+ * Used by createRawDecode fallback when no addr2line is available.
  */
 function extractStackCandidateAddresses(crashText: string): string[] {
   const addresses: string[] = [];
@@ -697,8 +713,7 @@ const DISCRIMINATOR_RE = /\s*\(discriminator \d+\)/;
  * Resolve candidate addresses to function/file/line using addr2line in batch mode.
  *
  * Uses the same `-fiaC` flags and output parsing as pioarduino/filter_exception_decoder.py's _decode_batch().
- * Each address is decremented by 1 (return-address convention) so addr2line reports
- * the call site instead of the instruction after the call.
+ * Addresses are passed directly (without decrement) which resolves raw addresses as-is.
  *
  * This is the heuristic fallback for RISC-V crashes where trbr's GDB-server-based
  * unwinding yields few frames (because the panic GDB server only serves stack RAM –
@@ -716,14 +731,9 @@ async function resolveAddressesViaAddr2line(
   // Limit to 200 addresses to keep command-line length reasonable
   const addrs = candidateAddrs.slice(0, 200);
 
-  // Decrement each address by 1 (return-address → call-site, like pioarduino/filter_exception_decoder.py)
-  const lookupAddrs = addrs.map(a => {
-    const val = parseInt(a, 16) - 1;
-    return `0x${(val >>> 0).toString(16).padStart(8, '0')}`;
-  });
-
   // Build args: addr2line -fiaC -e <elf> <addr1> <addr2> ...
-  const args = ['-fiaC', '-e', elfPath, ...lookupAddrs];
+  // Addresses are passed as-is (no decrement).
+  const args = ['-fiaC', '-e', elfPath, ...addrs];
 
   try {
     const { stdout } = await execFileAsync(addr2linePath, args, { timeout: 15000 });
@@ -807,13 +817,9 @@ async function resolveAddressesViaAddr2line(
         log?.appendLine(
           `[ESP Decoder] Trying ROM ELF for ${unresolvedOrigAddrs.length} unresolved addresses`
         );
-        const romLookupAddrs = unresolvedOrigAddrs.map(a => {
-          const val = parseInt(a, 16) - 1;
-          return `0x${(val >>> 0).toString(16).padStart(8, '0')}`;
-        });
         try {
           const { stdout: romStdout } = await execFileAsync(
-            addr2linePath, ['-fiaC', '-e', romElfPath, ...romLookupAddrs], { timeout: 15000 }
+            addr2linePath, ['-fiaC', '-e', romElfPath, ...unresolvedOrigAddrs], { timeout: 15000 }
           );
           const romRawLines = romStdout.split('\n');
           const romSections: string[][] = [];
@@ -949,45 +955,12 @@ async function resolveAddressesViaGdb(
 }
 
 /**
- * Enhance a decoded RISC-V crash with heuristic stack-extracted frames when
- * trbr's GDB-server-based unwinding yields few frames.
- * Mutates the decoded object by appending heuristic frames to its stacktrace.
+ * Enhance a decoded RISC-V crash by resolving all code addresses found in the
+ * crash text using addr2line.
+ * esp-stacktrace-decoder: extract ALL 4xxxxxxx addresses from the entire crash
+ * text, resolve them via addr2line (without decrement), and replace the
+ * stacktrace with the results.
  */
-/**
- * Extract code-space register addresses from a RISC-V register dump.
- * Returns addresses in register-importance order (MEPC, RA, then others).
- */
-function extractRegisterCodeAddresses(crashText: string): string[] {
-  const addresses: string[] = [];
-  const regPattern =
-    /\b(MEPC|RA|MTVEC|S\d+(?:\/FP)?|T\d+|A\d+)\s*[:=]\s*(0x[0-9a-fA-F]+)/gi;
-  // Priority registers first
-  const priorityOrder = ['MEPC', 'RA', 'MTVEC'];
-  const found = new Map<string, number>();
-
-  let match;
-  while ((match = regPattern.exec(crashText)) !== null) {
-    const name = match[1].toUpperCase().replace(/\/FP$/, '');
-    const val = parseInt(match[2], 16);
-    if (val >= 0x40000000 && val < 0x50000000) {
-      found.set(name, val);
-    }
-  }
-
-  // Emit priority registers first, then the rest
-  for (const prio of priorityOrder) {
-    const val = found.get(prio);
-    if (val !== undefined) {
-      addresses.push(`0x${val.toString(16).padStart(8, '0')}`);
-      found.delete(prio);
-    }
-  }
-  for (const [, val] of found) {
-    addresses.push(`0x${val.toString(16).padStart(8, '0')}`);
-  }
-  return addresses;
-}
-
 async function enhanceWithHeuristicStackFrames(
   decoded: DecodedCrash,
   crashEvent: CrashEvent,
@@ -998,47 +971,36 @@ async function enhanceWithHeuristicStackFrames(
 ): Promise<void> {
   const write = (msg: string) => log?.appendLine(msg);
 
-  // Combine register code addresses (MEPC, RA, MTVEC, …) with stack memory addresses
-  const registerAddrs = extractRegisterCodeAddresses(crashEvent.rawText);
-  const stackAddrs = extractStackCandidateAddresses(crashEvent.rawText);
-  const candidateAddrs = [...registerAddrs, ...stackAddrs];
+  // Extract ALL candidate code addresses from the crash text
+  const candidateAddrs = extractAllCandidateAddresses(crashEvent.rawText);
 
-  // Remove addresses already in the resolved stacktrace
-  const existingAddrs = new Set(
-    decoded.stacktrace.map(f => parseInt(f.address, 16))
-  );
-  const newAddrs = candidateAddrs.filter(a => !existingAddrs.has(parseInt(a, 16)));
-
-  if (newAddrs.length === 0) {
-    write?.('[ESP Decoder] RISC-V heuristic: no new candidate addresses from stack dump');
+  if (candidateAddrs.length === 0) {
+    write?.('[ESP Decoder] RISC-V heuristic: no candidate code addresses found in crash text');
     return;
   }
 
   write?.(
-    `[ESP Decoder] RISC-V heuristic: only ${decoded.stacktrace.length} GDB frames — resolving ${newAddrs.length} candidate stack addresses`
+    `[ESP Decoder] RISC-V heuristic: found ${candidateAddrs.length} candidate addresses — resolving via addr2line`
   );
 
-  // Prefer addr2line (fast, like pioarduino/filter_exception_decoder.py) — fall back to GDB batch if not found
+  // Prefer addr2line (fast) — fall back to GDB batch if not found
   let heuristicFrames: StackFrame[] = [];
   const addr2linePath = deriveAddr2linePath(toolPath, log);
 
   if (addr2linePath) {
     write?.(`[ESP Decoder] Using addr2line for heuristic resolution: ${addr2linePath}`);
-    heuristicFrames = await resolveAddressesViaAddr2line(newAddrs, elfPath, addr2linePath, log, romElfPath);
+    heuristicFrames = await resolveAddressesViaAddr2line(candidateAddrs, elfPath, addr2linePath, log, romElfPath);
   } else {
     write?.('[ESP Decoder] addr2line not found — falling back to GDB batch mode');
-    heuristicFrames = await resolveAddressesViaGdb(newAddrs, elfPath, toolPath, log);
+    heuristicFrames = await resolveAddressesViaGdb(candidateAddrs, elfPath, toolPath, log);
   }
 
   if (heuristicFrames.length > 0) {
     write?.(
-      `[ESP Decoder] Heuristic: resolved ${heuristicFrames.length} additional frames from stack memory`
+      `[ESP Decoder] Heuristic: resolved ${heuristicFrames.length} frames from crash text`
     );
-    // Append with a separator so the UI can distinguish GDB-unwound vs heuristic frames
-    decoded.stacktrace.push(
-      { address: '---', function: '— heuristic stack analysis (from stack memory dump) —' },
-      ...heuristicFrames,
-    );
+    // Replace the stacktrace with the comprehensive addr2line results
+    decoded.stacktrace = heuristicFrames;
   } else {
     write?.('[ESP Decoder] Heuristic: no candidate addresses resolved to known functions');
   }
