@@ -20,6 +20,7 @@ import type {
   CapturerEvent,
   DecodeOptions,
 } from 'trbr';
+import { getPioPackagesDir } from './pioIntegration';
 
 /**
  * Represents a captured crash event from serial data.
@@ -300,8 +301,14 @@ export async function decodeCrash(
   };
 
   if (!toolPath) {
-    write('[ESP Decoder] No toolPath (GDB/addr2line) configured — returning raw decode');
-    return createRawDecode(crashEvent.rawText);
+    write('[ESP Decoder] No toolPath configured — trying PlatformIO auto-detection');
+    toolPath = autoDetectPioToolPath(crashEvent.kind, log);
+    if (toolPath) {
+      write(`[ESP Decoder] Auto-detected toolPath: ${toolPath}`);
+    } else {
+      write('[ESP Decoder] No toolPath (GDB/addr2line) found — returning raw decode');
+      return createRawDecode(crashEvent.rawText);
+    }
   }
 
   try {
@@ -392,6 +399,69 @@ export async function decodeCrash(
     write('[ESP Decoder] Falling back to raw crash text parsing');
     return createRawDecode(crashEvent.rawText);
   }
+}
+
+/**
+ * Try to auto-detect a GDB binary from the local PlatformIO packages directory.
+ * This is used as a fallback when no toolPath is configured in the extension settings.
+ *
+ * RISC-V (ESP32-C2/C3/C6/H2/H4/P4):
+ *   ~/.platformio/packages/tool-riscv32-esp-elf-gdb/bin/riscv32-esp-elf-gdb
+ *
+ * Xtensa (ESP32/ESP32-S2/ESP32-S3/ESP8266):
+ *   ~/.platformio/packages/toolchain-xtensa-esp<variant>/bin/xtensa-esp<variant>-elf-gdb
+ *   or the new unified: toolchain-xtensa-esp-elf
+ */
+function autoDetectPioToolPath(
+  crashKind: 'xtensa' | 'riscv' | 'unknown',
+  log?: DecodeLogger,
+): string | undefined {
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const pioPackagesDir = getPioPackagesDir();
+
+  if (!pioPackagesDir) {
+    log?.appendLine('[ESP Decoder] PlatformIO packages dir not found — cannot auto-detect tool');
+    return undefined;
+  }
+
+  if (crashKind === 'riscv') {
+    // Prefer the dedicated GDB package, fall back to the toolchain package
+    const candidates = [
+      path.join(pioPackagesDir, 'tool-riscv32-esp-elf-gdb', 'bin', `riscv32-esp-elf-gdb${ext}`),
+      path.join(pioPackagesDir, 'toolchain-riscv32-esp', 'bin', `riscv32-esp-elf-gdb${ext}`),
+    ];
+    for (const c of candidates) {
+      if (fs.existsSync(c)) { return c; }
+    }
+    log?.appendLine('[ESP Decoder] RISC-V GDB not found in PlatformIO packages');
+    return undefined;
+  }
+
+  // Xtensa — try common variants
+  const xtensaVariants = [
+    { pkg: 'toolchain-xtensa-esp-elf',    bin: `xtensa-esp-elf-gdb${ext}` },
+    { pkg: 'toolchain-xtensa-esp32s3-elf', bin: `xtensa-esp32s3-elf-gdb${ext}` },
+    { pkg: 'toolchain-xtensa-esp32-elf',   bin: `xtensa-esp32-elf-gdb${ext}` },
+    { pkg: 'toolchain-xtensa-esp32s2-elf', bin: `xtensa-esp32s2-elf-gdb${ext}` },
+  ];
+  for (const { pkg, bin } of xtensaVariants) {
+    const c = path.join(pioPackagesDir, pkg, 'bin', bin);
+    if (fs.existsSync(c)) { return c; }
+  }
+
+  // Also scan for any tool-xtensa-*-gdb package (handles future variants)
+  try {
+    for (const entry of fs.readdirSync(pioPackagesDir)) {
+      if (entry.startsWith('tool-xtensa') && entry.includes('-gdb')) {
+        const binName = entry.replace(/^tool-/, '') + ext;
+        const c = path.join(pioPackagesDir, entry, 'bin', binName);
+        if (fs.existsSync(c)) { return c; }
+      }
+    }
+  } catch { /* ignore */ }
+
+  log?.appendLine('[ESP Decoder] Xtensa GDB not found in PlatformIO packages');
+  return undefined;
 }
 
 /**

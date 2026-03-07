@@ -375,7 +375,7 @@ function getPioCoreDir(): string | undefined {
   return undefined;
 }
 
-function getPioPackagesDir(): string | undefined {
+export function getPioPackagesDir(): string | undefined {
   const coreDir = getPioCoreDir();
   if (!coreDir) {
     return undefined;
