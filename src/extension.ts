@@ -15,6 +15,10 @@ let sessionConfig: {
   romElfPath?: string;
 } = {};
 
+// Tracks whether the user has manually picked an ELF file.
+// When true, file-watcher auto-detection must not overwrite the selection.
+let manualElfOverride = false;
+
 export function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('ESP Decoder');
   context.subscriptions.push(outputChannel);
@@ -109,8 +113,9 @@ export function activate(context: vscode.ExtensionContext) {
       const workspaceFolder =
         vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
-      const result = await selectElfFile(workspaceFolder);
+      const result = await selectElfFile(workspaceFolder, currentPanel?.currentElfPath ?? sessionConfig.elfPath);
       if (result) {
+        manualElfOverride = true;
         sessionConfig = {
           elfPath: result.elfPath,
           toolPath: result.toolPath || sessionConfig.toolPath,
@@ -185,8 +190,8 @@ export function activate(context: vscode.ExtensionContext) {
  * Auto-detect ELF from newest PlatformIO build.
  */
 async function tryAutoDetectElf(): Promise<void> {
-  if (sessionConfig.elfPath) {
-    return; // Already configured
+  if (sessionConfig.elfPath || manualElfOverride) {
+    return; // Already configured or user made a manual choice
   }
 
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -233,6 +238,9 @@ async function tryAutoDetectElf(): Promise<void> {
 }
 
 function autoDetectFromPio(elfPath: string): void {
+  if (manualElfOverride) {
+    return; // User has manually selected an ELF — do not overwrite
+  }
   sessionConfig.elfPath = elfPath;
   if (currentPanel) {
     currentPanel.updateConfig(sessionConfig);

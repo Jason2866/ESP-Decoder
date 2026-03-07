@@ -37,12 +37,9 @@ export class EspDecoderWebviewPanel {
 
     if (EspDecoderWebviewPanel.currentPanel) {
       EspDecoderWebviewPanel.currentPanel.panel.reveal(column);
-      if (config) {
-        EspDecoderWebviewPanel.currentPanel.config = {
-          ...EspDecoderWebviewPanel.currentPanel.config,
-          ...config,
-        };
-      }
+      // Do NOT merge incoming config into an already-running panel.
+      // The panel maintains its own live config (updated via updateConfig());
+      // merging here would overwrite a manual ELF selection with a stale auto-detected value.
       return EspDecoderWebviewPanel.currentPanel;
     }
 
@@ -134,37 +131,30 @@ export class EspDecoderWebviewPanel {
 
         // Auto-decode if configured
         if (this.config.elfPath) {
-          if (!this.config.toolPath) {
-            this.log.appendLine('[ESP Decoder] Crash detected but no GDB/addr2line tool path configured — cannot decode');
+          try {
+            // toolPath may be undefined when the user picked an ELF manually;
+            // decodeCrash's autoDetectPioToolPath() will find GDB automatically.
+            const decoded = await decodeCrash(
+              event,
+              this.config.elfPath,
+              this.config.toolPath,
+              this.config.targetArch,
+              this.log,
+              this.config.romElfPath
+            );
+            event.decoded = decoded;
+            this.postMessage({
+              type: 'crashDecoded',
+              eventId: event.id,
+              decoded: this.serializeDecodedCrash(decoded),
+            });
+          } catch (err) {
+            this.log.appendLine(`[ESP Decoder] Decode error for ${event.id}: ${err instanceof Error ? err.message : String(err)}`);
             this.postMessage({
               type: 'crashDecodeError',
               eventId: event.id,
-              error: 'No GDB/addr2line tool path found. Select an ELF file from a PlatformIO environment or set esp-decoder.toolPath manually.',
+              error: err instanceof Error ? err.message : String(err),
             });
-          } else {
-            try {
-              const decoded = await decodeCrash(
-                event,
-                this.config.elfPath,
-                this.config.toolPath,
-                this.config.targetArch,
-                this.log,
-                this.config.romElfPath
-              );
-              event.decoded = decoded;
-              this.postMessage({
-                type: 'crashDecoded',
-                eventId: event.id,
-                decoded: this.serializeDecodedCrash(decoded),
-              });
-            } catch (err) {
-              this.log.appendLine(`[ESP Decoder] Decode error for ${event.id}: ${err instanceof Error ? err.message : String(err)}`);
-              this.postMessage({
-                type: 'crashDecodeError',
-                eventId: event.id,
-                error: err instanceof Error ? err.message : String(err),
-              });
-            }
           }
         } else {
           this.log.appendLine('[ESP Decoder] Crash detected but no ELF file configured — cannot decode');
@@ -204,6 +194,10 @@ export class EspDecoderWebviewPanel {
       toolPath: this.config.toolPath,
       targetArch: this.config.targetArch,
     });
+  }
+
+  public get currentElfPath(): string | undefined {
+    return this.config.elfPath;
   }
 
   private handleSerialData(data: Buffer): void {

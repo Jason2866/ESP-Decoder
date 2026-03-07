@@ -529,7 +529,8 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
  * Let user select a PIO environment or manually pick an ELF.
  */
 export async function selectElfFile(
-  workspaceFolder: string | undefined
+  workspaceFolder: string | undefined,
+  currentElfPath?: string
 ): Promise<{ elfPath: string; toolPath?: string; targetArch?: string; romElfPath?: string } | undefined> {
   const items: (vscode.QuickPickItem & {
     elfPath?: string;
@@ -540,21 +541,35 @@ export async function selectElfFile(
   })[] = [];
 
   // Auto-detect from PlatformIO
+  let currentMatchedByPio = false;
   if (workspaceFolder) {
     const envs = await findPioEnvironments(workspaceFolder);
     for (const env of envs) {
+      const isCurrent = currentElfPath === env.elfPath;
+      if (isCurrent) { currentMatchedByPio = true; }
       items.push({
         label: `$(folder) ${env.name}`,
         description: env.elfPath,
         detail: env.targetArch
-          ? `Arch: ${env.targetArch}${env.toolPath ? ' | Tool: ' + path.basename(env.toolPath) : ''}`
-          : undefined,
+          ? `Arch: ${env.targetArch}${env.toolPath ? ' | Tool: ' + path.basename(env.toolPath) : ''}${isCurrent ? ' ✓ active' : ''}`
+          : isCurrent ? '✓ active' : undefined,
         elfPath: env.elfPath,
         toolPath: env.toolPath,
         targetArch: env.targetArch,
         romElfPath: env.romElfPath,
       });
     }
+  }
+
+  // If the current ELF was manually browsed (not from a PIO env), show it at the top
+  if (currentElfPath && !currentMatchedByPio) {
+    const name = path.basename(currentElfPath);
+    items.unshift({
+      label: `$(check) ${name}  (current)`,
+      description: currentElfPath,
+      detail: 'Currently active — manually selected',
+      elfPath: currentElfPath,
+    });
   }
 
   // Manual selection option
