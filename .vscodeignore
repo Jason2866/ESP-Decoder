@@ -6,6 +6,8 @@ src/
 !*.d.ts
 tsconfig.json
 esbuild.js
+eslint.config.mjs
+vitest.config.ts
 *.vsix
 package-lock.json
 .gitignore

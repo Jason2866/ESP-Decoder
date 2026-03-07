@@ -367,6 +367,18 @@ export class EspDecoderWebviewPanel {
         }
         break;
       }
+      case 'decodePastedCrash': {
+        if (typeof message.text === 'string' && message.text.trim()) {
+          this.log.appendLine('[ESP Decoder] Decoding pasted crash log...');
+          // Reset capturer so pasted data is treated as a fresh crash block
+          this.crashCapturer.reset();
+          // Feed the text through the crash capturer as if it came from serial.
+          // The existing onCrashDetected listener handles detection + decoding.
+          const data = Buffer.from(message.text + '\n');
+          this.crashCapturer.pushData(data);
+        }
+        break;
+      }
     }
   }
 
@@ -822,6 +834,54 @@ export class EspDecoderWebviewPanel {
       font-size: 11px;
       padding: 4px 0;
     }
+
+    /* Paste-crash modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 200;
+    }
+    .modal-overlay.hidden { display: none; }
+    .modal-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 16px;
+      width: 90%;
+      max-width: 720px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .modal-title {
+      font-weight: bold;
+      font-size: 14px;
+    }
+    .modal-hint {
+      font-size: 11px;
+      opacity: 0.65;
+    }
+    .modal-box textarea {
+      width: 100%;
+      height: 280px;
+      background: var(--input-bg);
+      color: var(--input-fg);
+      border: 1px solid var(--input-border);
+      padding: 6px 8px;
+      font-family: var(--vscode-editor-font-family, 'Courier New', monospace);
+      font-size: 12px;
+      resize: vertical;
+      outline: none;
+    }
+    .modal-buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
   </style>
 </head>
 <body>
@@ -848,6 +908,10 @@ export class EspDecoderWebviewPanel {
     <div class="toolbar-separator"></div>
     <div class="toolbar-group">
       <button id="btn-clear" class="secondary" title="Clear all output">Clear</button>
+    </div>
+    <div class="toolbar-separator"></div>
+    <div class="toolbar-group">
+      <button id="btn-paste-crash" class="secondary" title="Paste or load a crash log for offline decoding">Decode Log</button>
     </div>
   </div>
 
@@ -878,6 +942,19 @@ export class EspDecoderWebviewPanel {
       <div class="no-events" id="no-crashes">
         No crash events detected yet.<br>
         Connect to a serial port and wait for crash output.
+      </div>
+    </div>
+  </div>
+
+  <!-- Paste Crash Log Modal -->
+  <div class="modal-overlay hidden" id="paste-modal">
+    <div class="modal-box">
+      <div class="modal-title">Decode Crash Log</div>
+      <div class="modal-hint">Paste the full serial output containing the crash dump. The decoded result will appear in the Crash Events tab.</div>
+      <textarea id="paste-textarea" placeholder="Paste crash log here..." spellcheck="false" autocomplete="off"></textarea>
+      <div class="modal-buttons">
+        <button class="secondary" id="btn-paste-cancel">Cancel</button>
+        <button id="btn-paste-decode">Decode</button>
       </div>
     </div>
   </div>
@@ -958,6 +1035,36 @@ export class EspDecoderWebviewPanel {
       noCrashes.style.display = 'block';
       crashList.appendChild(noCrashes);
       vscode.postMessage({ type: 'clear' });
+    });
+
+    // Paste / decode crash log modal
+    document.getElementById('btn-paste-crash').addEventListener('click', () => {
+      document.getElementById('paste-modal').classList.remove('hidden');
+      document.getElementById('paste-textarea').focus();
+    });
+
+    document.getElementById('btn-paste-cancel').addEventListener('click', () => {
+      document.getElementById('paste-modal').classList.add('hidden');
+    });
+
+    document.getElementById('btn-paste-decode').addEventListener('click', () => {
+      const text = document.getElementById('paste-textarea').value.trim();
+      if (!text) return;
+      document.getElementById('paste-modal').classList.add('hidden');
+      document.getElementById('paste-textarea').value = '';
+      // Switch to crashes tab so the user sees the result
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      document.querySelector('[data-tab="crashes"]').classList.add('active');
+      document.getElementById('panel-crashes').classList.add('active');
+      vscode.postMessage({ type: 'decodePastedCrash', text });
+    });
+
+    // Close modal when clicking outside the box
+    document.getElementById('paste-modal').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('paste-modal')) {
+        document.getElementById('paste-modal').classList.add('hidden');
+      }
     });
 
     document.getElementById('btn-send').addEventListener('click', sendInput);
