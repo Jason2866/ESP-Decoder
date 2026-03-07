@@ -2,7 +2,7 @@
   "name": "esp-decoder",
   "displayName": "ESP Crash Decoder",
   "description": "Decode ESP32 crash dumps from serial port — powered by TraceBreaker (trbr).",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "Jason2866",
   "license": "GPL-3.0",
   "icon": "assets/icon_large.png",
@@ -30,7 +30,9 @@
     "riscv",
     "trbr"
   ],
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
@@ -138,9 +140,12 @@
     "trbr": "^0.3.1"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
     "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
     "esbuild": "^0.21.0",
+    "eslint": "^10.0.3",
     "typescript": "^5.4.0"
   }
 }

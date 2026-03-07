@@ -18,7 +18,6 @@ import {
 import type {
   Capturer,
   CapturerEvent,
-  CapturerEventKind,
   DecodeOptions,
 } from 'trbr';
 
@@ -63,9 +62,33 @@ export interface StackFrame {
 }
 
 /**
+ * Patterns that trbr's built-in framer recognizes as crash-block starters.
+ * Used to determine whether trbr will detect a crash on its own.
+ */
+const TRBR_START_PATTERNS = [
+  /Guru Meditation Error:/i,
+  /panic'ed/i,
+  /^Exception\s+\(\d+\):?/i,
+];
+
+/**
+ * Additional crash-start patterns that trbr's framer does NOT recognize.
+ * These occur on ESP32-C6/C2/H2 (RISC-V) chips when an assert or abort
+ * fires without a "Guru Meditation Error:" wrapper.
+ */
+const FALLBACK_START_PATTERNS = [
+  /^assert failed:/i,
+  /^abort\(\) was called/i,
+  /^Core\s+\d+\s+register dump:/i,
+];
+
+/**
  * Wraps trbr's Capturer to detect crash events from raw serial byte chunks.
  * Uses trbr's proven crash framing logic (handles Stack memory, register dumps,
  * Backtrace lines, and Rebooting... terminators correctly).
+ *
+ * Includes a fallback detector for crash formats that trbr's framer doesn't
+ * recognize (e.g. "assert failed:" on RISC-V chips without "Guru Meditation Error:").
  */
 export class TrbrCrashCapturer {
   private capturer: Capturer;
@@ -73,9 +96,18 @@ export class TrbrCrashCapturer {
   readonly onCrashDetected = this._onCrashDetected.event;
   private unsubscribe: (() => void) | undefined;
 
+  // Fallback detector state
+  private fbLineBuffer = '';
+  private fbLines: string[] = [];
+  private fbActive = false;
+  private fbQuietTimer: ReturnType<typeof setTimeout> | undefined;
+  private fbNextId = 1;
+  private trbrFiredForCurrentBlock = false;
+
   constructor() {
     this.capturer = createCapturer({ quietPeriodMs: 500 });
     this.unsubscribe = this.capturer.on('eventDetected', (capturerEvent: CapturerEvent) => {
+      this.trbrFiredForCurrentBlock = true;
       const event = capturerEventToCrashEvent(capturerEvent);
       this._onCrashDetected.fire(event);
     });
@@ -85,10 +117,14 @@ export class TrbrCrashCapturer {
    * Feed raw serial bytes. trbr's capturer handles line decoding,
    * crash block framing (including Stack memory: sections), and
    * deduplication internally.
+   *
+   * Also feeds data through the fallback detector for crash patterns
+   * that trbr misses.
    */
   pushData(data: Buffer | Uint8Array): void {
     const chunk = data instanceof Uint8Array ? data : new Uint8Array(data);
     this.capturer.push(chunk);
+    this.fbPushData(data);
   }
 
   /**
@@ -96,6 +132,7 @@ export class TrbrCrashCapturer {
    */
   flush(): void {
     this.capturer.flush();
+    this.fbFlush();
   }
 
   reset(): void {
@@ -103,14 +140,122 @@ export class TrbrCrashCapturer {
     this.unsubscribe?.();
     this.capturer = createCapturer({ quietPeriodMs: 500 });
     this.unsubscribe = this.capturer.on('eventDetected', (capturerEvent: CapturerEvent) => {
+      this.trbrFiredForCurrentBlock = true;
       const event = capturerEventToCrashEvent(capturerEvent);
       this._onCrashDetected.fire(event);
     });
+    this.fbReset();
+    this.fbLineBuffer = '';
   }
 
   dispose(): void {
     this.unsubscribe?.();
+    this.fbReset();
     this._onCrashDetected.dispose();
+  }
+
+  // --- Fallback crash detector ---
+  // Catches crash blocks that trbr's framer misses (e.g. assert failures
+  // on RISC-V chips that lack "Guru Meditation Error:" prefix).
+
+  private fbPushData(data: Buffer | Uint8Array): void {
+    const text = Buffer.from(data).toString('utf-8');
+    this.fbLineBuffer += text;
+
+    const parts = this.fbLineBuffer.split(/\r?\n/);
+    this.fbLineBuffer = parts.pop() || '';
+    for (const line of parts) {
+      this.fbProcessLine(line);
+    }
+  }
+
+  private fbProcessLine(line: string): void {
+    if (!this.fbActive) {
+      // Only start fallback for patterns that trbr wouldn't catch
+      const trbrWouldCatch = TRBR_START_PATTERNS.some(p => p.test(line));
+      if (trbrWouldCatch) {
+        return; // trbr will handle this crash — don't duplicate
+      }
+      if (FALLBACK_START_PATTERNS.some(p => p.test(line))) {
+        this.fbActive = true;
+        this.trbrFiredForCurrentBlock = false;
+        this.fbLines = [];
+      }
+    }
+
+    if (this.fbActive) {
+      this.fbLines.push(line);
+      this.fbResetTimer();
+      if (/^Rebooting\.\.\./i.test(line.trim())) {
+        this.fbFinalize();
+      }
+    }
+  }
+
+  private fbResetTimer(): void {
+    if (this.fbQuietTimer) {
+      clearTimeout(this.fbQuietTimer);
+    }
+    // Use a slightly longer quiet period than trbr (600ms vs 500ms)
+    // so trbr fires first if it's going to detect this crash.
+    this.fbQuietTimer = setTimeout(() => this.fbFinalize(), 600);
+  }
+
+  private fbFinalize(): void {
+    if (this.fbQuietTimer) {
+      clearTimeout(this.fbQuietTimer);
+      this.fbQuietTimer = undefined;
+    }
+    if (!this.fbActive || this.fbLines.length === 0) {
+      this.fbReset();
+      return;
+    }
+    // Only fire if trbr didn't already detect this crash
+    if (!this.trbrFiredForCurrentBlock && this.fbLooksLikeCrash()) {
+      const rawText = this.fbLines.join('\n');
+      const kind = this.fbDetectKind();
+      const event: CrashEvent = {
+        id: `fallback-${String(this.fbNextId++).padStart(6, '0')}`,
+        kind,
+        lines: [...this.fbLines],
+        rawText,
+        timestamp: Date.now(),
+      };
+      this._onCrashDetected.fire(event);
+    }
+    this.fbReset();
+  }
+
+  private fbLooksLikeCrash(): boolean {
+    return this.fbLines.some(l =>
+      /Core\s+\d+\s+register dump:/i.test(l) ||
+      /^Stack memory:/i.test(l)
+    );
+  }
+
+  private fbDetectKind(): 'xtensa' | 'riscv' | 'unknown' {
+    const riscvPatterns = [/MCAUSE/, /\bMEPC\b/, /MHARTID/];
+    const xtensaPatterns = [/Backtrace:/, /EXCCAUSE/, /EXCVADDR/];
+    if (this.fbLines.some(l => riscvPatterns.some(p => p.test(l)))) { return 'riscv'; }
+    if (this.fbLines.some(l => xtensaPatterns.some(p => p.test(l)))) { return 'xtensa'; }
+    return 'unknown';
+  }
+
+  private fbReset(): void {
+    this.fbActive = false;
+    this.fbLines = [];
+    if (this.fbQuietTimer) {
+      clearTimeout(this.fbQuietTimer);
+      this.fbQuietTimer = undefined;
+    }
+  }
+
+  private fbFlush(): void {
+    if (this.fbLineBuffer) {
+      this.fbProcessLine(this.fbLineBuffer);
+      this.fbLineBuffer = '';
+    }
+    this.fbFinalize();
   }
 }
 
@@ -1013,15 +1158,44 @@ function parseFaultInfo(text: string): DecodedCrash['faultInfo'] | undefined {
     }
   }
 
+  // Detect "assert failed:" / "abort() was called" fault messages (RISC-V chips)
+  let faultMessage: string | undefined;
+  for (const line of lines) {
+    const assertMatch = line.match(/^(assert failed:.+)/i);
+    if (assertMatch) {
+      faultMessage = assertMatch[1];
+      break;
+    }
+    const abortMatch = line.match(/^(abort\(\) was called.+)/i);
+    if (abortMatch) {
+      faultMessage = abortMatch[1];
+      break;
+    }
+  }
+
+  // Extract core ID from "Core N register dump:" if present
+  let coreId = 0;
+  for (const line of lines) {
+    const coreMatch = line.match(/Core\s+(\d+)\s+register dump:/i);
+    if (coreMatch) {
+      coreId = parseInt(coreMatch[1], 10);
+      break;
+    }
+  }
+
   for (const line of lines) {
     const epcMatch = line.match(/EPC1?\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
     if (epcMatch) {
-      return { coreId: 0, programCounter: epcMatch[1] };
+      return { coreId, programCounter: epcMatch[1], faultMessage };
     }
     const mepcMatch = line.match(/MEPC\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
     if (mepcMatch) {
-      return { coreId: 0, programCounter: mepcMatch[1] };
+      return { coreId, programCounter: mepcMatch[1], faultMessage };
     }
+  }
+
+  if (faultMessage) {
+    return { coreId, faultMessage };
   }
 
   return undefined;
@@ -1033,7 +1207,7 @@ function parseFaultInfo(text: string): DecodedCrash['faultInfo'] | undefined {
 function parseRegisters(text: string): Record<string, number> {
   const regs: Record<string, number> = {};
   const regPattern =
-    /\b(EPC\d|EXCVADDR|EXCCAUSE|MTVAL|MEPC|MCAUSE|SP|A\d+|RA|GP|TP|S\d+|T\d+|PC)\s*[:=]\s*(0x[0-9a-fA-F]+)/gi;
+    /\b(EPC\d|EXCVADDR|EXCCAUSE|MTVAL|MEPC|MCAUSE|MSTATUS|MTVEC|MHARTID|SP|A\d+|RA|GP|TP|S\d+(?:\/FP)?|T\d+|PC)\s*[:=]\s*(0x[0-9a-fA-F]+)/gi;
 
   let match;
   while ((match = regPattern.exec(text)) !== null) {
