@@ -85,7 +85,6 @@ export class EspDecoderWebviewPanel {
     // Handle messages from webview
     this.panel.webview.onDidReceiveMessage(
       (message) => {
-        this.log.appendLine(`[Webview → Extension] message: ${JSON.stringify(message)}`);
         this.handleMessage(message).catch((err) => {
           this.log.appendLine(`[ERROR] message handler error: ${err}`);
           this.postMessage({
@@ -236,11 +235,9 @@ export class EspDecoderWebviewPanel {
   }
 
   private async handleMessage(message: any): Promise<void> {
-    this.log.appendLine(`handleMessage: ${message.type}`);
     switch (message.type) {
       case 'connect': {
         try {
-          this.log.appendLine(`connect: selectedPath=${this.serialManager.selectedPath || '(none)'}`);
           if (!this.serialManager.selectedPath) {
             const port = await this.serialManager.selectPort();
             if (!port) {
@@ -367,7 +364,6 @@ export class EspDecoderWebviewPanel {
       }
       case 'decodePastedCrash': {
         if (typeof message.text === 'string' && message.text.trim()) {
-          this.log.appendLine('[ESP Decoder] Decoding pasted crash log...');
           // Reset capturer so pasted data is treated as a fresh crash block
           this.crashCapturer.reset();
           // Feed the text through the crash capturer as if it came from serial.
@@ -1002,7 +998,6 @@ export class EspDecoderWebviewPanel {
 
     // Button handlers
     document.getElementById('btn-port').addEventListener('click', () => {
-      console.log('[ESP Decoder Webview] Port button clicked');
       vscode.postMessage({ type: 'selectPort' });
     });
 
@@ -1011,14 +1006,12 @@ export class EspDecoderWebviewPanel {
     });
 
     document.getElementById('btn-connect').addEventListener('click', () => {
-      console.log('[ESP Decoder Webview] Connect button clicked');
       document.getElementById('btn-connect').textContent = 'Connecting...';
       document.getElementById('btn-connect').disabled = true;
       vscode.postMessage({ type: 'connect' });
     });
 
     document.getElementById('btn-disconnect').addEventListener('click', () => {
-      console.log('[ESP Decoder Webview] Disconnect button clicked');
       vscode.postMessage({ type: 'disconnect' });
     });
 
@@ -1153,7 +1146,6 @@ export class EspDecoderWebviewPanel {
     }
 
     function updateConnectionState(isConnected, port, baudRate) {
-      console.log('[ESP Decoder Webview] updateConnectionState:', isConnected, port, baudRate);
       connected = isConnected;
       const dot = document.getElementById('status-dot');
       const text = document.getElementById('status-text');

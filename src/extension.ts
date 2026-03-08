@@ -22,11 +22,9 @@ let manualElfOverride = false;
 export function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('ESP Decoder');
   context.subscriptions.push(outputChannel);
-  outputChannel.appendLine('ESP Decoder activating...');
 
   try {
     serialManager = new SerialPortManager();
-    outputChannel.appendLine('SerialPortManager created successfully');
   } catch (err) {
     outputChannel.appendLine(`FATAL: Failed to create SerialPortManager: ${err}`);
     vscode.window.showErrorMessage(`ESP Decoder: Failed to initialize serial port manager: ${err instanceof Error ? err.message : String(err)}`);
@@ -57,7 +55,6 @@ export function activate(context: vscode.ExtensionContext) {
   // Register commands
   context.subscriptions.push(
     vscode.commands.registerCommand('esp-decoder.openMonitor', () => {
-      outputChannel.appendLine('Opening monitor panel...');
       currentPanel = EspDecoderWebviewPanel.createOrShow(
         context.extensionUri,
         serialManager,
@@ -76,18 +73,13 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('esp-decoder.connect', async () => {
       try {
-        outputChannel.appendLine(`Connecting to ${serialManager.selectedPath || '(no port)'} @ ${serialManager.baudRate}...`);
         const success = await serialManager.connect();
         if (success) {
-          outputChannel.appendLine(`Connected successfully to ${serialManager.selectedPath}`);
           vscode.window.showInformationMessage(
             `Connected to ${serialManager.selectedPath} @ ${serialManager.baudRate}`
           );
-        } else {
-          outputChannel.appendLine('Connection returned false');
         }
       } catch (err) {
-        outputChannel.appendLine(`Connection error: ${err}`);
         vscode.window.showErrorMessage(
           `Connection failed: ${err instanceof Error ? err.message : String(err)}`
         );
@@ -182,8 +174,6 @@ export function activate(context: vscode.ExtensionContext) {
     // Try auto-detect on activation
     tryAutoDetectElf();
   }
-
-  console.log('ESP Decoder extension activated');
 }
 
 /**

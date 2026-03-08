@@ -106,26 +106,19 @@ export class SerialPortManager extends vscode.Disposable {
   }
 
   async connect(): Promise<boolean> {
-    console.log('[ESP Decoder] connect() called, selectedPath:', this._selectedPath, 'baudRate:', this._baudRate);
-
     if (this._isConnected) {
-      console.log('[ESP Decoder] Already connected, disconnecting first...');
       await this.disconnect();
     }
 
     if (!this._selectedPath) {
-      console.log('[ESP Decoder] No port selected, prompting user...');
       const selected = await this.selectPort();
       if (!selected) {
-        console.log('[ESP Decoder] User cancelled port selection');
         return false;
       }
-      console.log('[ESP Decoder] User selected port:', selected);
     }
 
     return new Promise<boolean>((resolve) => {
       try {
-        console.log('[ESP Decoder] Creating SerialPort instance for', this._selectedPath, '@', this._baudRate);
         this.port = new SerialPort(
           {
             path: this._selectedPath!,
@@ -133,7 +126,6 @@ export class SerialPortManager extends vscode.Disposable {
             autoOpen: false,
           },
         );
-        console.log('[ESP Decoder] SerialPort instance created');
       } catch (err) {
         console.error('[ESP Decoder] Failed to create SerialPort:', err);
         vscode.window.showErrorMessage(
@@ -155,15 +147,12 @@ export class SerialPortManager extends vscode.Disposable {
       });
 
       this.port.on('close', () => {
-        console.log('[ESP Decoder] Serial port closed');
         this._isConnected = false;
         this._onConnectionChange.fire(false);
       });
 
-      console.log('[ESP Decoder] Opening port...');
       this.port.open((err) => {
         if (err) {
-          console.error('[ESP Decoder] Failed to open port:', err);
           vscode.window.showErrorMessage(
             `Failed to open ${this._selectedPath}: ${err.message}`
           );
@@ -171,7 +160,6 @@ export class SerialPortManager extends vscode.Disposable {
           resolve(false);
           return;
         }
-        console.log('[ESP Decoder] Port opened successfully!');
         this._isConnected = true;
         this._onConnectionChange.fire(true);
         resolve(true);
