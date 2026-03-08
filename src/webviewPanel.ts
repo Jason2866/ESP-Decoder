@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
-import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash } from './crashDecoder';
+import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash, Addr2linePool } from './crashDecoder';
 
 interface SessionConfig {
   elfPath?: string;
@@ -17,6 +17,7 @@ export class EspDecoderWebviewPanel {
   private readonly extensionUri: vscode.Uri;
   private readonly serialManager: SerialPortManager;
   private readonly crashCapturer: TrbrCrashCapturer;
+  private readonly addr2linePool: Addr2linePool;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly log: vscode.OutputChannel;
 
@@ -75,6 +76,7 @@ export class EspDecoderWebviewPanel {
     this.extensionUri = extensionUri;
     this.serialManager = serialManager;
     this.crashCapturer = new TrbrCrashCapturer();
+    this.addr2linePool = new Addr2linePool();
     this.config = config || {};
     this.log = outputChannel || vscode.window.createOutputChannel('ESP Decoder');
 
@@ -140,7 +142,8 @@ export class EspDecoderWebviewPanel {
               this.config.toolPath,
               this.config.targetArch,
               this.log,
-              this.config.romElfPath
+              this.config.romElfPath,
+              this.addr2linePool
             );
             event.decoded = decoded;
             this.postMessage({
@@ -323,7 +326,8 @@ export class EspDecoderWebviewPanel {
               this.config.toolPath,
               this.config.targetArch,
               this.log,
-              this.config.romElfPath
+              this.config.romElfPath,
+              this.addr2linePool
             );
             event.decoded = decoded;
             this.postMessage({
@@ -404,6 +408,7 @@ export class EspDecoderWebviewPanel {
   public dispose(): void {
     EspDecoderWebviewPanel.currentPanel = undefined;
     this.crashCapturer.dispose();
+    this.addr2linePool.disposeAll();
     this.panel.dispose();
     while (this.disposables.length) {
       const d = this.disposables.pop();
