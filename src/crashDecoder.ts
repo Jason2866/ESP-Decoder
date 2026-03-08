@@ -341,7 +341,7 @@ export async function decodeCrash(
               stacktrace: frames,
               regs: hasRegs ? regs : undefined,
               regAnnotations,
-              rawOutput: crashEvent.rawText,
+              rawOutput: '',
             };
           }
         }

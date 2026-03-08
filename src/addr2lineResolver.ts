@@ -31,7 +31,10 @@ interface QueueEntry {
   addresses: string[];
   resolve: (results: Addr2lineResult[]) => void;
   reject: (err: Error) => void;
+  attempts: number;
 }
+const BATCH_TIMEOUT_MS = 15_000;
+const MAX_BATCH_RETRIES = 1;
 
 /**
  * Keeps an `addr2line` process running in interactive (stdin) mode and
@@ -68,7 +71,7 @@ export class PersistentAddr2line {
       return Promise.reject(new Error('PersistentAddr2line has been disposed'));
     }
     return new Promise<Addr2lineResult[]>((resolve, reject) => {
-      this.queue.push({ addresses, resolve, reject });
+      this.queue.push({ addresses, resolve, reject, attempts: 0 });
       this.drainQueue();
     });
   }
@@ -108,6 +111,11 @@ export class PersistentAddr2line {
     if (this.processing) {
       this.processing = false;
       // The current batch will be retried by drainQueue.
+      const entry = this.queue[0];
+      if (entry && ++entry.attempts > MAX_BATCH_RETRIES) {
+        this.queue.shift();
+        entry.reject(new Error('addr2line exited before completing the batch'));
+      }
       this.drainQueue();
     }
   }
@@ -149,11 +157,21 @@ export class PersistentAddr2line {
     const proc = this.ensureProcess();
     const stdout = proc.stdout!;
 
+    const batchTimer = setTimeout(() => {
+      stdout.removeListener('data', onData);
+      this.killProcess();
+      this.processing = false;
+      this.queue.shift();
+      entry.reject(new Error('addr2line batch timed out'));
+      this.drainQueue();
+    }, BATCH_TIMEOUT_MS);
+
     const onData = (chunk: Buffer): void => {
       this.stdoutBuffer += chunk.toString('utf-8');
 
       // Check if we've received the sentinel header
       if (this.hasSentinelHeader(this.stdoutBuffer)) {
+        clearTimeout(batchTimer);
         stdout.removeListener('data', onData);
         this.processing = false;
         this.queue.shift();
