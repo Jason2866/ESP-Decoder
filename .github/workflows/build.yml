@@ -36,8 +36,11 @@ jobs:
           path: "esp-decoder-*.vsix"
 
   publish:
+    needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: install node v20
@@ -52,5 +55,3 @@ jobs:
           npm run package
       - name: Publish to VS Code Marketplace
         run: npx vsce publish -p ${{ secrets.VSCE_TOKEN }}
-        env:
-          VSCE_TOKEN: ${{ secrets.VSCE_TOKEN }}
