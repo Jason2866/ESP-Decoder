@@ -1040,6 +1040,9 @@ export class EspDecoderWebviewPanel {
     let crashCount = 0;
     // Guards against scheduling multiple requestAnimationFrame callbacks for scrolling.
     let scrollRAFPending = false;
+    // Prevents programmatic scrollTop assignments from being misread as user
+    // scroll events and accidentally disabling autoscroll (race at high baud rates).
+    let programmaticScroll = false;
 
     function updateScrollButton() {
       btnScrollBottom.style.display = autoscroll ? 'none' : 'block';
@@ -1154,6 +1157,13 @@ export class EspDecoderWebviewPanel {
 
     // Auto-scroll detection
     serialOutput.addEventListener('scroll', () => {
+      // Ignore scroll events fired by our own scrollTop assignments so they
+      // cannot flip autoscroll off when new data arrives between the RAF
+      // assignment and the resulting scroll event (race at high baud rates).
+      if (programmaticScroll) {
+        programmaticScroll = false;
+        return;
+      }
       const el = serialOutput;
       autoscroll = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
       updateScrollButton();
@@ -1161,9 +1171,10 @@ export class EspDecoderWebviewPanel {
 
     // Scroll-to-bottom button
     btnScrollBottom.addEventListener('click', () => {
-      serialOutput.scrollTop = serialOutput.scrollHeight;
       autoscroll = true;
       updateScrollButton();
+      programmaticScroll = true;
+      serialOutput.scrollTop = serialOutput.scrollHeight;
     });
 
     // Message handler
@@ -1218,6 +1229,7 @@ export class EspDecoderWebviewPanel {
         requestAnimationFrame(() => {
           scrollRAFPending = false;
           if (autoscroll) {
+            programmaticScroll = true;
             serialOutput.scrollTop = serialOutput.scrollHeight;
           }
         });
@@ -1246,6 +1258,7 @@ export class EspDecoderWebviewPanel {
         requestAnimationFrame(() => {
           scrollRAFPending = false;
           if (autoscroll) {
+            programmaticScroll = true;
             serialOutput.scrollTop = serialOutput.scrollHeight;
           }
         });
