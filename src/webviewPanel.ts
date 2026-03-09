@@ -26,6 +26,15 @@ export class EspDecoderWebviewPanel {
   private lineBuffer = '';
   private config: SessionConfig = {};
 
+  // Batch serial data before posting to the webview to prevent message-queue flooding.
+  // Without batching, a device sending data at 921600 baud can produce thousands of
+  // postMessage() calls per second, saturating the IPC queue.  Even after the device
+  // is disconnected the accumulated queue takes minutes to drain, causing the terminal
+  // to keep printing long after the port is closed.
+  private pendingSerialData = '';
+  private serialFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly SERIAL_FLUSH_INTERVAL_MS = 50;
+
   public static createOrShow(
     extensionUri: vscode.Uri,
     serialManager: SerialPortManager,
@@ -111,6 +120,12 @@ export class EspDecoderWebviewPanel {
     // Listen to connection changes
     this.disposables.push(
       this.serialManager.onConnectionChange((connected) => {
+        if (!connected) {
+          // Cancel the pending serial-data flush and discard any buffered bytes.
+          // This prevents a large backlog of queued IPC messages from continuing
+          // to drain into the webview for minutes after the device is unplugged.
+          this.cancelSerialFlush();
+        }
         this.postMessage({
           type: 'connectionChanged',
           connected,
@@ -205,8 +220,16 @@ export class EspDecoderWebviewPanel {
   private handleSerialData(data: Buffer): void {
     const text = data.toString('utf8');
 
-    // Feed raw text to webview
-    this.postMessage({ type: 'serialData', data: text });
+    // Buffer outgoing display data and flush in batches.  Posting every raw
+    // chunk as a separate IPC message can produce thousands of messages per
+    // second at high baud rates, saturating the webview message queue.
+    this.pendingSerialData += text;
+    if (this.serialFlushTimer === null) {
+      this.serialFlushTimer = setTimeout(
+        () => this.flushSerialData(),
+        EspDecoderWebviewPanel.SERIAL_FLUSH_INTERVAL_MS
+      );
+    }
 
     // Feed raw bytes to trbr's capturer for crash detection.
     // trbr handles line decoding, crash framing (including Stack memory:
@@ -228,10 +251,34 @@ export class EspDecoderWebviewPanel {
       this.serialLines.push(line);
     }
 
-    // Trim serial lines
-    while (this.serialLines.length > maxLines) {
-      this.serialLines.shift();
+    // Trim serial lines.  Reassigning to a slice is O(k) and avoids mutating
+    // a large array in-place, which is clearer and avoids the risk of GC
+    // pressure from holding stale references in the old tail.
+    if (this.serialLines.length > maxLines) {
+      this.serialLines = this.serialLines.slice(-maxLines);
     }
+  }
+
+  /** Send accumulated serial bytes to the webview in one IPC message. */
+  private flushSerialData(): void {
+    this.serialFlushTimer = null;
+    if (this.pendingSerialData) {
+      this.postMessage({ type: 'serialData', data: this.pendingSerialData });
+      this.pendingSerialData = '';
+    }
+  }
+
+  /**
+   * Cancel the pending serial-data flush timer and discard buffered bytes.
+   * Called on disconnect so that data accumulated in the buffer just before
+   * the port closed is not forwarded to the webview.
+   */
+  private cancelSerialFlush(): void {
+    if (this.serialFlushTimer !== null) {
+      clearTimeout(this.serialFlushTimer);
+      this.serialFlushTimer = null;
+    }
+    this.pendingSerialData = '';
   }
 
   private async handleMessage(message: any): Promise<void> {
@@ -403,6 +450,7 @@ export class EspDecoderWebviewPanel {
 
   public dispose(): void {
     EspDecoderWebviewPanel.currentPanel = undefined;
+    this.cancelSerialFlush();
     this.crashCapturer.dispose();
     this.addr2linePool.disposeAll();
     this.panel.dispose();
@@ -965,6 +1013,8 @@ export class EspDecoderWebviewPanel {
     let connected = false;
     let autoscroll = true;
     let crashCount = 0;
+    // Guards against scheduling multiple requestAnimationFrame callbacks for scrolling.
+    let scrollRAFPending = false;
 
     // Tab switching
     document.querySelectorAll('.tab').forEach(tab => {
@@ -1125,8 +1175,14 @@ export class EspDecoderWebviewPanel {
       span.style.color = 'var(--error-fg)';
       span.textContent = '[ERROR] ' + text + '\\n';
       serialOutput.appendChild(span);
-      if (autoscroll) {
-        serialOutput.scrollTop = serialOutput.scrollHeight;
+      if (autoscroll && !scrollRAFPending) {
+        scrollRAFPending = true;
+        requestAnimationFrame(() => {
+          scrollRAFPending = false;
+          if (autoscroll) {
+            serialOutput.scrollTop = serialOutput.scrollHeight;
+          }
+        });
       }
     }
 
@@ -1135,13 +1191,26 @@ export class EspDecoderWebviewPanel {
       span.textContent = text;
       serialOutput.appendChild(span);
 
-      // Trim if too many nodes
-      while (serialOutput.childNodes.length > 10000) {
-        serialOutput.removeChild(serialOutput.firstChild);
+      // Trim excess nodes in a single DOM operation.  replaceChildren() with
+      // only the nodes to keep is faster than removing excess nodes one-by-one
+      // because it triggers a single layout invalidation instead of one per call.
+      const excess = serialOutput.childNodes.length - 10000;
+      if (excess > 0) {
+        const keep = Array.from(serialOutput.childNodes).slice(excess);
+        serialOutput.replaceChildren(...keep);
       }
 
-      if (autoscroll) {
-        serialOutput.scrollTop = serialOutput.scrollHeight;
+      // Schedule a single autoscroll per animation frame to avoid forcing a
+      // layout reflow on every incoming message (which is very expensive at
+      // high baud rates and causes the terminal to slow down significantly).
+      if (autoscroll && !scrollRAFPending) {
+        scrollRAFPending = true;
+        requestAnimationFrame(() => {
+          scrollRAFPending = false;
+          if (autoscroll) {
+            serialOutput.scrollTop = serialOutput.scrollHeight;
+          }
+        });
       }
     }
 
