@@ -279,6 +279,7 @@ export class EspDecoderWebviewPanel {
       this.serialFlushTimer = null;
     }
     this.pendingSerialData = '';
+    this.lineBuffer = '';
   }
 
   private async handleMessage(message: any): Promise<void> {
@@ -356,6 +357,7 @@ export class EspDecoderWebviewPanel {
         }
         break;
       case 'clear':
+        this.cancelSerialFlush();
         this.serialLines = [];
         this.crashEvents = [];
         this.crashCapturer.reset();
@@ -1433,7 +1435,7 @@ export class EspDecoderWebviewPanel {
             html += '<span class="reg-name">' + escapeHtml(name) + '</span>';
             html += '<span class="reg-value">0x' + Number(value).toString(16).padStart(8, '0') + '</span>';
             if (annotation) {
-              html += '<span class="reg-annotation">' + escapeHtml(annotation) + '</span>';
+              html += '<span class="reg-annotation">' + formatAnnotation(annotation) + '</span>';
             }
             html += '</div>';
           }
@@ -1456,7 +1458,7 @@ export class EspDecoderWebviewPanel {
       if (decoded.rawOutput) {
         html += '<div class="crash-section">';
         html += '<div class="crash-section-title">Decoded Output</div>';
-        html += '<div class="raw-output">' + escapeHtml(decoded.rawOutput) + '</div>';
+        html += '<div class="raw-output">' + linkifyPaths(decoded.rawOutput) + '</div>';
         html += '</div>';
       }
 
@@ -1482,6 +1484,32 @@ export class EspDecoderWebviewPanel {
 
     function openFile(file, line) {
       vscode.postMessage({ type: 'openFile', file, line });
+    }
+
+    function linkifyPaths(text) {
+      // Replace file paths like /path/to/file.c:123 with clickable links
+      var escaped = escapeHtml(text);
+      return escaped.replace(/(\/[\w.\-\/]+\.\w+):(\d+)/g, function(match, file, line) {
+        var shortFile = file.split('/').pop();
+        return '<span class="frame-file" data-file="' +
+          escapeAttr(file) + '" data-line="' + escapeAttr(line) +
+          '">' + escapeHtml(shortFile + ':' + line) + '</span>';
+      });
+    }
+
+    function formatAnnotation(annotation) {
+      // Parse "func_name at /path/to/file.c:123" into clickable link
+      var match = annotation.match(/^(.+?)\\s+at\\s+(.+?):(\\d+)$/);
+      if (match) {
+        var func = match[1];
+        var file = match[2];
+        var line = match[3];
+        var shortFile = file.split('/').pop();
+        return escapeHtml(func) + ' at <span class="frame-file" data-file="' +
+          escapeAttr(file) + '" data-line="' + escapeAttr(line) +
+          '">' + escapeHtml(shortFile + ':' + line) + '</span>';
+      }
+      return escapeHtml(annotation);
     }
 
     function escapeHtml(text) {
