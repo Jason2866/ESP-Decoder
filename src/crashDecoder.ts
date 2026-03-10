@@ -625,9 +625,20 @@ async function decodeCoredumpElfInternal(
 ): Promise<CoredumpDecodedResult> {
   const write = (msg: string) => log?.appendLine(msg);
 
+  // Detect the architecture from the firmware ELF when not explicitly configured
+  const detectedArch = await detectElfArch(elfPath, log);
+  const crashKind: 'xtensa' | 'riscv' | 'unknown' = detectedArch ?? 'unknown';
+  write(`[ESP Decoder] Coredump: firmware ELF arch detection = ${detectedArch ?? 'unknown'}`);
+
   if (!toolPath) {
-    // Try RISC-V first, then Xtensa — we don't know the crash kind from an ELF coredump
-    toolPath = autoDetectPioToolPath('riscv', log) ?? autoDetectPioToolPath('xtensa', log);
+    // Use the detected architecture to pick the right GDB
+    if (crashKind === 'xtensa') {
+      toolPath = autoDetectPioToolPath('xtensa', log) ?? autoDetectPioToolPath('riscv', log);
+    } else if (crashKind === 'riscv') {
+      toolPath = autoDetectPioToolPath('riscv', log) ?? autoDetectPioToolPath('xtensa', log);
+    } else {
+      toolPath = autoDetectPioToolPath('riscv', log) ?? autoDetectPioToolPath('xtensa', log);
+    }
     if (!toolPath) {
       write('[ESP Decoder] No toolPath (GDB) found for coredump decoding');
       return {
@@ -637,7 +648,7 @@ async function decodeCoredumpElfInternal(
     }
   }
 
-  const resolvedArch = resolveTargetArch(targetArch, 'unknown');
+  const resolvedArch = resolveTargetArch(targetArch, crashKind);
 
   try {
     // Create decode params with coredumpMode enabled
@@ -765,6 +776,45 @@ function autoDetectPioToolPath(
  * Valid trbr target architectures.
  */
 const VALID_TRBR_TARGETS = ['xtensa', 'esp32c2', 'esp32c3', 'esp32c6', 'esp32h2', 'esp32h4', 'esp32p4'] as const;
+
+/** ELF e_machine values for ESP chip families */
+const ELF_MACHINE_XTENSA = 0x5e; // 94
+const ELF_MACHINE_RISCV = 0xf3;  // 243
+
+/**
+ * Detect the architecture from a firmware ELF file's e_machine header field.
+ * Returns 'xtensa' or 'riscv', or undefined if detection fails.
+ */
+async function detectElfArch(
+  elfPath: string,
+  log?: DecodeLogger,
+): Promise<'xtensa' | 'riscv' | undefined> {
+  try {
+    const fd = await fsPromises.open(elfPath, 'r');
+    try {
+      const header = Buffer.alloc(20);
+      const { bytesRead } = await fd.read(header, 0, 20, 0);
+      if (bytesRead < 20) { return undefined; }
+
+      // Verify ELF magic
+      if (header[0] !== 0x7f || header[1] !== 0x45 || header[2] !== 0x4c || header[3] !== 0x46) {
+        return undefined;
+      }
+
+      // e_machine is at offset 18, little-endian uint16
+      const machine = header.readUInt16LE(18);
+      if (machine === ELF_MACHINE_XTENSA) { return 'xtensa'; }
+      if (machine === ELF_MACHINE_RISCV) { return 'riscv'; }
+
+      log?.appendLine(`[ESP Decoder] Unknown ELF e_machine: 0x${machine.toString(16)}`);
+      return undefined;
+    } finally {
+      await fd.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Resolve the target architecture from config and crash kind.
