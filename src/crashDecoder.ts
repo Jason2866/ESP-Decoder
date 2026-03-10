@@ -785,6 +785,9 @@ function autoDetectPioToolPath(
 
   // Xtensa — try common variants
   const xtensaVariants = [
+    { pkg: 'tool-xtensa-esp-elf-gdb',     bin: `xtensa-esp32-elf-gdb${ext}` },
+    { pkg: 'tool-xtensa-esp-elf-gdb',     bin: `xtensa-esp32s3-elf-gdb${ext}` },
+    { pkg: 'tool-xtensa-esp-elf-gdb',     bin: `xtensa-esp32s2-elf-gdb${ext}` },
     { pkg: 'toolchain-xtensa-esp-elf',    bin: `xtensa-esp-elf-gdb${ext}` },
     { pkg: 'toolchain-xtensa-esp32s3-elf', bin: `xtensa-esp32s3-elf-gdb${ext}` },
     { pkg: 'toolchain-xtensa-esp32-elf',   bin: `xtensa-esp32-elf-gdb${ext}` },
@@ -799,9 +802,15 @@ function autoDetectPioToolPath(
   try {
     for (const entry of fs.readdirSync(pioPackagesDir)) {
       if (entry.startsWith('tool-xtensa') && entry.includes('-gdb')) {
-        const binName = entry.replace(/^tool-/, '') + ext;
-        const c = path.join(pioPackagesDir, entry, 'bin', binName);
-        if (fs.existsSync(c)) { return c; }
+        const binDir = path.join(pioPackagesDir, entry, 'bin');
+        try {
+          for (const bin of fs.readdirSync(binDir)) {
+            if (bin.match(/^xtensa-.*-elf-gdb$/)) {
+              const c = path.join(binDir, bin);
+              if (fs.existsSync(c)) { return c; }
+            }
+          }
+        } catch { /* bin dir unreadable */ }
       }
     }
   } catch { /* ignore */ }
