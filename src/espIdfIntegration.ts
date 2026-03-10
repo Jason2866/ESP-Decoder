@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { CHIP_TARGET_MAP, XTENSA_CHIPS } from './chipTargets';
 
 export interface EspIdfBuild {
   name: string;
@@ -8,21 +9,6 @@ export interface EspIdfBuild {
   toolPath?: string;
   targetArch?: string;
 }
-
-const CHIP_TARGET_MAP: Record<string, string> = {
-  esp32: 'xtensa',
-  esp32s2: 'xtensa',
-  esp32s3: 'xtensa',
-  esp32c2: 'esp32c2',
-  esp32c3: 'esp32c3',
-  esp32c5: 'esp32c3',
-  esp32c6: 'esp32c6',
-  esp32h2: 'esp32h2',
-  esp32h4: 'esp32h4',
-  esp32p4: 'esp32p4',
-};
-
-const XTENSA_CHIPS = new Set(['esp32', 'esp32s2', 'esp32s3']);
 
 function parseIdfTarget(workspaceFolder: string): string | undefined {
   const sdkconfigPath = path.join(workspaceFolder, 'sdkconfig');
@@ -120,7 +106,7 @@ function findNewestVersionDir(parentDir: string): string | undefined {
 
 function findGdbFromIdfTools(chipTarget: string | undefined): string | undefined {
   const ext = process.platform === 'win32' ? '.exe' : '';
-  const isXtensa = chipTarget ? XTENSA_CHIPS.has(chipTarget) : false;
+  const isXtensa = chipTarget ? XTENSA_CHIPS.has(chipTarget) : true;
 
   const preferredNames = isXtensa
     ? ['xtensa-esp-elf-gdb', 'xtensa-esp32-elf-gdb', 'xtensa-esp32s2-elf-gdb', 'xtensa-esp32s3-elf-gdb']
@@ -206,7 +192,7 @@ export async function findEspIdfBuilds(workspaceFolder: string): Promise<EspIdfB
   const buildDir = path.join(workspaceFolder, 'build');
   const projectName = readProjectName(workspaceFolder);
   const idfTarget = parseIdfTarget(workspaceFolder);
-  const targetArch = idfTarget ? CHIP_TARGET_MAP[idfTarget] ?? (XTENSA_CHIPS.has(idfTarget) ? 'xtensa' : undefined) : undefined;
+  const targetArch = idfTarget ? CHIP_TARGET_MAP[idfTarget] : undefined;
   const toolPath = findGdbFromIdfTools(idfTarget);
 
   const elfCandidates = findElfCandidates(buildDir, projectName);

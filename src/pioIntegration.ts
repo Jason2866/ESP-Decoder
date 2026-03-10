@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { findEspIdfBuilds } from './espIdfIntegration';
+import { CHIP_TARGET_MAP, RISCV_TARGETS } from './chipTargets';
 
 /**
  * Detected PlatformIO environment with ELF and tool paths.
@@ -269,22 +270,6 @@ function parsePioProject(workspaceFolder: string): ParsedEnv[] {
 // ---------------------------------------------------------------------------
 // Chip / architecture detection
 // ---------------------------------------------------------------------------
-
-const CHIP_TARGET_MAP: Record<string, string> = {
-  'esp32s3': 'xtensa',
-  'esp32s2': 'xtensa',
-  'esp32c2': 'esp32c2',
-  'esp32c3': 'esp32c3',
-  'esp32c5': 'esp32c3',  // no dedicated trbr target, closest match
-  'esp32c6': 'esp32c6',
-  'esp32h2': 'esp32h2',
-  'esp32h4': 'esp32h4',
-  'esp32p4': 'esp32p4',
-  'esp8266': 'xtensa',
-  'esp32':   'xtensa',
-};
-
-const RISCV_TARGETS = new Set(['esp32c2', 'esp32c3', 'esp32c5', 'esp32c6', 'esp32h2', 'esp32h4', 'esp32p4']);
 
 /**
  * Get the raw chip name (e.g. "esp32c3") from a board.
