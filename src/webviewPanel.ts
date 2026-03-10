@@ -454,7 +454,7 @@ export class EspDecoderWebviewPanel {
         'Coredump Files': ['bin', 'b64'],
         'All Files': ['*'],
       },
-      title: 'Select ESP Coredump File (ELF or b64)',
+      title: 'Select ESP Coredump File (bin or b64)',
     });
 
     if (!uris || uris.length === 0) {
