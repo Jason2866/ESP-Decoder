@@ -241,7 +241,7 @@ async function tryAutoDetectElf(): Promise<void> {
 }
 
 function autoDetectFromPio(elfPath: string): void {
-  if (manualElfOverride) {
+  if (manualElfOverride || hasUserConfiguredSession()) {
     return; // User has manually selected an ELF — do not overwrite
   }
 
@@ -271,7 +271,7 @@ function autoDetectFromPio(elfPath: string): void {
 }
 
 function autoDetectFromEspIdf(elfPath: string): void {
-  if (manualElfOverride) {
+  if (manualElfOverride || hasUserConfiguredSession()) {
     return;
   }
 
@@ -300,6 +300,36 @@ function autoDetectFromEspIdf(elfPath: string): void {
   }
 }
 
+function hasUserConfiguredSession(): boolean {
+  const config = vscode.workspace.getConfiguration('esp-decoder');
+  return Boolean(config.get<string>('elfPath', ''))
+    || Boolean(config.get<string>('toolPath', ''))
+    || config.get<string>('targetArch', 'auto') !== 'auto';
+}
+
+function findEspIdfProjectRoot(elfPath: string, workspaceFolder: string): string | undefined {
+  let currentDir = path.dirname(elfPath);
+  const workspaceRoot = path.resolve(workspaceFolder);
+
+  while (true) {
+    const normalizedCurrent = path.resolve(currentDir);
+    const relativeToWorkspace = path.relative(workspaceRoot, normalizedCurrent);
+    if (relativeToWorkspace.startsWith('..') || path.isAbsolute(relativeToWorkspace)) {
+      return undefined;
+    }
+
+    if (fs.existsSync(path.join(normalizedCurrent, 'sdkconfig'))) {
+      return normalizedCurrent;
+    }
+
+    const parentDir = path.dirname(normalizedCurrent);
+    if (parentDir === normalizedCurrent) {
+      return undefined;
+    }
+    currentDir = parentDir;
+  }
+}
+
 function isEspIdfBuildElf(elfPath: string): boolean {
   if (!elfPath.includes('/build/') && !elfPath.includes('\\build\\')) {
     return false;
@@ -310,12 +340,13 @@ function isEspIdfBuildElf(elfPath: string): boolean {
     return false;
   }
 
-  const relative = path.relative(workspaceFolder, elfPath);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+  const projectRoot = findEspIdfProjectRoot(elfPath, workspaceFolder);
+  if (!projectRoot) {
     return false;
   }
 
-  if (!fs.existsSync(path.join(workspaceFolder, 'sdkconfig'))) {
+  const relative = path.relative(projectRoot, elfPath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
     return false;
   }
 
