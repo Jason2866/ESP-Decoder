@@ -1173,7 +1173,7 @@ export class EspDecoderWebviewPanel {
       <div class="modal-hint">Paste the full serial output containing the crash dump (including base64-encoded coredumps), or load an ESP coredump file. The decoded result will appear in the Crash Events tab.</div>
       <textarea id="paste-textarea" placeholder="Paste crash log here..." spellcheck="false" autocomplete="off"></textarea>
       <div class="modal-buttons">
-        <button class="secondary" id="btn-coredump-file" title="Load an ESP coredump file (ELF or base64)">Load Coredump…</button>
+        <button class="secondary" id="btn-coredump-file" title="Load an ESP coredump file (bin or base64)">Load Coredump…</button>
         <span style="flex:1"></span>
         <button class="secondary" id="btn-paste-cancel">Cancel</button>
         <button id="btn-paste-decode">Decode</button>
