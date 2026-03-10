@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.0] - 2026-03-10
+
+### Added
+- **Native IDF support** contributed by [h2zero](https://github.com/h2zero)
+
+## [0.7.0] - 2026-03-10
+
+### Bug fixes
+
 ## [0.6.0] - 2026-03-09
 
 ### Added
