@@ -462,13 +462,35 @@ function findGdbPackage(packagesDir: string, isRiscV: boolean, chipName?: string
       }
     }
 
-    // Fall back to common variants
+    // Fall back to common variants in the dedicated GDB package
     for (const chip of ['esp32', 'esp32s3', 'esp32s2']) {
       const gdbBin = path.join(gdbDir, `xtensa-${chip}-elf-gdb${ext}`);
       if (fs.existsSync(gdbBin)) {
         return gdbBin;
       }
     }
+
+    // Generic binary (xtensa-esp-elf-gdb) in the dedicated GDB package
+    const genericGdb = path.join(gdbDir, `xtensa-esp-elf-gdb${ext}`);
+    if (fs.existsSync(genericGdb)) {
+      return genericGdb;
+    }
+
+    // Legacy: GDB bundled inside toolchain-xtensa-* packages
+    try {
+      for (const entry of fs.readdirSync(packagesDir)) {
+        if (!entry.startsWith('toolchain-xtensa-')) { continue; }
+        const binDir = path.join(packagesDir, entry, 'bin');
+        if (chipName) {
+          const c = path.join(binDir, `xtensa-${chipName}-elf-gdb${ext}`);
+          if (fs.existsSync(c)) { return c; }
+        }
+        for (const chip of ['esp32', 'esp32s3', 'esp32s2']) {
+          const c = path.join(binDir, `xtensa-${chip}-elf-gdb${ext}`);
+          if (fs.existsSync(c)) { return c; }
+        }
+      }
+    } catch { /* ignore */ }
   }
   return undefined;
 }
