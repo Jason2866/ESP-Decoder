@@ -77,13 +77,29 @@ function findPioGdb(kind: 'riscv' | 'xtensa'): string | undefined {
   }
   const xtensaVariants = [
     { pkg: 'tool-xtensa-esp-elf-gdb', bin: `xtensa-esp32-elf-gdb${ext}` },
+    { pkg: 'tool-xtensa-esp-elf-gdb', bin: `xtensa-esp32s3-elf-gdb${ext}` },
+    { pkg: 'tool-xtensa-esp-elf-gdb', bin: `xtensa-esp32s2-elf-gdb${ext}` },
     { pkg: 'toolchain-xtensa-esp-elf', bin: `xtensa-esp-elf-gdb${ext}` },
+    { pkg: 'toolchain-xtensa-esp32s3-elf', bin: `xtensa-esp32s3-elf-gdb${ext}` },
     { pkg: 'toolchain-xtensa-esp32-elf', bin: `xtensa-esp32-elf-gdb${ext}` },
+    { pkg: 'toolchain-xtensa-esp32s2-elf', bin: `xtensa-esp32s2-elf-gdb${ext}` },
   ];
   for (const { pkg, bin } of xtensaVariants) {
     const c = path.join(pioDir, pkg, 'bin', bin);
     if (fs.existsSync(c)) { return c; }
   }
+  try {
+    for (const entry of fs.readdirSync(pioDir)) {
+      if (entry.startsWith('tool-xtensa') && entry.includes('-gdb')) {
+        const binDir = path.join(pioDir, entry, 'bin');
+        for (const bin of fs.readdirSync(binDir)) {
+          if (/^xtensa-.*-elf-gdb(\.exe)?$/.test(bin)) {
+            return path.join(binDir, bin);
+          }
+        }
+      }
+    }
+  } catch {}
   return undefined;
 }
 

@@ -450,7 +450,10 @@ export class EspDecoderWebviewPanel {
       canSelectFiles: true,
       canSelectFolders: false,
       canSelectMany: false,
-      filters: { 'Coredump Files': ['elf', 'bin', 'b64', '*'] },
+      filters: {
+        'Coredump Files': ['elf', 'b64'],
+        'All Files': ['*'],
+      },
       title: 'Select ESP Coredump File (ELF or b64)',
     });
 

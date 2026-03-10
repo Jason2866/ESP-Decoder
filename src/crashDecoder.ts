@@ -717,7 +717,10 @@ async function decodeCoredumpElfInternal(
     }
 
     // Convert CoredumpDecodeResult (ThreadDecodeResult[]) to our format
-    if (Array.isArray(result) && result.length > 0) {
+    if (Array.isArray(result)) {
+      if (result.length === 0) {
+        return { threads: [], rawOutput };
+      }
       const threads: ThreadDecodedCrash[] = result.map((threadResult: any) => {
         const decoded = convertDecodeResult(threadResult.result ?? threadResult, '');
         return {
