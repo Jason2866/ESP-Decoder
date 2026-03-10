@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.0] - 2026-03-11
+
+### Added
+- **coredump decode** supported format `*.bin` and `*.b64`
+
 ## [0.8.0] - 2026-03-10
 
 ### Added
