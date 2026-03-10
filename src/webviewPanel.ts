@@ -1487,14 +1487,24 @@ export class EspDecoderWebviewPanel {
     }
 
     function linkifyPaths(text) {
-      // Replace file paths like /path/to/file.c:123 with clickable links
-      var escaped = escapeHtml(text);
-      return escaped.replace(/(\/[\w.\-\/]+\.\w+):(\d+)/g, function(match, file, line) {
+      // Run the regex against the raw (unescaped) text so that captured file
+      // paths used in data-file attributes are not corrupted by HTML entities.
+      var result = '';
+      var lastIndex = 0;
+      var re = /(\/[\w.\-\/]+\.\w+):(\d+)/g;
+      var m;
+      while ((m = re.exec(text)) !== null) {
+        result += escapeHtml(text.slice(lastIndex, m.index));
+        var file = m[1];
+        var line = m[2];
         var shortFile = file.split('/').pop();
-        return '<span class="frame-file" data-file="' +
+        result += '<span class="frame-file" data-file="' +
           escapeAttr(file) + '" data-line="' + escapeAttr(line) +
           '">' + escapeHtml(shortFile + ':' + line) + '</span>';
-      });
+        lastIndex = re.lastIndex;
+      }
+      result += escapeHtml(text.slice(lastIndex));
+      return result;
     }
 
     function formatAnnotation(annotation) {
