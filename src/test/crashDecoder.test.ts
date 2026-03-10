@@ -45,8 +45,8 @@ vi.mock('vscode', () => {
 // ---------------------------------------------------------------------------
 // Import under test (after vscode mock is in place)
 // ---------------------------------------------------------------------------
-import { TrbrCrashCapturer, decodeCrash } from '../crashDecoder.js';
-import type { CrashEvent } from '../crashDecoder.js';
+import { TrbrCrashCapturer, decodeCrash, decodeCoredumpElf } from '../crashDecoder.js';
+import type { CrashEvent, CoredumpDecodedResult } from '../crashDecoder.js';
 
 // ---------------------------------------------------------------------------
 // Fixture paths
@@ -215,4 +215,24 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
       expect(mepc).toBe(0x4080c1aa);
     }
   );
+});
+
+describe('decodeCoredumpElf', () => {
+  it('exports as a function', () => {
+    expect(typeof decodeCoredumpElf).toBe('function');
+  });
+
+  it('gracefully handles missing toolPath by returning empty result', async () => {
+    // When toolPath doesn't exist and auto-detection fails, should not throw
+    const result = await decodeCoredumpElf(
+      '/nonexistent/coredump.elf',
+      '/nonexistent/firmware.elf',
+      undefined, // no toolPath — auto-detect will fail
+      'esp32c6',
+    );
+    expect(result).toBeDefined();
+    expect(Array.isArray(result.threads)).toBe(true);
+    expect(result.threads).toHaveLength(0);
+    expect(typeof result.rawOutput).toBe('string');
+  });
 });

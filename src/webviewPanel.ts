@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
-import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash, Addr2linePool } from './crashDecoder';
+import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
 
 interface SessionConfig {
   elfPath?: string;
@@ -422,6 +422,82 @@ export class EspDecoderWebviewPanel {
         }
         break;
       }
+      case 'decodeCoredumpFile': {
+        await this.handleDecodeCoredumpFile();
+        break;
+      }
+    }
+  }
+
+  /**
+   * Show a file picker to select a coredump ELF file, then decode it
+   * using trbr's coredump mode.
+   */
+  private async handleDecodeCoredumpFile(): Promise<void> {
+    if (!this.config.elfPath) {
+      vscode.window.showWarningMessage(
+        'No firmware ELF file configured. Please select an ELF file first.'
+      );
+      return;
+    }
+
+    const uris = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      filters: { 'Coredump ELF': ['elf', 'bin', '*'] },
+      title: 'Select ESP Coredump ELF File',
+    });
+
+    if (!uris || uris.length === 0) {
+      return;
+    }
+
+    const coredumpPath = uris[0].fsPath;
+    this.log.appendLine(`[ESP Decoder] Decoding coredump ELF: ${coredumpPath}`);
+
+    // Create a synthetic crash event for the coredump
+    const eventId = `coredump-${Date.now()}`;
+    const event: CrashEvent = {
+      id: eventId,
+      kind: 'unknown',
+      lines: [`Coredump ELF: ${coredumpPath}`],
+      rawText: `Coredump ELF file: ${coredumpPath}`,
+      timestamp: Date.now(),
+    };
+    this.crashEvents.push(event);
+
+    this.postMessage({
+      type: 'crashDetected',
+      event: {
+        ...this.serializeCrashEvent(event),
+        isCoredump: true,
+      },
+    });
+
+    try {
+      const result = await decodeCoredumpElf(
+        coredumpPath,
+        this.config.elfPath,
+        this.config.toolPath,
+        this.config.targetArch,
+        this.log,
+      );
+
+      this.postMessage({
+        type: 'coredumpDecoded',
+        eventId,
+        result: this.serializeCoredumpResult(result),
+      });
+    } catch (err) {
+      this.log.appendLine(
+        `[ESP Decoder] Coredump decode error: ${err instanceof Error ? err.message : String(err)}`
+      );
+      this.postMessage({
+        type: 'crashDecodeError',
+        eventId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -443,6 +519,18 @@ export class EspDecoderWebviewPanel {
       regAnnotations: decoded.regAnnotations,
       allocInfo: decoded.allocInfo,
       rawOutput: decoded.rawOutput,
+    };
+  }
+
+  private serializeCoredumpResult(result: CoredumpDecodedResult): any {
+    return {
+      threads: result.threads.map(t => ({
+        threadId: t.threadId,
+        threadName: t.threadName,
+        isCurrent: t.isCurrent,
+        decoded: this.serializeDecodedCrash(t.decoded),
+      })),
+      rawOutput: result.rawOutput,
     };
   }
 
@@ -1019,9 +1107,11 @@ export class EspDecoderWebviewPanel {
   <div class="modal-overlay hidden" id="paste-modal">
     <div class="modal-box">
       <div class="modal-title">Decode Crash Log</div>
-      <div class="modal-hint">Paste the full serial output containing the crash dump. The decoded result will appear in the Crash Events tab.</div>
+      <div class="modal-hint">Paste the full serial output containing the crash dump, or load an ESP coredump ELF file. The decoded result will appear in the Crash Events tab.</div>
       <textarea id="paste-textarea" placeholder="Paste crash log here..." spellcheck="false" autocomplete="off"></textarea>
       <div class="modal-buttons">
+        <button class="secondary" id="btn-coredump-file" title="Load an ESP coredump in ELF format">Load Coredump ELF…</button>
+        <span style="flex:1"></span>
         <button class="secondary" id="btn-paste-cancel">Cancel</button>
         <button id="btn-paste-decode">Decode</button>
       </div>
@@ -1124,6 +1214,16 @@ export class EspDecoderWebviewPanel {
       document.getElementById('paste-modal').classList.add('hidden');
     });
 
+    document.getElementById('btn-coredump-file').addEventListener('click', () => {
+      document.getElementById('paste-modal').classList.add('hidden');
+      // Switch to crashes tab so the user sees the result
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      document.querySelector('[data-tab="crashes"]').classList.add('active');
+      document.getElementById('panel-crashes').classList.add('active');
+      vscode.postMessage({ type: 'decodeCoredumpFile' });
+    });
+
     document.getElementById('btn-paste-decode').addEventListener('click', () => {
       const text = document.getElementById('paste-textarea').value.trim();
       if (!text) return;
@@ -1204,6 +1304,9 @@ export class EspDecoderWebviewPanel {
           break;
         case 'crashDecoded':
           updateCrashDecoded(msg.eventId, msg.decoded);
+          break;
+        case 'coredumpDecoded':
+          updateCoredumpDecoded(msg.eventId, msg.result);
           break;
         case 'crashDecodeError':
           updateCrashError(msg.eventId, msg.error);
@@ -1319,11 +1422,12 @@ export class EspDecoderWebviewPanel {
       el.id = 'crash-' + event.id;
 
       const time = new Date(event.timestamp).toLocaleTimeString();
+      const kindLabel = event.isCoredump ? 'coredump' : escapeHtml(event.kind);
 
       el.innerHTML = 
         '<div class="crash-header" data-crash-id="' + event.id + '">' +
           '<div class="crash-title">' +
-            '<span class="crash-kind">' + escapeHtml(event.kind) + '</span>' +
+            '<span class="crash-kind">' + kindLabel + '</span>' +
             '<span>' + escapeHtml(event.id) + '</span>' +
           '</div>' +
           '<span class="crash-time">' + time + '</span>' +
@@ -1366,7 +1470,54 @@ export class EspDecoderWebviewPanel {
         crashEl.classList.add('expanded');
       }
 
-      let html = '';
+      var html = renderDecodedCrashHtml(decoded);
+
+      if (!html) {
+        html = '<div class="decode-status">No decoded information available</div>';
+      }
+
+      section.innerHTML = html;
+    }
+
+    function updateCoredumpDecoded(eventId, result) {
+      const section = document.getElementById('decode-section-' + eventId);
+      if (!section) return;
+
+      // Auto-expand
+      const crashEl = document.getElementById('crash-' + eventId);
+      if (crashEl && !crashEl.classList.contains('expanded')) {
+        crashEl.classList.add('expanded');
+      }
+
+      var html = '';
+      if (result.threads && result.threads.length > 0) {
+        result.threads.forEach(function(thread) {
+          var threadLabel = escapeHtml(thread.threadName || ('Thread ' + thread.threadId));
+          var currentTag = thread.isCurrent ? ' <span style="color:var(--error-fg);font-weight:bold">(crashed)</span>' : '';
+          html += '<div class="crash-section" style="border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:8px">';
+          html += '<div class="crash-section-title" style="font-size:13px">' + threadLabel + currentTag + '</div>';
+          html += renderDecodedCrashHtml(thread.decoded);
+          html += '</div>';
+        });
+      }
+
+      // Show raw trbr output at the bottom
+      if (result.rawOutput) {
+        html += '<div class="crash-section">';
+        html += '<div class="crash-section-title">Decoded Output</div>';
+        html += '<div class="raw-output">' + linkifyPaths(result.rawOutput) + '</div>';
+        html += '</div>';
+      }
+
+      if (!html) {
+        html = '<div class="decode-status">No decoded information available</div>';
+      }
+
+      section.innerHTML = html;
+    }
+
+    function renderDecodedCrashHtml(decoded) {
+      var html = '';
 
       // Fault info
       if (decoded.faultInfo) {
@@ -1462,11 +1613,7 @@ export class EspDecoderWebviewPanel {
         html += '</div>';
       }
 
-      if (!html) {
-        html = '<div class="decode-status">No decoded information available</div>';
-      }
-
-      section.innerHTML = html;
+      return html;
     }
 
     function updateCrashError(eventId, error) {

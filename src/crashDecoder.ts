@@ -19,6 +19,7 @@ import type {
   Capturer,
   CapturerEvent,
   DecodeOptions,
+  CoredumpDecodeResult,
 } from 'trbr';
 import { getPioPackagesDir } from './pioIntegration';
 import { Addr2linePool } from './addr2lineResolver';
@@ -64,6 +65,21 @@ export interface StackFrame {
   function?: string;
   file?: string;
   line?: string;
+}
+
+/**
+ * Decoded coredump with per-thread crash information.
+ */
+export interface CoredumpDecodedResult {
+  threads: ThreadDecodedCrash[];
+  rawOutput: string;
+}
+
+export interface ThreadDecodedCrash {
+  threadId: string;
+  threadName?: string;
+  isCurrent?: boolean;
+  decoded: DecodedCrash;
 }
 
 /**
@@ -413,6 +429,99 @@ export async function decodeCrash(
     const errMsg = err instanceof Error ? err.stack || err.message : String(err);
     write(`[ESP Decoder] decode failed: ${errMsg}`);
     return createRawDecode(crashEvent.rawText);
+  }
+}
+
+/**
+ * Decode an ESP coredump in ELF format using trbr's coredump mode.
+ * The coredump ELF file is separate from the firmware ELF — the firmware ELF
+ * provides debug symbols, while the coredump ELF contains the crash state.
+ *
+ * @param coredumpPath - Path to the coredump ELF file
+ * @param elfPath - Path to the firmware ELF file (with debug symbols)
+ * @param toolPath - Optional path to GDB binary
+ * @param targetArch - Optional target architecture
+ * @param log - Optional logger
+ */
+export async function decodeCoredumpElf(
+  coredumpPath: string,
+  elfPath: string,
+  toolPath?: string,
+  targetArch?: string,
+  log?: DecodeLogger,
+): Promise<CoredumpDecodedResult> {
+  const write = (msg: string) => log?.appendLine(msg);
+
+  if (!toolPath) {
+    // Try RISC-V first, then Xtensa — we don't know the crash kind from an ELF coredump
+    toolPath = autoDetectPioToolPath('riscv', log) ?? autoDetectPioToolPath('xtensa', log);
+    if (!toolPath) {
+      write('[ESP Decoder] No toolPath (GDB) found for coredump decoding');
+      return {
+        threads: [],
+        rawOutput: 'No GDB toolchain found. Please configure a tool path.',
+      };
+    }
+  }
+
+  const resolvedArch = resolveTargetArch(targetArch, 'unknown');
+
+  try {
+    // Create decode params with coredumpMode enabled
+    let params: any;
+    try {
+      params = await createDecodeParams({
+        elfPath,
+        toolPath,
+        targetArch: resolvedArch as any,
+        coredumpMode: true,
+      });
+    } catch (e) {
+      write(`[ESP Decoder] createDecodeParams (coredump) failed: ${e instanceof Error ? e.message : String(e)}`);
+      params = { elfPath, toolPath, targetArch: resolvedArch, coredumpMode: true };
+    }
+
+    const decodeOptions: DecodeOptions = {};
+
+    // Pass the coredump file path as DecodeInputFileSource
+    const result = await decode(params, { inputPath: coredumpPath }, decodeOptions);
+
+    // Get stringified output for rawOutput
+    let rawOutput: string;
+    try {
+      rawOutput = stringifyDecodeResult(result, { color: 'disable' });
+    } catch {
+      rawOutput = '';
+    }
+
+    // Convert CoredumpDecodeResult (ThreadDecodeResult[]) to our format
+    if (Array.isArray(result) && result.length > 0) {
+      const threads: ThreadDecodedCrash[] = result.map((threadResult: any) => {
+        const decoded = convertDecodeResult(threadResult.result ?? threadResult, '');
+        return {
+          threadId: threadResult.threadId ?? 'unknown',
+          threadName: threadResult.threadName,
+          isCurrent: threadResult.current ?? false,
+          decoded,
+        };
+      });
+
+      return { threads, rawOutput };
+    }
+
+    // Non-array result (single thread / fallback)
+    const decoded = convertDecodeResult(result, '');
+    return {
+      threads: [{ threadId: '0', isCurrent: true, decoded }],
+      rawOutput,
+    };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.stack || err.message : String(err);
+    write(`[ESP Decoder] coredump decode failed: ${errMsg}`);
+    return {
+      threads: [],
+      rawOutput: `Coredump decode failed: ${errMsg}`,
+    };
   }
 }
 
