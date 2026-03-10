@@ -47,6 +47,7 @@ vi.mock('vscode', () => {
 // ---------------------------------------------------------------------------
 import { TrbrCrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
 import type { CrashEvent, CoredumpDecodedResult } from '../crashDecoder.js';
+import { getPioPackagesDir } from '../pioIntegration.js';
 
 // ---------------------------------------------------------------------------
 // Fixture paths
@@ -62,9 +63,32 @@ const CRASH_TEXT = fs.readFileSync(CRASH_TEXT_PATH, 'utf8');
 const B64_COREDUMP_PATH = path.join(FIXTURES_DIR, 'coredump_esp32.b64');
 const ESP32_FIRMWARE_ELF_PATH = path.join(FIXTURES_DIR, 'esp32_coredump_firmware.elf');
 
-// Resolved from PlatformIO packages on this machine
-const GDB_PATH = '/Users/claudia/.platformio/packages/tool-riscv32-esp-elf-gdb/bin/riscv32-esp-elf-gdb';
-const XTENSA_GDB_PATH = '/Users/claudia/.platformio/packages/tool-xtensa-esp-elf-gdb/bin/xtensa-esp32-elf-gdb';
+// Resolve GDB paths from PlatformIO packages (works on any machine)
+function findPioGdb(kind: 'riscv' | 'xtensa'): string | undefined {
+  const pioDir = getPioPackagesDir();
+  if (!pioDir) { return undefined; }
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  if (kind === 'riscv') {
+    const candidates = [
+      path.join(pioDir, 'tool-riscv32-esp-elf-gdb', 'bin', `riscv32-esp-elf-gdb${ext}`),
+      path.join(pioDir, 'toolchain-riscv32-esp', 'bin', `riscv32-esp-elf-gdb${ext}`),
+    ];
+    return candidates.find(c => fs.existsSync(c));
+  }
+  const xtensaVariants = [
+    { pkg: 'tool-xtensa-esp-elf-gdb', bin: `xtensa-esp32-elf-gdb${ext}` },
+    { pkg: 'toolchain-xtensa-esp-elf', bin: `xtensa-esp-elf-gdb${ext}` },
+    { pkg: 'toolchain-xtensa-esp32-elf', bin: `xtensa-esp32-elf-gdb${ext}` },
+  ];
+  for (const { pkg, bin } of xtensaVariants) {
+    const c = path.join(pioDir, pkg, 'bin', bin);
+    if (fs.existsSync(c)) { return c; }
+  }
+  return undefined;
+}
+
+const GDB_PATH = process.env.ESP_RISCV_GDB ?? findPioGdb('riscv') ?? '';
+const XTENSA_GDB_PATH = process.env.ESP_XTENSA_GDB ?? findPioGdb('xtensa') ?? '';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -286,6 +310,14 @@ describe('containsBase64Coredump', () => {
   it('returns false for empty string', () => {
     expect(containsBase64Coredump('')).toBe(false);
   });
+
+  it.skipIf(!fs.existsSync(B64_COREDUMP_PATH))(
+    'detects markerless b64 coredump file content',
+    () => {
+      const b64Content = fs.readFileSync(B64_COREDUMP_PATH, 'utf-8');
+      expect(containsBase64Coredump(b64Content)).toBe(true);
+    },
+  );
 });
 
 describe('decodeCoredumpBase64', () => {

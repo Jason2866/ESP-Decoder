@@ -525,10 +525,31 @@ export async function decodeCoredumpBase64(
 
 /**
  * Check whether text contains an ESP coredump in base64 format.
- * Looks for the CORE DUMP START/END markers used by ESP-IDF serial output.
+ * Matches either:
+ *  - CORE DUMP START/END markers from ESP-IDF serial output, or
+ *  - a markerless block of base64 lines whose decoded payload contains an ELF core.
  */
 export function containsBase64Coredump(text: string): boolean {
-  return COREDUMP_START_RE.test(text) && COREDUMP_END_RE.test(text);
+  if (COREDUMP_START_RE.test(text) && COREDUMP_END_RE.test(text)) {
+    return true;
+  }
+
+  // Markerless detection: at least 10 consecutive base64 lines that decode to
+  // a buffer containing ELF magic (possibly after an esp-coredump header).
+  const base64Lines = text
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l.length > 0 && /^[A-Za-z0-9+/=]+$/.test(l));
+  if (base64Lines.length < 10) {
+    return false;
+  }
+  try {
+    const buffers = base64Lines.map(l => Buffer.from(l, 'base64'));
+    const binary = Buffer.concat(buffers);
+    return binary.indexOf(ELF_MAGIC) >= 0;
+  } catch {
+    return false;
+  }
 }
 
 /** Regex for ESP-IDF coredump serial markers */
@@ -615,10 +636,14 @@ function decodeBase64Payload(text: string): Buffer | undefined {
   // esp-coredump wraps the ELF core with a proprietary header (total_len, version, etc.).
   // Strip it by locating the embedded ELF magic.
   const elfOffset = binary.indexOf(ELF_MAGIC);
+  if (elfOffset === 0) {
+    return binary;
+  }
   if (elfOffset > 0) {
     return binary.subarray(elfOffset);
   }
-  return binary;
+  // No ELF magic found — not a valid coredump
+  return undefined;
 }
 
 /**
@@ -638,14 +663,19 @@ async function decodeCoredumpElfInternal(
   const crashKind: 'xtensa' | 'riscv' | 'unknown' = detectedArch ?? 'unknown';
   write(`[ESP Decoder] Coredump: firmware ELF arch detection = ${detectedArch ?? 'unknown'}`);
 
+  let chosenArch: 'xtensa' | 'riscv' | 'unknown' = crashKind;
   if (!toolPath) {
     // Use the detected architecture to pick the right GDB
-    if (crashKind === 'xtensa') {
-      toolPath = autoDetectPioToolPath('xtensa', log) ?? autoDetectPioToolPath('riscv', log);
-    } else if (crashKind === 'riscv') {
-      toolPath = autoDetectPioToolPath('riscv', log) ?? autoDetectPioToolPath('xtensa', log);
+    const primaryKind = crashKind === 'xtensa' ? 'xtensa' : crashKind === 'riscv' ? 'riscv' : 'riscv';
+    const fallbackKind = primaryKind === 'riscv' ? 'xtensa' : 'riscv';
+    toolPath = autoDetectPioToolPath(primaryKind, log);
+    if (toolPath) {
+      chosenArch = primaryKind;
     } else {
-      toolPath = autoDetectPioToolPath('riscv', log) ?? autoDetectPioToolPath('xtensa', log);
+      toolPath = autoDetectPioToolPath(fallbackKind, log);
+      if (toolPath) {
+        chosenArch = fallbackKind;
+      }
     }
     if (!toolPath) {
       write('[ESP Decoder] No toolPath (GDB) found for coredump decoding');
@@ -656,7 +686,7 @@ async function decodeCoredumpElfInternal(
     }
   }
 
-  const resolvedArch = resolveTargetArch(targetArch, crashKind);
+  const resolvedArch = resolveTargetArch(targetArch, chosenArch);
 
   try {
     // Create decode params with coredumpMode enabled
