@@ -227,9 +227,10 @@ async function tryAutoDetectElf(): Promise<void> {
 
       if (newest) {
         sessionConfig = {
+          ...sessionConfig,
           elfPath: newest.elfPath,
-          toolPath: newest.toolPath,
-          targetArch: newest.targetArch,
+          toolPath: sessionConfig.toolPath || newest.toolPath,
+          targetArch: sessionConfig.targetArch || newest.targetArch,
           romElfPath: newest.romElfPath,
         };
       }
