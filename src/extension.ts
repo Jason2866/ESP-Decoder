@@ -161,7 +161,7 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     watcher.onDidCreate((uri) => {
-      if (uri.fsPath.includes('.pio')) {
+      if (isPlatformIoBuildElf(uri.fsPath)) {
         autoDetectFromPio(uri.fsPath);
       } else if (isEspIdfBuildElf(uri.fsPath)) {
         autoDetectFromEspIdf(uri.fsPath);
@@ -169,7 +169,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     watcher.onDidChange((uri) => {
-      if (uri.fsPath.includes('.pio')) {
+      if (isPlatformIoBuildElf(uri.fsPath)) {
         autoDetectFromPio(uri.fsPath);
       } else if (isEspIdfBuildElf(uri.fsPath)) {
         autoDetectFromEspIdf(uri.fsPath);
@@ -181,6 +181,11 @@ export function activate(context: vscode.ExtensionContext) {
     // Try auto-detect on activation
     tryAutoDetectElf();
   }
+}
+
+function isPlatformIoBuildElf(elfPath: string): boolean {
+  const normalized = path.normalize(elfPath);
+  return normalized.includes(`${path.sep}.pio${path.sep}build${path.sep}`);
 }
 
 /**
