@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { findEspIdfBuilds } from './espIdfIntegration';
 
 /**
  * Detected PlatformIO environment with ELF and tool paths.
@@ -578,6 +579,7 @@ export async function selectElfFile(
 
   // Auto-detect from PlatformIO
   let currentMatchedByPio = false;
+  let currentMatchedByEspIdf = false;
   if (workspaceFolder) {
     const envs = await findPioEnvironments(workspaceFolder);
     for (const env of envs) {
@@ -595,10 +597,26 @@ export async function selectElfFile(
         romElfPath: env.romElfPath,
       });
     }
+
+    const idfBuilds = await findEspIdfBuilds(workspaceFolder);
+    for (const build of idfBuilds) {
+      const isCurrent = currentElfPath === build.elfPath;
+      if (isCurrent) { currentMatchedByEspIdf = true; }
+      items.push({
+        label: `$(tools) ${build.name}`,
+        description: build.elfPath,
+        detail: build.targetArch
+          ? `Arch: ${build.targetArch}${build.toolPath ? ' | Tool: ' + path.basename(build.toolPath) : ''}${isCurrent ? ' ✓ active' : ''}`
+          : isCurrent ? '✓ active' : undefined,
+        elfPath: build.elfPath,
+        toolPath: build.toolPath,
+        targetArch: build.targetArch,
+      });
+    }
   }
 
   // If the current ELF was manually browsed (not from a PIO env), show it at the top
-  if (currentElfPath && !currentMatchedByPio) {
+  if (currentElfPath && !currentMatchedByPio && !currentMatchedByEspIdf) {
     const name = path.basename(currentElfPath);
     items.unshift({
       label: `$(check) ${name}  (current)`,
@@ -616,7 +634,7 @@ export async function selectElfFile(
   });
 
   const picked = await vscode.window.showQuickPick(items, {
-    placeHolder: 'Select PlatformIO environment or ELF file',
+    placeHolder: 'Select PlatformIO / ESP-IDF build or ELF file',
     title: 'ESP Decoder: Select ELF File',
   });
 
