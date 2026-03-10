@@ -805,7 +805,7 @@ function autoDetectPioToolPath(
         const binDir = path.join(pioPackagesDir, entry, 'bin');
         try {
           for (const bin of fs.readdirSync(binDir)) {
-            if (bin.match(/^xtensa-.*-elf-gdb$/)) {
+            if (bin.match(/^xtensa-.*-elf-gdb(\.exe)?$/)) {
               const c = path.join(binDir, bin);
               if (fs.existsSync(c)) { return c; }
             }
