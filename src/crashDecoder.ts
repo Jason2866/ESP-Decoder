@@ -610,7 +610,15 @@ function decodeBase64Payload(text: string): Buffer | undefined {
 
   // Decode each line independently — esp-coredump pads each line separately
   const buffers = base64Lines.map(line => Buffer.from(line, 'base64'));
-  return Buffer.concat(buffers);
+  const binary = Buffer.concat(buffers);
+
+  // esp-coredump wraps the ELF core with a proprietary header (total_len, version, etc.).
+  // Strip it by locating the embedded ELF magic.
+  const elfOffset = binary.indexOf(ELF_MAGIC);
+  if (elfOffset > 0) {
+    return binary.subarray(elfOffset);
+  }
+  return binary;
 }
 
 /**
