@@ -14,6 +14,7 @@ function touchFile(filePath: string): void {
 }
 
 describe('findEspIdfBuilds', () => {
+  const exe = process.platform === 'win32' ? '.exe' : '';
   const envRestore = {
     path: process.env.PATH,
     idfToolsPath: process.env.IDF_TOOLS_PATH,
@@ -44,7 +45,7 @@ describe('findEspIdfBuilds', () => {
     tempDirs.push(workspace, toolBinDir);
 
     touchFile(path.join(workspace, 'build', 'app.elf'));
-    touchFile(path.join(toolBinDir, 'xtensa-esp-elf-gdb'));
+    touchFile(path.join(toolBinDir, `xtensa-esp-elf-gdb${exe}`));
 
     process.env.PATH = toolBinDir;
     delete process.env.IDF_TOOLS_PATH;
@@ -52,7 +53,7 @@ describe('findEspIdfBuilds', () => {
     const builds = await findEspIdfBuilds(workspace);
     expect(builds.length).toBeGreaterThan(0);
     expect(builds[0].elfPath).toBe(path.join(workspace, 'build', 'app.elf'));
-    expect(builds[0].toolPath).toBe(path.join(toolBinDir, 'xtensa-esp-elf-gdb'));
+    expect(builds[0].toolPath).toBe(path.join(toolBinDir, `xtensa-esp-elf-gdb${exe}`));
   });
 
   it('still uses riscv GDB when sdkconfig target is riscv-based', async () => {
@@ -62,7 +63,7 @@ describe('findEspIdfBuilds', () => {
 
     touchFile(path.join(workspace, 'build', 'app.elf'));
     fs.writeFileSync(path.join(workspace, 'sdkconfig'), 'CONFIG_IDF_TARGET="esp32c6"\n');
-    touchFile(path.join(toolBinDir, 'riscv32-esp-elf-gdb'));
+    touchFile(path.join(toolBinDir, `riscv32-esp-elf-gdb${exe}`));
 
     process.env.PATH = toolBinDir;
     delete process.env.IDF_TOOLS_PATH;
@@ -70,6 +71,6 @@ describe('findEspIdfBuilds', () => {
     const builds = await findEspIdfBuilds(workspace);
     expect(builds.length).toBeGreaterThan(0);
     expect(builds[0].targetArch).toBe('esp32c6');
-    expect(builds[0].toolPath).toBe(path.join(toolBinDir, 'riscv32-esp-elf-gdb'));
+    expect(builds[0].toolPath).toBe(path.join(toolBinDir, `riscv32-esp-elf-gdb${exe}`));
   });
 });

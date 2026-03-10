@@ -239,33 +239,28 @@ function autoDetectFromPio(elfPath: string): void {
     return; // User has manually selected an ELF — do not overwrite
   }
 
-  sessionConfig.elfPath = elfPath;
-
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceFolder) {
     findPioEnvironments(workspaceFolder)
       .then((envs) => {
         const matched = envs.find((env) => env.elfPath === elfPath);
         if (matched) {
-          sessionConfig.toolPath = matched.toolPath || sessionConfig.toolPath;
-          sessionConfig.targetArch = matched.targetArch || sessionConfig.targetArch;
-          sessionConfig.romElfPath = matched.romElfPath || sessionConfig.romElfPath;
-        }
-
-        if (currentPanel) {
-          currentPanel.updateConfig(sessionConfig);
+          sessionConfig = {
+            ...sessionConfig,
+            elfPath: matched.elfPath,
+            toolPath: matched.toolPath,
+            targetArch: matched.targetArch,
+            romElfPath: matched.romElfPath,
+          };
+          if (currentPanel) {
+            currentPanel.updateConfig(sessionConfig);
+          }
         }
       })
       .catch(() => {
-        if (currentPanel) {
-          currentPanel.updateConfig(sessionConfig);
-        }
+        // Ignore auto-detect failures.
       });
     return;
-  }
-
-  if (currentPanel) {
-    currentPanel.updateConfig(sessionConfig);
   }
 }
 
@@ -274,32 +269,28 @@ function autoDetectFromEspIdf(elfPath: string): void {
     return;
   }
 
-  sessionConfig.elfPath = elfPath;
-
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceFolder) {
     findEspIdfBuilds(workspaceFolder)
       .then((builds) => {
         const matched = builds.find((build) => build.elfPath === elfPath);
         if (matched) {
-          sessionConfig.toolPath = matched.toolPath || sessionConfig.toolPath;
-          sessionConfig.targetArch = matched.targetArch || sessionConfig.targetArch;
-          sessionConfig.romElfPath = undefined;
-        }
-        if (currentPanel) {
-          currentPanel.updateConfig(sessionConfig);
+          sessionConfig = {
+            ...sessionConfig,
+            elfPath: matched.elfPath,
+            toolPath: matched.toolPath,
+            targetArch: matched.targetArch,
+            romElfPath: undefined,
+          };
+          if (currentPanel) {
+            currentPanel.updateConfig(sessionConfig);
+          }
         }
       })
       .catch(() => {
-        if (currentPanel) {
-          currentPanel.updateConfig(sessionConfig);
-        }
+        // Ignore auto-detect failures.
       });
     return;
-  }
-
-  if (currentPanel) {
-    currentPanel.updateConfig(sessionConfig);
   }
 }
 
