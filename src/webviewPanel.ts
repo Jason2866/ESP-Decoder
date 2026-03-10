@@ -1491,7 +1491,7 @@ export class EspDecoderWebviewPanel {
       // paths used in data-file attributes are not corrupted by HTML entities.
       var result = '';
       var lastIndex = 0;
-      var re = /(\/[\w.\-\/]+\.\w+):(\d+)/g;
+      var re = /(\\/[\\w.\\-\\/]+\\.\\w+):(\\d+)/g;
       var m;
       while ((m = re.exec(text)) !== null) {
         result += escapeHtml(text.slice(lastIndex, m.index));
