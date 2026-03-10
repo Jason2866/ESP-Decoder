@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { findEspIdfBuilds } from './espIdfIntegration';
+import { CHIP_TARGET_MAP, RISCV_TARGETS } from './chipTargets';
 
 /**
  * Detected PlatformIO environment with ELF and tool paths.
@@ -268,22 +270,6 @@ function parsePioProject(workspaceFolder: string): ParsedEnv[] {
 // ---------------------------------------------------------------------------
 // Chip / architecture detection
 // ---------------------------------------------------------------------------
-
-const CHIP_TARGET_MAP: Record<string, string> = {
-  'esp32s3': 'xtensa',
-  'esp32s2': 'xtensa',
-  'esp32c2': 'esp32c2',
-  'esp32c3': 'esp32c3',
-  'esp32c5': 'esp32c3',  // no dedicated trbr target, closest match
-  'esp32c6': 'esp32c6',
-  'esp32h2': 'esp32h2',
-  'esp32h4': 'esp32h4',
-  'esp32p4': 'esp32p4',
-  'esp8266': 'xtensa',
-  'esp32':   'xtensa',
-};
-
-const RISCV_TARGETS = new Set(['esp32c2', 'esp32c3', 'esp32c5', 'esp32c6', 'esp32h2', 'esp32h4', 'esp32p4']);
 
 /**
  * Get the raw chip name (e.g. "esp32c3") from a board.
@@ -578,6 +564,7 @@ export async function selectElfFile(
 
   // Auto-detect from PlatformIO
   let currentMatchedByPio = false;
+  let currentMatchedByEspIdf = false;
   if (workspaceFolder) {
     const envs = await findPioEnvironments(workspaceFolder);
     for (const env of envs) {
@@ -595,10 +582,26 @@ export async function selectElfFile(
         romElfPath: env.romElfPath,
       });
     }
+
+    const idfBuilds = await findEspIdfBuilds(workspaceFolder);
+    for (const build of idfBuilds) {
+      const isCurrent = currentElfPath === build.elfPath;
+      if (isCurrent) { currentMatchedByEspIdf = true; }
+      items.push({
+        label: `$(tools) ${build.name}`,
+        description: build.elfPath,
+        detail: build.targetArch
+          ? `Arch: ${build.targetArch}${build.toolPath ? ' | Tool: ' + path.basename(build.toolPath) : ''}${isCurrent ? ' ✓ active' : ''}`
+          : isCurrent ? '✓ active' : undefined,
+        elfPath: build.elfPath,
+        toolPath: build.toolPath,
+        targetArch: build.targetArch,
+      });
+    }
   }
 
   // If the current ELF was manually browsed (not from a PIO env), show it at the top
-  if (currentElfPath && !currentMatchedByPio) {
+  if (currentElfPath && !currentMatchedByPio && !currentMatchedByEspIdf) {
     const name = path.basename(currentElfPath);
     items.unshift({
       label: `$(check) ${name}  (current)`,
@@ -616,7 +619,7 @@ export async function selectElfFile(
   });
 
   const picked = await vscode.window.showQuickPick(items, {
-    placeHolder: 'Select PlatformIO environment or ELF file',
+    placeHolder: 'Select PlatformIO / ESP-IDF build or ELF file',
     title: 'ESP Decoder: Select ELF File',
   });
 

@@ -24,6 +24,7 @@
     "backtrace",
     "decode",
     "platformio",
+    "esp-idf",
     "pioarduino",
     "serial",
     "xtensa",
@@ -88,7 +89,7 @@
         "esp-decoder.autoDetectElf": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically detect ELF file from PlatformIO build directory"
+          "description": "Automatically detect ELF file from PlatformIO or ESP-IDF build directories"
         },
         "esp-decoder.elfPath": {
           "type": "string",
@@ -148,6 +149,6 @@
     "esbuild": "^0.21.0",
     "eslint": "^10.0.3",
     "typescript": "^5.4.0",
-    "vitest": "^4.0.18"
+    "vitest": "^1.6.0"
   }
 }

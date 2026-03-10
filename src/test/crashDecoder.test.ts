@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
+import { fileURLToPath } from 'url';
 
 // ---------------------------------------------------------------------------
 // Mock vscode before importing any module that depends on it
@@ -50,7 +51,7 @@ import type { CrashEvent } from '../crashDecoder.js';
 // ---------------------------------------------------------------------------
 // Fixture paths
 // ---------------------------------------------------------------------------
-const FIXTURES_DIR = path.join(import.meta.dirname, 'fixtures');
+const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 const ELF_PATH = path.join(FIXTURES_DIR, 'firmware.elf');
 const CRASH_TEXT_PATH = path.join(FIXTURES_DIR, 'esp32c6_assert.txt');
 

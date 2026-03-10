@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import { SerialPortManager } from './serialPortManager';
 import { EspDecoderWebviewPanel } from './webviewPanel';
-import { selectElfFile } from './pioIntegration';
+import { findPioEnvironments, selectElfFile } from './pioIntegration';
+import { findEspIdfBuilds } from './espIdfIntegration';
 
 let serialManager: SerialPortManager;
 let currentPanel: EspDecoderWebviewPanel | undefined;
@@ -148,24 +151,28 @@ export function activate(context: vscode.ExtensionContext) {
     sessionConfig.targetArch = targetArch;
   }
 
-  // Watch for PlatformIO build events (when firmware.elf changes)
+  // Watch for build events (PlatformIO + ESP-IDF)
   if (config.get<boolean>('autoDetectElf', true)) {
     const watcher = vscode.workspace.createFileSystemWatcher(
-      '**/firmware.elf',
+      '**/*.elf',
       false,
       false,
       true
     );
 
     watcher.onDidCreate((uri) => {
-      if (uri.fsPath.includes('.pio')) {
+      if (isPlatformIoBuildElf(uri.fsPath)) {
         autoDetectFromPio(uri.fsPath);
+      } else if (isEspIdfBuildElf(uri.fsPath)) {
+        autoDetectFromEspIdf(uri.fsPath);
       }
     });
 
     watcher.onDidChange((uri) => {
-      if (uri.fsPath.includes('.pio')) {
+      if (isPlatformIoBuildElf(uri.fsPath)) {
         autoDetectFromPio(uri.fsPath);
+      } else if (isEspIdfBuildElf(uri.fsPath)) {
+        autoDetectFromEspIdf(uri.fsPath);
       }
     });
 
@@ -176,8 +183,13 @@ export function activate(context: vscode.ExtensionContext) {
   }
 }
 
+function isPlatformIoBuildElf(elfPath: string): boolean {
+  const normalized = path.normalize(elfPath);
+  return normalized.includes(`${path.sep}.pio${path.sep}build${path.sep}`);
+}
+
 /**
- * Auto-detect ELF from newest PlatformIO build.
+ * Auto-detect ELF from newest PlatformIO or ESP-IDF build.
  */
 async function tryAutoDetectElf(): Promise<void> {
   if (sessionConfig.elfPath || manualElfOverride) {
@@ -190,51 +202,156 @@ async function tryAutoDetectElf(): Promise<void> {
   }
 
   try {
-    const { findPioEnvironments } = await import('./pioIntegration');
     const envs = await findPioEnvironments(workspaceFolder);
-    if (envs.length === 1) {
-      // Only one env, auto-select
-      sessionConfig = {
-        elfPath: envs[0].elfPath,
-        toolPath: envs[0].toolPath,
-        targetArch: envs[0].targetArch,
-        romElfPath: envs[0].romElfPath,
-      };
-    } else if (envs.length > 1) {
-      // Multiple envs, pick the newest one
-      let newest = envs[0];
-      for (const env of envs) {
+    const idfBuilds = await findEspIdfBuilds(workspaceFolder);
+
+    const candidates: Array<{ elfPath: string; toolPath?: string; targetArch?: string; romElfPath?: string }> = [
+      ...envs,
+      ...idfBuilds,
+    ];
+
+    if (candidates.length > 0) {
+      let newest: { elfPath: string; toolPath?: string; targetArch?: string; romElfPath?: string } | undefined;
+      let newestMtime = -1;
+      for (const candidate of candidates) {
         try {
-          const fs = await import('fs');
-          const stat = fs.statSync(env.elfPath);
-          const newestStat = fs.statSync(newest.elfPath);
-          if (stat.mtimeMs > newestStat.mtimeMs) {
-            newest = env;
+          const mtime = fs.statSync(candidate.elfPath).mtimeMs;
+          if (mtime > newestMtime) {
+            newest = candidate;
+            newestMtime = mtime;
           }
         } catch {
           // ignore
         }
       }
-      sessionConfig = {
-        elfPath: newest.elfPath,
-        toolPath: newest.toolPath,
-        targetArch: newest.targetArch,
-        romElfPath: newest.romElfPath,
-      };
+
+      if (newest) {
+        sessionConfig = {
+          ...sessionConfig,
+          elfPath: newest.elfPath,
+          toolPath: sessionConfig.toolPath || newest.toolPath,
+          targetArch: sessionConfig.targetArch || newest.targetArch,
+          romElfPath: newest.romElfPath,
+        };
+      }
     }
   } catch {
-    // PlatformIO not available, no auto-detect
+    // Auto-detect not available
   }
 }
 
 function autoDetectFromPio(elfPath: string): void {
-  if (manualElfOverride) {
+  if (manualElfOverride || hasUserConfiguredSession()) {
     return; // User has manually selected an ELF — do not overwrite
   }
-  sessionConfig.elfPath = elfPath;
-  if (currentPanel) {
-    currentPanel.updateConfig(sessionConfig);
+
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (workspaceFolder) {
+    findPioEnvironments(workspaceFolder)
+      .then((envs) => {
+        const matched = envs.find((env) => env.elfPath === elfPath);
+        if (matched) {
+          sessionConfig = {
+            ...sessionConfig,
+            elfPath: matched.elfPath,
+            toolPath: matched.toolPath,
+            targetArch: matched.targetArch,
+            romElfPath: matched.romElfPath,
+          };
+          if (currentPanel) {
+            currentPanel.updateConfig(sessionConfig);
+          }
+        }
+      })
+      .catch(() => {
+        // Ignore auto-detect failures.
+      });
+    return;
   }
+}
+
+function autoDetectFromEspIdf(elfPath: string): void {
+  if (manualElfOverride || hasUserConfiguredSession()) {
+    return;
+  }
+
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (workspaceFolder) {
+    findEspIdfBuilds(workspaceFolder)
+      .then((builds) => {
+        const matched = builds.find((build) => build.elfPath === elfPath);
+        if (matched) {
+          sessionConfig = {
+            ...sessionConfig,
+            elfPath: matched.elfPath,
+            toolPath: matched.toolPath,
+            targetArch: matched.targetArch,
+            romElfPath: undefined,
+          };
+          if (currentPanel) {
+            currentPanel.updateConfig(sessionConfig);
+          }
+        }
+      })
+      .catch(() => {
+        // Ignore auto-detect failures.
+      });
+    return;
+  }
+}
+
+function hasUserConfiguredSession(): boolean {
+  const config = vscode.workspace.getConfiguration('esp-decoder');
+  return Boolean(config.get<string>('elfPath', ''))
+    || Boolean(config.get<string>('toolPath', ''))
+    || config.get<string>('targetArch', 'auto') !== 'auto';
+}
+
+function findEspIdfProjectRoot(elfPath: string, workspaceFolder: string): string | undefined {
+  let currentDir = path.dirname(elfPath);
+  const workspaceRoot = path.resolve(workspaceFolder);
+
+  while (true) {
+    const normalizedCurrent = path.resolve(currentDir);
+    const relativeToWorkspace = path.relative(workspaceRoot, normalizedCurrent);
+    if (relativeToWorkspace.startsWith('..') || path.isAbsolute(relativeToWorkspace)) {
+      return undefined;
+    }
+
+    if (fs.existsSync(path.join(normalizedCurrent, 'sdkconfig'))) {
+      return normalizedCurrent;
+    }
+
+    const parentDir = path.dirname(normalizedCurrent);
+    if (parentDir === normalizedCurrent) {
+      return undefined;
+    }
+    currentDir = parentDir;
+  }
+}
+
+function isEspIdfBuildElf(elfPath: string): boolean {
+  if (!elfPath.includes('/build/') && !elfPath.includes('\\build\\')) {
+    return false;
+  }
+
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!workspaceFolder) {
+    return false;
+  }
+
+  const projectRoot = findEspIdfProjectRoot(elfPath, workspaceFolder);
+  if (!projectRoot) {
+    return false;
+  }
+
+  const relative = path.relative(projectRoot, elfPath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return false;
+  }
+
+  const lower = elfPath.toLowerCase();
+  return lower.endsWith('.elf') && !lower.endsWith('/bootloader.elf') && !lower.endsWith('/partition-table.elf') && !lower.endsWith('\\bootloader.elf') && !lower.endsWith('\\partition-table.elf');
 }
 
 export function deactivate(): void {
