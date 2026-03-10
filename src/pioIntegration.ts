@@ -437,13 +437,14 @@ function isRiscVArch(targetArch: string): boolean {
 }
 
 /**
- * Find GDB binary from PlatformIO tool packages by well-known package name.
- * Looks for: tool-riscv32-esp-elf-gdb / tool-xtensa-esp-elf-gdb
- * with binary: riscv32-esp-elf-gdb / xtensa-esp32-elf-gdb (+ .exe on Windows)
+ * Find GDB binary from PlatformIO tool packages.
+ *
+ * RISC-V: tool-riscv32-esp-elf-gdb/bin/riscv32-esp-elf-gdb
+ * Xtensa: Checks dedicated GDB package (tool-xtensa-esp-elf-gdb) and
+ *         toolchain packages (toolchain-xtensa-esp-elf, toolchain-xtensa-esp32-elf, etc.)
  */
 function findGdbPackage(packagesDir: string, isRiscV: boolean): string | undefined {
-  const isWindows = process.platform === 'win32';
-  const ext = isWindows ? '.exe' : '';
+  const ext = process.platform === 'win32' ? '.exe' : '';
 
   if (isRiscV) {
     const gdbBin = path.join(packagesDir, 'tool-riscv32-esp-elf-gdb', 'bin', 'riscv32-esp-elf-gdb' + ext);
@@ -451,9 +452,24 @@ function findGdbPackage(packagesDir: string, isRiscV: boolean): string | undefin
       return gdbBin;
     }
   } else {
-    const gdbBin = path.join(packagesDir, 'tool-xtensa-esp-elf-gdb', 'bin', 'xtensa-esp32-elf-gdb' + ext);
-    if (fs.existsSync(gdbBin)) {
-      return gdbBin;
+    // Dedicated GDB package (unified)
+    const unifiedGdb = path.join(packagesDir, 'tool-xtensa-esp-elf-gdb', 'bin', 'xtensa-esp-elf-gdb' + ext);
+    if (fs.existsSync(unifiedGdb)) {
+      return unifiedGdb;
+    }
+
+    // Toolchain packages that bundle GDB alongside addr2line
+    const toolchainVariants = [
+      { pkg: 'toolchain-xtensa-esp-elf',     bin: 'xtensa-esp-elf-gdb' },
+      { pkg: 'toolchain-xtensa-esp32-elf',   bin: 'xtensa-esp32-elf-gdb' },
+      { pkg: 'toolchain-xtensa-esp32s2-elf', bin: 'xtensa-esp32s2-elf-gdb' },
+      { pkg: 'toolchain-xtensa-esp32s3-elf', bin: 'xtensa-esp32s3-elf-gdb' },
+    ];
+    for (const { pkg, bin } of toolchainVariants) {
+      const gdbBin = path.join(packagesDir, pkg, 'bin', bin + ext);
+      if (fs.existsSync(gdbBin)) {
+        return gdbBin;
+      }
     }
   }
   return undefined;
