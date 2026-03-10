@@ -45,7 +45,7 @@ vi.mock('vscode', () => {
 // ---------------------------------------------------------------------------
 // Import under test (after vscode mock is in place)
 // ---------------------------------------------------------------------------
-import { TrbrCrashCapturer, decodeCrash, decodeCoredumpElf } from '../crashDecoder.js';
+import { TrbrCrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
 import type { CrashEvent, CoredumpDecodedResult } from '../crashDecoder.js';
 
 // ---------------------------------------------------------------------------
@@ -57,8 +57,14 @@ const CRASH_TEXT_PATH = path.join(FIXTURES_DIR, 'esp32c6_assert.txt');
 
 const CRASH_TEXT = fs.readFileSync(CRASH_TEXT_PATH, 'utf8');
 
+// ESP32 coredump b64 test fixtures
+// Source: https://github.com/espressif/esp-coredump/tree/master/tests/esp32
+const B64_COREDUMP_PATH = path.join(FIXTURES_DIR, 'coredump_esp32.b64');
+const ESP32_FIRMWARE_ELF_PATH = path.join(FIXTURES_DIR, 'esp32_coredump_firmware.elf');
+
 // Resolved from PlatformIO packages on this machine
 const GDB_PATH = '/Users/claudia/.platformio/packages/tool-riscv32-esp-elf-gdb/bin/riscv32-esp-elf-gdb';
+const XTENSA_GDB_PATH = '/Users/claudia/.platformio/packages/tool-xtensa-esp-elf-gdb/bin/xtensa-esp32-elf-gdb';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -234,5 +240,92 @@ describe('decodeCoredumpElf', () => {
     expect(Array.isArray(result.threads)).toBe(true);
     expect(result.threads).toHaveLength(0);
     expect(typeof result.rawOutput).toBe('string');
+  });
+
+  it.skipIf(!fs.existsSync(B64_COREDUMP_PATH) || !fs.existsSync(ESP32_FIRMWARE_ELF_PATH) || !fs.existsSync(XTENSA_GDB_PATH))(
+    'decodes an esp32 b64 coredump file with multiple threads',
+    async () => {
+      const result = await decodeCoredumpElf(
+        B64_COREDUMP_PATH,
+        ESP32_FIRMWARE_ELF_PATH,
+        XTENSA_GDB_PATH,
+        'xtensa',
+      );
+
+      expect(result).toBeDefined();
+      expect(result.threads.length).toBeGreaterThan(0);
+
+      // At least one thread should be flagged as the current/crashed thread
+      const currentThread = result.threads.find(t => t.isCurrent);
+      expect(currentThread).toBeDefined();
+
+      // The crashed thread should have stacktrace frames
+      expect(currentThread!.decoded.stacktrace.length).toBeGreaterThan(0);
+    },
+    60_000,
+  );
+});
+
+describe('containsBase64Coredump', () => {
+  it('detects CORE DUMP START/END markers', () => {
+    const text = [
+      'some serial output',
+      '================= CORE DUMP START =================',
+      'f0VMRgEBAQAAAAAAAAAAAAQAXgABAAAA',
+      'AAAAAA==',
+      '================= CORE DUMP END ===================',
+      'Rebooting...',
+    ].join('\n');
+    expect(containsBase64Coredump(text)).toBe(true);
+  });
+
+  it('returns false for regular crash text', () => {
+    expect(containsBase64Coredump(CRASH_TEXT)).toBe(false);
+  });
+
+  it('returns false for empty string', () => {
+    expect(containsBase64Coredump('')).toBe(false);
+  });
+});
+
+describe('decodeCoredumpBase64', () => {
+  it('exports as a function', () => {
+    expect(typeof decodeCoredumpBase64).toBe('function');
+  });
+
+  it.skipIf(!fs.existsSync(B64_COREDUMP_PATH) || !fs.existsSync(ESP32_FIRMWARE_ELF_PATH) || !fs.existsSync(XTENSA_GDB_PATH))(
+    'decodes b64 text with CORE DUMP markers wrapping esp32 coredump',
+    async () => {
+      const b64Content = fs.readFileSync(B64_COREDUMP_PATH, 'utf-8');
+      const markerWrapped = [
+        'I (1234) esp_core_dump_flash: Found partition on flash',
+        '================= CORE DUMP START =================',
+        b64Content,
+        '================= CORE DUMP END ===================',
+        '',
+      ].join('\n');
+
+      const result = await decodeCoredumpBase64(
+        markerWrapped,
+        ESP32_FIRMWARE_ELF_PATH,
+        XTENSA_GDB_PATH,
+        'xtensa',
+      );
+
+      expect(result).toBeDefined();
+      expect(result.threads.length).toBeGreaterThan(0);
+    },
+    60_000,
+  );
+
+  it('returns empty threads for invalid b64 content', async () => {
+    const result = await decodeCoredumpBase64(
+      'not valid base64 content!!!',
+      '/nonexistent/firmware.elf',
+      undefined,
+      'xtensa',
+    );
+    expect(result).toBeDefined();
+    expect(result.threads).toHaveLength(0);
   });
 });

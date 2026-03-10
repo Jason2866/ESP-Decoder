@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as os from 'os';
 import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -433,17 +435,188 @@ export async function decodeCrash(
 }
 
 /**
- * Decode an ESP coredump in ELF format using trbr's coredump mode.
- * The coredump ELF file is separate from the firmware ELF — the firmware ELF
- * provides debug symbols, while the coredump ELF contains the crash state.
+ * Decode an ESP coredump file using trbr's coredump mode.
+ * Supports both ELF format and base64-encoded (b64) format.
+ * For b64 files, the content is decoded to a temporary ELF file before passing
+ * to trbr. The b64 format is used by ESP-IDF's esp-coredump tool and may
+ * contain serial markers (CORE DUMP START / CORE DUMP END).
  *
- * @param coredumpPath - Path to the coredump ELF file
+ * @param coredumpPath - Path to the coredump file (ELF or b64)
  * @param elfPath - Path to the firmware ELF file (with debug symbols)
  * @param toolPath - Optional path to GDB binary
  * @param targetArch - Optional target architecture
  * @param log - Optional logger
  */
 export async function decodeCoredumpElf(
+  coredumpPath: string,
+  elfPath: string,
+  toolPath?: string,
+  targetArch?: string,
+  log?: DecodeLogger,
+): Promise<CoredumpDecodedResult> {
+  const write = (msg: string) => log?.appendLine(msg);
+
+  // Detect whether the file is b64-encoded and convert if necessary
+  const resolvedPath = await resolveCoredumpPath(coredumpPath, log);
+  const needsCleanup = resolvedPath !== coredumpPath;
+
+  try {
+    return await decodeCoredumpElfInternal(resolvedPath, elfPath, toolPath, targetArch, log);
+  } finally {
+    if (needsCleanup) {
+      // Clean up temporary decoded file
+      try {
+        await fsPromises.unlink(resolvedPath);
+        const tmpDir = path.dirname(resolvedPath);
+        await fsPromises.rmdir(tmpDir).catch(() => {});
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  }
+}
+
+/**
+ * Decode a base64-encoded coredump from raw text content (e.g. pasted from serial).
+ * Extracts the base64 payload (optionally between CORE DUMP START/END markers),
+ * decodes it, and passes the resulting ELF to trbr's coredump decoder.
+ *
+ * @param b64Content - Base64-encoded coredump text (with or without markers)
+ * @param elfPath - Path to the firmware ELF file (with debug symbols)
+ * @param toolPath - Optional path to GDB binary
+ * @param targetArch - Optional target architecture
+ * @param log - Optional logger
+ */
+export async function decodeCoredumpBase64(
+  b64Content: string,
+  elfPath: string,
+  toolPath?: string,
+  targetArch?: string,
+  log?: DecodeLogger,
+): Promise<CoredumpDecodedResult> {
+  const write = (msg: string) => log?.appendLine(msg);
+
+  const binary = decodeBase64Payload(b64Content);
+  if (!binary) {
+    write('[ESP Decoder] No valid base64 coredump content found');
+    return {
+      threads: [],
+      rawOutput: 'No valid base64 coredump content found in the provided text.',
+    };
+  }
+
+  // Write decoded binary to temp file
+  const tmpDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'esp-coredump-'));
+  const tmpPath = path.join(tmpDir, 'coredump.elf');
+  try {
+    await fsPromises.writeFile(tmpPath, binary);
+    write(`[ESP Decoder] Decoded b64 coredump to temp file: ${tmpPath} (${binary.length} bytes)`);
+
+    return await decodeCoredumpElfInternal(tmpPath, elfPath, toolPath, targetArch, log);
+  } finally {
+    try {
+      await fsPromises.unlink(tmpPath);
+      await fsPromises.rmdir(tmpDir).catch(() => {});
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+}
+
+/**
+ * Check whether text contains an ESP coredump in base64 format.
+ * Looks for the CORE DUMP START/END markers used by ESP-IDF serial output.
+ */
+export function containsBase64Coredump(text: string): boolean {
+  return COREDUMP_START_RE.test(text) && COREDUMP_END_RE.test(text);
+}
+
+/** Regex for ESP-IDF coredump serial markers */
+const COREDUMP_START_RE = /={10,}\s*CORE\s+DUMP\s+START\s*={10,}/;
+const COREDUMP_END_RE = /={10,}\s*CORE\s+DUMP\s+END\s*={10,}/;
+
+/** ELF magic bytes: \x7fELF */
+const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
+
+/**
+ * Detect whether a coredump file is base64-encoded and convert to a temp ELF if so.
+ * Returns the original path if already ELF, or a temp path if converted.
+ */
+async function resolveCoredumpPath(
+  coredumpPath: string,
+  log?: DecodeLogger,
+): Promise<string> {
+  const write = (msg: string) => log?.appendLine(msg);
+
+  let fd;
+  try {
+    fd = await fsPromises.open(coredumpPath, 'r');
+  } catch {
+    // File doesn't exist or isn't readable — return as-is and let the caller handle the error
+    return coredumpPath;
+  }
+  try {
+    const header = Buffer.alloc(4);
+    await fd.read(header, 0, 4, 0);
+
+    if (header.compare(ELF_MAGIC, 0, 4, 0, 4) === 0) {
+      // Already an ELF file
+      return coredumpPath;
+    }
+  } finally {
+    await fd.close();
+  }
+
+  // Not ELF — assume base64-encoded
+  write(`[ESP Decoder] File does not start with ELF magic, treating as b64: ${coredumpPath}`);
+  const raw = await fsPromises.readFile(coredumpPath, 'utf-8');
+  const binary = decodeBase64Payload(raw);
+  if (!binary) {
+    write('[ESP Decoder] Could not extract base64 payload — passing file as-is');
+    return coredumpPath;
+  }
+
+  const tmpDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'esp-coredump-'));
+  const tmpPath = path.join(tmpDir, 'coredump.elf');
+  await fsPromises.writeFile(tmpPath, binary);
+  write(`[ESP Decoder] Decoded b64 coredump to temp ELF: ${tmpPath} (${binary.length} bytes)`);
+  return tmpPath;
+}
+
+/**
+ * Decode base64 payload from text, stripping optional CORE DUMP START/END markers.
+ * Each line is decoded independently to handle esp-coredump's per-line padding format.
+ * Returns the concatenated binary data, or undefined if no valid base64 found.
+ */
+function decodeBase64Payload(text: string): Buffer | undefined {
+  let content = text;
+
+  // If markers are present, extract only the content between them
+  const startMatch = COREDUMP_START_RE.exec(content);
+  const endMatch = COREDUMP_END_RE.exec(content);
+  if (startMatch && endMatch && endMatch.index > startMatch.index) {
+    content = content.slice(startMatch.index + startMatch[0].length, endMatch.index);
+  }
+
+  // Filter to only valid base64 lines (ignore empty lines, markers, and other output)
+  const base64Lines = content
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l.length > 0 && /^[A-Za-z0-9+/=]+$/.test(l));
+
+  if (base64Lines.length === 0) {
+    return undefined;
+  }
+
+  // Decode each line independently — esp-coredump pads each line separately
+  const buffers = base64Lines.map(line => Buffer.from(line, 'base64'));
+  return Buffer.concat(buffers);
+}
+
+/**
+ * Internal coredump decode — expects an actual ELF file path.
+ */
+async function decodeCoredumpElfInternal(
   coredumpPath: string,
   elfPath: string,
   toolPath?: string,

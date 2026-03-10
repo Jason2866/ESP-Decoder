@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
-import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
+import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
 
 interface SessionConfig {
   elfPath?: string;
@@ -413,12 +413,17 @@ export class EspDecoderWebviewPanel {
       }
       case 'decodePastedCrash': {
         if (typeof message.text === 'string' && message.text.trim()) {
-          // Reset capturer so pasted data is treated as a fresh crash block
-          this.crashCapturer.reset();
-          // Feed the text through the crash capturer as if it came from serial.
-          // The existing onCrashDetected listener handles detection + decoding.
-          const data = Buffer.from(message.text + '\n');
-          this.crashCapturer.pushData(data);
+          // Check if pasted text contains a base64-encoded coredump
+          if (containsBase64Coredump(message.text)) {
+            await this.handlePastedBase64Coredump(message.text);
+          } else {
+            // Reset capturer so pasted data is treated as a fresh crash block
+            this.crashCapturer.reset();
+            // Feed the text through the crash capturer as if it came from serial.
+            // The existing onCrashDetected listener handles detection + decoding.
+            const data = Buffer.from(message.text + '\n');
+            this.crashCapturer.pushData(data);
+          }
         }
         break;
       }
@@ -445,8 +450,8 @@ export class EspDecoderWebviewPanel {
       canSelectFiles: true,
       canSelectFolders: false,
       canSelectMany: false,
-      filters: { 'Coredump ELF': ['elf', 'bin', '*'] },
-      title: 'Select ESP Coredump ELF File',
+      filters: { 'Coredump Files': ['elf', 'bin', 'b64', '*'] },
+      title: 'Select ESP Coredump File (ELF or b64)',
     });
 
     if (!uris || uris.length === 0) {
@@ -454,7 +459,7 @@ export class EspDecoderWebviewPanel {
     }
 
     const coredumpPath = uris[0].fsPath;
-    this.log.appendLine(`[ESP Decoder] Decoding coredump ELF: ${coredumpPath}`);
+    this.log.appendLine(`[ESP Decoder] Decoding coredump: ${coredumpPath}`);
 
     // Create a synthetic crash event for the coredump
     const eventId = `coredump-${Date.now()}`;
@@ -492,6 +497,61 @@ export class EspDecoderWebviewPanel {
     } catch (err) {
       this.log.appendLine(
         `[ESP Decoder] Coredump decode error: ${err instanceof Error ? err.message : String(err)}`
+      );
+      this.postMessage({
+        type: 'crashDecodeError',
+        eventId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Handle pasted text containing a base64-encoded coredump.
+   */
+  private async handlePastedBase64Coredump(text: string): Promise<void> {
+    if (!this.config.elfPath) {
+      vscode.window.showWarningMessage(
+        'No firmware ELF file configured. Please select an ELF file first.'
+      );
+      return;
+    }
+
+    const eventId = `coredump-b64-${Date.now()}`;
+    const event: CrashEvent = {
+      id: eventId,
+      kind: 'unknown',
+      lines: ['Pasted base64 coredump'],
+      rawText: text,
+      timestamp: Date.now(),
+    };
+    this.crashEvents.push(event);
+
+    this.postMessage({
+      type: 'crashDetected',
+      event: {
+        ...this.serializeCrashEvent(event),
+        isCoredump: true,
+      },
+    });
+
+    try {
+      const result = await decodeCoredumpBase64(
+        text,
+        this.config.elfPath,
+        this.config.toolPath,
+        this.config.targetArch,
+        this.log,
+      );
+
+      this.postMessage({
+        type: 'coredumpDecoded',
+        eventId,
+        result: this.serializeCoredumpResult(result),
+      });
+    } catch (err) {
+      this.log.appendLine(
+        `[ESP Decoder] Base64 coredump decode error: ${err instanceof Error ? err.message : String(err)}`
       );
       this.postMessage({
         type: 'crashDecodeError',
@@ -1107,10 +1167,10 @@ export class EspDecoderWebviewPanel {
   <div class="modal-overlay hidden" id="paste-modal">
     <div class="modal-box">
       <div class="modal-title">Decode Crash Log</div>
-      <div class="modal-hint">Paste the full serial output containing the crash dump, or load an ESP coredump ELF file. The decoded result will appear in the Crash Events tab.</div>
+      <div class="modal-hint">Paste the full serial output containing the crash dump (including base64-encoded coredumps), or load an ESP coredump file. The decoded result will appear in the Crash Events tab.</div>
       <textarea id="paste-textarea" placeholder="Paste crash log here..." spellcheck="false" autocomplete="off"></textarea>
       <div class="modal-buttons">
-        <button class="secondary" id="btn-coredump-file" title="Load an ESP coredump in ELF format">Load Coredump ELF…</button>
+        <button class="secondary" id="btn-coredump-file" title="Load an ESP coredump file (ELF or base64)">Load Coredump…</button>
         <span style="flex:1"></span>
         <button class="secondary" id="btn-paste-cancel">Cancel</button>
         <button id="btn-paste-decode">Decode</button>
