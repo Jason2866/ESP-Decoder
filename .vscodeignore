@@ -11,3 +11,13 @@ tsconfig.json
 esbuild.js
 .gitignore
 node_modules/pioarduino-node-helpers/**
+node_modules/**/*.md
+node_modules/**/LICENCE
+node_modules/**/LICENSE
+node_modules/**/LICENSE.txt
+node_modules/**/license
+node_modules/**/licenses
+node_modules/**/CHANGELOG
+node_modules/**/README
+node_modules/**/readme
+node_modules/**/FUNDING*
