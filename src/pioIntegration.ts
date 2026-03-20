@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { findEspIdfBuilds } from './espIdfIntegration';
+import { core as pioCore } from 'pioarduino-node-helpers';
 import { CHIP_TARGET_MAP, RISCV_TARGETS } from './chipTargets';
 
 /**
@@ -338,25 +338,14 @@ function findRomElf(packagesDir: string, chipName: string): string | undefined {
   }
 }
 
-/**
- * Determine the chip name (trbr target arch) from a board name by reading its
- * board JSON from PlatformIO's boards directories.
- *
- * Longest chip keys are compared first so that "esp32s3" is not confused with "esp32".
- */
-function getChipTarget(boardName: string | undefined, workspaceFolder?: string): string {
-  const chipName = getChipName(boardName, workspaceFolder);
-  return CHIP_TARGET_MAP[chipName] ?? 'xtensa';
-}
-
 function getPioCoreDir(): string | undefined {
-  const homeDir = os.homedir();
-  const candidates = [path.join(homeDir, '.platformio')];
-
-  for (const dir of candidates) {
-    if (fs.existsSync(dir)) {
-      return dir;
+  try {
+    const coreDir = pioCore.getCoreDir();
+    if (coreDir && fs.existsSync(coreDir)) {
+      return coreDir;
     }
+  } catch {
+    // ignore
   }
   return undefined;
 }
@@ -554,13 +543,14 @@ export async function selectElfFile(
   workspaceFolder: string | undefined,
   currentElfPath?: string
 ): Promise<{ elfPath: string; toolPath?: string; targetArch?: string; romElfPath?: string } | undefined> {
-  const items: (vscode.QuickPickItem & {
+  type ElfPickItem = vscode.QuickPickItem & {
     elfPath?: string;
     toolPath?: string;
     targetArch?: string;
     romElfPath?: string;
     action?: string;
-  })[] = [];
+  };
+  const items: ElfPickItem[] = [];
 
   // Auto-detect from PlatformIO
   let currentMatchedByPio = false;
@@ -627,7 +617,7 @@ export async function selectElfFile(
     return undefined;
   }
 
-  if ((picked as any).action === 'browse') {
+  if (picked.action === 'browse') {
     const uris = await vscode.window.showOpenDialog({
       canSelectFiles: true,
       canSelectFolders: false,
@@ -642,9 +632,9 @@ export async function selectElfFile(
   }
 
   return {
-    elfPath: (picked as any).elfPath,
-    toolPath: (picked as any).toolPath,
-    targetArch: (picked as any).targetArch,
-    romElfPath: (picked as any).romElfPath,
+    elfPath: picked.elfPath!,
+    toolPath: picked.toolPath,
+    targetArch: picked.targetArch,
+    romElfPath: picked.romElfPath,
   };
 }

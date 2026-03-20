@@ -138,6 +138,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "pioarduino-node-helpers": "^12.4.1",
     "serialport": "^12.0.0",
     "trbr": "^0.3.1"
   },
