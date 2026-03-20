@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.1] - 2026-03-20
+
+### Fixed
+- **PlatformIO core directory detection** — use `getCoreDir()` from `pioarduino-node-helpers` instead of hardcoded `os.homedir()`, correctly handling `PLATFORMIO_CORE_DIR` env var and Windows edge cases.
+
+
 ## [0.9.0] - 2026-03-11
 
 ### Added
