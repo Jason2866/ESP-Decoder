@@ -13,6 +13,8 @@ esbuild.js
 .gitignore
 node_modules/pioarduino-node-helpers/**
 node_modules/**/.*
+node_modules/**/tsconfig.json
+node_modules/**/*.map
 node_modules/**/*.md
 node_modules/**/LICENCE
 node_modules/**/LICENSE
