@@ -2,6 +2,7 @@
 .vscode/**
 src/**
 test/**
+debug/**
 *.ts
 *.map
 .editorconfig
@@ -11,6 +12,7 @@ tsconfig.json
 esbuild.js
 .gitignore
 node_modules/pioarduino-node-helpers/**
+node_modules/**/.*
 node_modules/**/*.md
 node_modules/**/LICENCE
 node_modules/**/LICENSE
@@ -21,3 +23,5 @@ node_modules/**/CHANGELOG
 node_modules/**/README
 node_modules/**/readme
 node_modules/**/FUNDING*
+node_modules/**/fallbacks/**
+node_modules/**/test/**
