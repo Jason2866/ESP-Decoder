@@ -1041,6 +1041,29 @@ export class EspDecoderWebviewPanel {
       opacity: 0.5;
     }
 
+    /* ANSI colour support for serial output */
+    .ansi-bold { font-weight: bold; }
+    .ansi-italic { font-style: italic; }
+    .ansi-underline { text-decoration: underline; }
+    .ansi-strikethrough { text-decoration: line-through; }
+    .ansi-underline.ansi-strikethrough { text-decoration: underline line-through; }
+    .ansi-fg-black   { color: rgb(128,128,128); }
+    .ansi-fg-red     { color: rgb(255,  0,  0); }
+    .ansi-fg-green   { color: rgb(  0,255,  0); }
+    .ansi-fg-yellow  { color: rgb(255,255,  0); }
+    .ansi-fg-blue    { color: rgb( 99,153,255); }
+    .ansi-fg-magenta { color: rgb(255,  0,255); }
+    .ansi-fg-cyan    { color: rgb(  0,255,255); }
+    .ansi-fg-white   { color: rgb(187,187,187); }
+    .ansi-bg-black   { background-color: rgb(  0,  0,  0); }
+    .ansi-bg-red     { background-color: rgb(255,  0,  0); }
+    .ansi-bg-green   { background-color: rgb(  0,255,  0); }
+    .ansi-bg-yellow  { background-color: rgb(255,255,  0); }
+    .ansi-bg-blue    { background-color: rgb(  0,  0,255); }
+    .ansi-bg-magenta { background-color: rgb(255,  0,255); }
+    .ansi-bg-cyan    { background-color: rgb(  0,255,255); }
+    .ansi-bg-white   { background-color: rgb(255,255,255); }
+
     .decode-status {
       font-size: 11px;
       font-style: italic;
@@ -1199,6 +1222,61 @@ export class EspDecoderWebviewPanel {
     // scroll events and accidentally disabling autoscroll (race at high baud rates).
     let programmaticScroll = false;
 
+    // ANSI colour state for the serial terminal
+    const ansiState = {
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fg: null, bg: null,
+    };
+
+    function ansiApplyCode(code) {
+      switch (code) {
+        case  0: ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
+                 ansiState.strikethrough=false; ansiState.fg=null; ansiState.bg=null; break;
+        case  1: ansiState.bold=true; break;
+        case  3: ansiState.italic=true; break;
+        case  4: ansiState.underline=true; break;
+        case  9: ansiState.strikethrough=true; break;
+        case 22: ansiState.bold=false; break;
+        case 23: ansiState.italic=false; break;
+        case 24: ansiState.underline=false; break;
+        case 29: ansiState.strikethrough=false; break;
+        case 30: ansiState.fg='black';   break;
+        case 31: ansiState.fg='red';     break;
+        case 32: ansiState.fg='green';   break;
+        case 33: ansiState.fg='yellow';  break;
+        case 34: ansiState.fg='blue';    break;
+        case 35: ansiState.fg='magenta'; break;
+        case 36: ansiState.fg='cyan';    break;
+        case 37: ansiState.fg='white';   break;
+        case 39: ansiState.fg=null; break;
+        case 40: ansiState.bg='black';   break;
+        case 41: ansiState.bg='red';     break;
+        case 42: ansiState.bg='green';   break;
+        case 43: ansiState.bg='yellow';  break;
+        case 44: ansiState.bg='blue';    break;
+        case 45: ansiState.bg='magenta'; break;
+        case 46: ansiState.bg='cyan';    break;
+        case 47: ansiState.bg='white';   break;
+        case 49: ansiState.bg=null; break;
+      }
+    }
+
+    function ansiMakeNode(text) {
+      if (text === '') return null;
+      const needsSpan = ansiState.bold || ansiState.italic || ansiState.underline ||
+                        ansiState.strikethrough || ansiState.fg || ansiState.bg;
+      if (!needsSpan) return document.createTextNode(text);
+      const s = document.createElement('span');
+      if (ansiState.bold)          s.classList.add('ansi-bold');
+      if (ansiState.italic)        s.classList.add('ansi-italic');
+      if (ansiState.underline)     s.classList.add('ansi-underline');
+      if (ansiState.strikethrough) s.classList.add('ansi-strikethrough');
+      if (ansiState.fg)            s.classList.add('ansi-fg-' + ansiState.fg);
+      if (ansiState.bg)            s.classList.add('ansi-bg-' + ansiState.bg);
+      s.appendChild(document.createTextNode(text));
+      return s;
+    }
+
     function updateScrollButton() {
       btnScrollBottom.style.display = autoscroll ? 'none' : 'block';
     }
@@ -1259,6 +1337,9 @@ export class EspDecoderWebviewPanel {
 
     document.getElementById('btn-clear').addEventListener('click', () => {
       serialOutput.textContent = '';
+      // Reset ANSI colour state so stale styles don't bleed into the next run
+      ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
+      ansiState.strikethrough=false; ansiState.fg=null; ansiState.bg=null;
       crashList.innerHTML = '';
       crashCount = 0;
       crashCountBadge.style.display = 'none';
@@ -1405,9 +1486,32 @@ export class EspDecoderWebviewPanel {
     }
 
     function appendSerialData(text) {
-      const span = document.createElement('span');
-      span.textContent = text;
-      serialOutput.appendChild(span);
+      // Match CSI escape sequences: ESC [ params final-byte
+      // \\x1B in the template literal produces \x1B in the HTML/JS source,
+      // which the browser's JS regex engine interprets as ESC (0x1B).
+      // eslint-disable-next-line no-control-regex
+      const re = /\\x1B\\[(.*?)([@-~])/g;
+      const fragment = document.createDocumentFragment();
+      let i = 0;
+      re.lastIndex = 0;
+
+      while (true) {
+        const match = re.exec(text);
+        if (!match) break;
+        const node = ansiMakeNode(text.substring(i, match.index));
+        if (node) fragment.appendChild(node);
+        i = match.index + match[0].length;
+        // Only apply colour/style for SGR sequences (final byte 'm')
+        if (match[2] === 'm') {
+          const codes = match[1] === '' ? ['0'] : match[1].split(';');
+          for (const code of codes) {
+            ansiApplyCode(parseInt(code, 10) || 0);
+          }
+        }
+      }
+      const node = ansiMakeNode(text.substring(i));
+      if (node) fragment.appendChild(node);
+      serialOutput.appendChild(fragment);
 
       // Trim excess nodes in a single DOM operation.  replaceChildren() with
       // only the nodes to keep is faster than removing excess nodes one-by-one
