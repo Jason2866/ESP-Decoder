@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.10.0] - 2026-03-25
+
+### Added
+- **ANSI color support in serial monitor** — the terminal now renders ANSI SGR escape sequences (bold, italic, underline, strikethrough, 8 standard foreground/background colors) instead of displaying raw escape characters. Modeled after the esp32tool implementation.
+
+
 ## [0.9.1] - 2026-03-20
 
 ### Fixed
