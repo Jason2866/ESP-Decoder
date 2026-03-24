@@ -1227,11 +1227,17 @@ export class EspDecoderWebviewPanel {
       bold: false, italic: false, underline: false, strikethrough: false,
       fg: null, bg: null,
     };
+    // Holds a trailing incomplete CSI sequence from the previous data chunk
+    let ansiTail = '';
+
+    function resetAnsiState() {
+      ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
+      ansiState.strikethrough=false; ansiState.fg=null; ansiState.bg=null;
+    }
 
     function ansiApplyCode(code) {
       switch (code) {
-        case  0: ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
-                 ansiState.strikethrough=false; ansiState.fg=null; ansiState.bg=null; break;
+        case  0: resetAnsiState(); break;
         case  1: ansiState.bold=true; break;
         case  3: ansiState.italic=true; break;
         case  4: ansiState.underline=true; break;
@@ -1338,8 +1344,8 @@ export class EspDecoderWebviewPanel {
     document.getElementById('btn-clear').addEventListener('click', () => {
       serialOutput.textContent = '';
       // Reset ANSI colour state so stale styles don't bleed into the next run
-      ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
-      ansiState.strikethrough=false; ansiState.fg=null; ansiState.bg=null;
+      resetAnsiState();
+      ansiTail = '';
       crashList.innerHTML = '';
       crashCount = 0;
       crashCountBadge.style.display = 'none';
@@ -1486,7 +1492,12 @@ export class EspDecoderWebviewPanel {
     }
 
     function appendSerialData(text) {
-      // Match CSI escape sequences: ESC [ params final-byte
+      // Prepend any incomplete CSI sequence carried over from the previous chunk
+      // so sequences split across IPC messages are reassembled before parsing.
+      text = ansiTail + text;
+      ansiTail = '';
+
+      // Match completed CSI escape sequences: ESC [ params final-byte
       // \\x1B in the template literal produces \x1B in the HTML/JS source,
       // which the browser's JS regex engine interprets as ESC (0x1B).
       // eslint-disable-next-line no-control-regex
@@ -1509,8 +1520,21 @@ export class EspDecoderWebviewPanel {
           }
         }
       }
-      const node = ansiMakeNode(text.substring(i));
-      if (node) fragment.appendChild(node);
+
+      // If the remaining tail starts with a partial CSI sequence (ESC or ESC[...)
+      // without a terminating final-byte, hold it for the next chunk so it is not
+      // rendered as raw garbage characters.
+      // eslint-disable-next-line no-control-regex
+      const tail = text.substring(i);
+      const partialCSI = /\\x1B(?:\\[.*)?$/.exec(tail);
+      if (partialCSI) {
+        ansiTail = partialCSI[0];
+        const node = ansiMakeNode(tail.substring(0, partialCSI.index));
+        if (node) fragment.appendChild(node);
+      } else {
+        const node = ansiMakeNode(tail);
+        if (node) fragment.appendChild(node);
+      }
       serialOutput.appendChild(fragment);
 
       // Trim excess nodes in a single DOM operation.  replaceChildren() with
