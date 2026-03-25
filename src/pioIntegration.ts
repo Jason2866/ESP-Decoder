@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { findEspIdfBuilds } from './espIdfIntegration';
 import { core as pioCore } from 'pioarduino-node-helpers';
 import { CHIP_TARGET_MAP, RISCV_TARGETS } from './chipTargets';
@@ -273,7 +274,11 @@ function parsePioProject(workspaceFolder: string): PioProjectInfo {
   let coreDir: string | undefined;
   const rawCoreDir = sections['platformio']?.['core_dir'];
   if (rawCoreDir) {
-    const resolved = path.resolve(workspaceFolder, rawCoreDir);
+    let expanded = rawCoreDir.replace(/\$\{sysenv\.([^}]+)\}/g, (_: string, varName: string) => process.env[varName] ?? '');
+    if (expanded.startsWith('~')) {
+      expanded = os.homedir() + expanded.slice(1);
+    }
+    const resolved = path.resolve(workspaceFolder, expanded);
     if (fs.existsSync(resolved)) {
       coreDir = resolved;
     }
