@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.10.2] - 2026-03-25
+
+### Fixed
+- **PlatformIO project-local `core_dir` support** — when `platformio.ini` specifies a `core_dir` under `[platformio]`, packages, board definitions, and tools are now resolved from that directory instead of the global PlatformIO core. Path semantics supported: relative paths (resolved against the workspace folder), leading `~` (expanded to the home directory), and `${sysenv.VAR}` tokens (substituted from environment variables).
+
 ## [0.10.1] - 2026-03-25
 
 ### Fixed
