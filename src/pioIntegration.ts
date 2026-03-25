@@ -254,17 +254,32 @@ function parseEnvironments(sections: Sections): ParsedEnv[] {
 // Full INI parsing pipeline: parse → extra_configs → interpolate → envs
 // ---------------------------------------------------------------------------
 
-function parsePioProject(workspaceFolder: string): ParsedEnv[] {
+interface PioProjectInfo {
+  envs: ParsedEnv[];
+  coreDir?: string;
+}
+
+function parsePioProject(workspaceFolder: string): PioProjectInfo {
   const platformIniPath = path.join(workspaceFolder, 'platformio.ini');
   if (!fs.existsSync(platformIniPath)) {
-    return [];
+    return { envs: [] };
   }
 
   const content = fs.readFileSync(platformIniPath, 'utf8');
   const sections = parsePlatformioIni(content);
   mergeExtraConfigs(workspaceFolder, sections);
   interpolateVariables(sections);
-  return parseEnvironments(sections);
+
+  let coreDir: string | undefined;
+  const rawCoreDir = sections['platformio']?.['core_dir'];
+  if (rawCoreDir) {
+    const resolved = path.resolve(workspaceFolder, rawCoreDir);
+    if (fs.existsSync(resolved)) {
+      coreDir = resolved;
+    }
+  }
+
+  return { envs: parseEnvironments(sections), coreDir };
 }
 
 // ---------------------------------------------------------------------------
@@ -276,11 +291,11 @@ function parsePioProject(workspaceFolder: string): ParsedEnv[] {
  * Used for ROM ELF lookup. Sorted by key length descending so
  * "esp32s3" matches before "esp32".
  */
-function getChipName(boardName: string | undefined, workspaceFolder?: string): string {
+function getChipName(boardName: string | undefined, workspaceFolder?: string, coreDir?: string): string {
   const sortedKeys = Object.keys(CHIP_TARGET_MAP).sort((a, b) => b.length - a.length);
 
   if (boardName) {
-    const mcu = readBoardMcu(boardName, workspaceFolder);
+    const mcu = readBoardMcu(boardName, workspaceFolder, coreDir);
     if (mcu) {
       const mcuNorm = mcu.toLowerCase().replace(/[-_]/g, '');
       for (const key of sortedKeys) {
@@ -350,8 +365,8 @@ function getPioCoreDir(): string | undefined {
   return undefined;
 }
 
-export function getPioPackagesDir(): string | undefined {
-  const coreDir = getPioCoreDir();
+export function getPioPackagesDir(projectCoreDir?: string): string | undefined {
+  const coreDir = projectCoreDir ?? getPioCoreDir();
   if (!coreDir) {
     return undefined;
   }
@@ -359,7 +374,7 @@ export function getPioPackagesDir(): string | undefined {
   return fs.existsSync(packagesDir) ? packagesDir : undefined;
 }
 
-function readBoardMcu(boardName: string, workspaceFolder?: string): string | undefined {
+function readBoardMcu(boardName: string, workspaceFolder?: string, projectCoreDir?: string): string | undefined {
   const boardsDirs: string[] = [];
 
   // Project-local boards directory
@@ -367,8 +382,8 @@ function readBoardMcu(boardName: string, workspaceFolder?: string): string | und
     boardsDirs.push(path.join(workspaceFolder, 'boards'));
   }
 
-  // PlatformIO/pioarduino core boards directory
-  const coreDir = getPioCoreDir();
+  // PlatformIO/pioarduino core boards directory (project core_dir takes precedence)
+  const coreDir = projectCoreDir ?? getPioCoreDir();
   if (coreDir) {
     boardsDirs.push(path.join(coreDir, 'boards'));
     // Also check inside platforms for board definitions
@@ -488,7 +503,7 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
   }
 
   // Parse all environments from platformio.ini (+ extra_configs)
-  const parsedEnvs = parsePioProject(workspaceFolder);
+  const { envs: parsedEnvs, coreDir } = parsePioProject(workspaceFolder);
   const parsedEnvMap = new Map(parsedEnvs.map((e) => [e.name, e]));
 
   const entries = fs.readdirSync(pioBuildDir, { withFileTypes: true });
@@ -510,11 +525,11 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
       const parsed = parsedEnvMap.get(envName);
       const board = parsed?.board;
 
-      const chipName = getChipName(board || envName, workspaceFolder);
+      const chipName = getChipName(board || envName, workspaceFolder, coreDir);
       const targetArch = CHIP_TARGET_MAP[chipName] ?? 'xtensa';
       const isRiscV = isRiscVArch(targetArch);
 
-      const packagesDir = getPioPackagesDir();
+      const packagesDir = getPioPackagesDir(coreDir);
       if (packagesDir) {
         const toolPath = findGdbPackage(packagesDir, isRiscV, chipName);
         if (toolPath) {
