@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.10.1] - 2026-03-25
+
+### Fixed
+- **Corrupted multi-byte UTF-8 characters in serial monitor** — signal-strength bar characters (`▂▄▆█`) and other multi-byte Unicode characters are no longer replaced with `�` when they are split across consecutive serial-port data chunks. The serial data handler now uses Node.js `StringDecoder` which buffers incomplete byte sequences until the next chunk completes them.
+
 ## [0.10.0] - 2026-03-25
 
 ### Added
