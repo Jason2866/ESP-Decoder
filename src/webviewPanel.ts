@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
 import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
@@ -34,6 +35,7 @@ export class EspDecoderWebviewPanel {
   private pendingSerialData = '';
   private serialFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly SERIAL_FLUSH_INTERVAL_MS = 50;
+  private readonly utf8Decoder = new StringDecoder('utf8');
 
   public static createOrShow(
     extensionUri: vscode.Uri,
@@ -218,7 +220,9 @@ export class EspDecoderWebviewPanel {
   }
 
   private handleSerialData(data: Buffer): void {
-    const text = data.toString('utf8');
+    // Use StringDecoder to correctly handle multi-byte UTF-8 characters
+    // (e.g. ▂▄▆█) that may be split across consecutive data chunks.
+    const text = this.utf8Decoder.write(data);
 
     // Buffer outgoing display data and flush in batches.  Posting every raw
     // chunk as a separate IPC message can produce thousands of messages per
@@ -280,6 +284,8 @@ export class EspDecoderWebviewPanel {
     }
     this.pendingSerialData = '';
     this.lineBuffer = '';
+    // Flush any trailing incomplete bytes so the decoder starts clean on reconnect.
+    this.utf8Decoder.end();
   }
 
   private async handleMessage(message: any): Promise<void> {
