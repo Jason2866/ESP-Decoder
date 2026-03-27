@@ -37,6 +37,24 @@
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "esp-decoder-panel",
+          "title": "ESP Decoder",
+          "icon": "$(terminal)"
+        }
+      ]
+    },
+    "views": {
+      "esp-decoder-panel": [
+        {
+          "type": "webview",
+          "id": "esp-decoder.monitorView",
+          "name": "ESP Crash Monitor"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "esp-decoder.openMonitor",

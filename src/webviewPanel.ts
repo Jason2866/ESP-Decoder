@@ -3,18 +3,17 @@ import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
 import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
 
-interface SessionConfig {
+export interface SessionConfig {
   elfPath?: string;
   toolPath?: string;
   targetArch?: string;
   romElfPath?: string;
 }
 
-export class EspDecoderWebviewPanel {
-  public static readonly viewType = 'esp-decoder.monitorPanel';
-  private static currentPanel: EspDecoderWebviewPanel | undefined;
+export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
+  public static readonly viewType = 'esp-decoder.monitorView';
 
-  private readonly panel: vscode.WebviewPanel;
+  private view: vscode.WebviewView | undefined;
   private readonly extensionUri: vscode.Uri;
   private readonly serialManager: SerialPortManager;
   private readonly crashCapturer: TrbrCrashCapturer;
@@ -37,80 +36,18 @@ export class EspDecoderWebviewPanel {
   private static readonly SERIAL_FLUSH_INTERVAL_MS = 50;
   private readonly utf8Decoder = new StringDecoder('utf8');
 
-  public static createOrShow(
-    extensionUri: vscode.Uri,
-    serialManager: SerialPortManager,
-    config?: SessionConfig,
-    outputChannel?: vscode.OutputChannel
-  ): EspDecoderWebviewPanel {
-    const column = vscode.window.activeTextEditor
-      ? vscode.window.activeTextEditor.viewColumn
-      : undefined;
-
-    if (EspDecoderWebviewPanel.currentPanel) {
-      EspDecoderWebviewPanel.currentPanel.panel.reveal(column);
-      // Do NOT merge incoming config into an already-running panel.
-      // The panel maintains its own live config (updated via updateConfig());
-      // merging here would overwrite a manual ELF selection with a stale auto-detected value.
-      return EspDecoderWebviewPanel.currentPanel;
-    }
-
-    const panel = vscode.window.createWebviewPanel(
-      EspDecoderWebviewPanel.viewType,
-      'ESP Decoder — Crash Monitor',
-      column || vscode.ViewColumn.One,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [extensionUri],
-      }
-    );
-
-    EspDecoderWebviewPanel.currentPanel = new EspDecoderWebviewPanel(
-      panel,
-      extensionUri,
-      serialManager,
-      config,
-      outputChannel
-    );
-    return EspDecoderWebviewPanel.currentPanel;
-  }
-
-  private constructor(
-    panel: vscode.WebviewPanel,
+  constructor(
     extensionUri: vscode.Uri,
     serialManager: SerialPortManager,
     config?: SessionConfig,
     outputChannel?: vscode.OutputChannel
   ) {
-    this.panel = panel;
     this.extensionUri = extensionUri;
     this.serialManager = serialManager;
     this.crashCapturer = new TrbrCrashCapturer();
     this.addr2linePool = new Addr2linePool();
     this.config = config || {};
     this.log = outputChannel || vscode.window.createOutputChannel('ESP Decoder');
-
-    this.panel.webview.html = this.getHtmlContent();
-
-    // Handle messages from webview
-    this.panel.webview.onDidReceiveMessage(
-      (message) => {
-        this.handleMessage(message).catch((err) => {
-          this.log.appendLine(`[ERROR] message handler error: ${err}`);
-          this.postMessage({
-            type: 'error',
-            message: err instanceof Error ? err.message : String(err),
-          });
-          this.syncState();
-        });
-      },
-      null,
-      this.disposables
-    );
-
-    // Handle panel dispose
-    this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 
     // Listen to serial data
     this.disposables.push(
@@ -123,9 +60,6 @@ export class EspDecoderWebviewPanel {
     this.disposables.push(
       this.serialManager.onConnectionChange((connected) => {
         if (!connected) {
-          // Cancel the pending serial-data flush and discard any buffered bytes.
-          // This prevents a large backlog of queued IPC messages from continuing
-          // to drain into the webview for minutes after the device is unplugged.
           this.cancelSerialFlush();
         }
         this.postMessage({
@@ -150,8 +84,6 @@ export class EspDecoderWebviewPanel {
         // Auto-decode if configured
         if (this.config.elfPath) {
           try {
-            // toolPath may be undefined when the user picked an ELF manually;
-            // decodeCrash's autoDetectPioToolPath() will find GDB automatically.
             const decoded = await decodeCrash(
               event,
               this.config.elfPath,
@@ -185,9 +117,52 @@ export class EspDecoderWebviewPanel {
         }
       })
     );
+  }
+
+  public resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    _context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken
+  ): void {
+    this.view = webviewView;
+
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [this.extensionUri],
+    };
+
+    webviewView.webview.html = this.getHtmlContent();
+
+    // Handle messages from webview
+    webviewView.webview.onDidReceiveMessage(
+      (message) => {
+        this.handleMessage(message).catch((err) => {
+          this.log.appendLine(`[ERROR] message handler error: ${err}`);
+          this.postMessage({
+            type: 'error',
+            message: err instanceof Error ? err.message : String(err),
+          });
+          this.syncState();
+        });
+      },
+      null,
+      this.disposables
+    );
+
+    webviewView.onDidDispose(() => {
+      this.view = undefined;
+    }, null, this.disposables);
 
     // Send initial state
     this.sendInitialState();
+  }
+
+  public show(): void {
+    if (this.view) {
+      this.view.show?.(true);
+    } else {
+      vscode.commands.executeCommand('esp-decoder.monitorView.focus');
+    }
   }
 
   private sendInitialState(): void {
@@ -604,15 +579,13 @@ export class EspDecoderWebviewPanel {
   }
 
   private postMessage(message: any): void {
-    this.panel.webview.postMessage(message);
+    this.view?.webview.postMessage(message);
   }
 
   public dispose(): void {
-    EspDecoderWebviewPanel.currentPanel = undefined;
     this.cancelSerialFlush();
     this.crashCapturer.dispose();
     this.addr2linePool.disposeAll();
-    this.panel.dispose();
     while (this.disposables.length) {
       const d = this.disposables.pop();
       d?.dispose();

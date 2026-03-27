@@ -2,21 +2,16 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { SerialPortManager } from './serialPortManager';
-import { EspDecoderWebviewPanel } from './webviewPanel';
+import { EspDecoderWebviewPanel, SessionConfig } from './webviewPanel';
 import { findPioEnvironments, selectElfFile } from './pioIntegration';
 import { findEspIdfBuilds } from './espIdfIntegration';
 
 let serialManager: SerialPortManager;
-let currentPanel: EspDecoderWebviewPanel | undefined;
+let viewProvider: EspDecoderWebviewPanel | undefined;
 let outputChannel: vscode.OutputChannel;
 
 // Session state
-let sessionConfig: {
-  elfPath?: string;
-  toolPath?: string;
-  targetArch?: string;
-  romElfPath?: string;
-} = {};
+let sessionConfig: SessionConfig = {};
 
 // Tracks whether the user has manually picked an ELF file.
 // When true, file-watcher auto-detection must not overwrite the selection.
@@ -55,15 +50,25 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
+  // Register the webview view provider (panel appears in the bottom area)
+  viewProvider = new EspDecoderWebviewPanel(
+    context.extensionUri,
+    serialManager,
+    sessionConfig,
+    outputChannel
+  );
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      EspDecoderWebviewPanel.viewType,
+      viewProvider,
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
+  );
+
   // Register commands
   context.subscriptions.push(
     vscode.commands.registerCommand('esp-decoder.openMonitor', () => {
-      currentPanel = EspDecoderWebviewPanel.createOrShow(
-        context.extensionUri,
-        serialManager,
-        sessionConfig,
-        outputChannel
-      );
+      viewProvider!.show();
     })
   );
 
@@ -108,7 +113,7 @@ export function activate(context: vscode.ExtensionContext) {
       const workspaceFolder =
         vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
-      const result = await selectElfFile(workspaceFolder, currentPanel?.currentElfPath ?? sessionConfig.elfPath);
+      const result = await selectElfFile(workspaceFolder, viewProvider?.currentElfPath ?? sessionConfig.elfPath);
       if (result) {
         manualElfOverride = true;
         sessionConfig = {
@@ -118,8 +123,8 @@ export function activate(context: vscode.ExtensionContext) {
           romElfPath: result.romElfPath || sessionConfig.romElfPath,
         };
 
-        if (currentPanel) {
-          currentPanel.updateConfig(sessionConfig);
+        if (viewProvider) {
+          viewProvider.updateConfig(sessionConfig);
         }
 
         const name = result.elfPath.split('/').pop()?.split('\\').pop();
@@ -258,8 +263,8 @@ function autoDetectFromPio(elfPath: string): void {
             targetArch: matched.targetArch,
             romElfPath: matched.romElfPath,
           };
-          if (currentPanel) {
-            currentPanel.updateConfig(sessionConfig);
+          if (viewProvider) {
+            viewProvider.updateConfig(sessionConfig);
           }
         }
       })
@@ -288,8 +293,8 @@ function autoDetectFromEspIdf(elfPath: string): void {
             targetArch: matched.targetArch,
             romElfPath: undefined,
           };
-          if (currentPanel) {
-            currentPanel.updateConfig(sessionConfig);
+          if (viewProvider) {
+            viewProvider.updateConfig(sessionConfig);
           }
         }
       })
@@ -355,5 +360,5 @@ function isEspIdfBuildElf(elfPath: string): boolean {
 }
 
 export function deactivate(): void {
-  currentPanel?.dispose();
+  viewProvider?.dispose();
 }
