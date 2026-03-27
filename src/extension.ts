@@ -68,7 +68,9 @@ export function activate(context: vscode.ExtensionContext) {
   // Register commands
   context.subscriptions.push(
     vscode.commands.registerCommand('esp-decoder.openMonitor', () => {
-      viewProvider!.show();
+      if (viewProvider) {
+        viewProvider.show();
+      }
     })
   );
 
