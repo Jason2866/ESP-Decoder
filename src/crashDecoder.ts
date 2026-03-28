@@ -28,6 +28,46 @@ import { Addr2linePool } from './addr2lineResolver';
 // Re-export for consumers
 export { Addr2linePool } from './addr2lineResolver';
 
+// ---------------------------------------------------------------------------
+// Error classification helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if an error indicates missing tools, permission issues, or spawn failures.
+ * These are the only cases where we should set toolsMissing = true.
+ */
+function isToolAccessError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+
+  const message = err.message.toLowerCase();
+  const errWithCode = err as Error & { code?: string };
+  const code = errWithCode.code;
+
+  // File system errors indicating missing or inaccessible tools
+  if (code === 'ENOENT' || code === 'EACCES' || code === 'EPERM') {
+    return true;
+  }
+
+  // Spawn/execution failures
+  if (message.includes('spawn') && (message.includes('enoent') || message.includes('failed'))) {
+    return true;
+  }
+
+  // Permission denied messages
+  if (message.includes('permission denied') || message.includes('access denied')) {
+    return true;
+  }
+
+  // Tool not found messages
+  if (message.includes('command not found') || message.includes('not found')) {
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * Represents a captured crash event from serial data.
  */
@@ -446,7 +486,12 @@ export async function decodeCrash(
     const errMsg = err instanceof Error ? err.stack || err.message : String(err);
     write(`[ESP Decoder] decode failed: ${errMsg}`);
     const raw = createRawDecode(crashEvent.rawText);
-    raw.toolsMissing = true;
+    
+    // Only set toolsMissing for actual tool access/execution errors
+    if (isToolAccessError(err)) {
+      raw.toolsMissing = true;
+    }
+    
     return raw;
   }
 }
@@ -765,11 +810,18 @@ async function decodeCoredumpElfInternal(
   } catch (err) {
     const errMsg = err instanceof Error ? err.stack || err.message : String(err);
     write(`[ESP Decoder] coredump decode failed: ${errMsg}`);
-    return {
+    
+    const result: CoredumpDecodedResult = {
       threads: [],
       rawOutput: `Coredump decode failed: ${errMsg}`,
-      toolsMissing: true,
     };
+    
+    // Only set toolsMissing for actual tool access/execution errors
+    if (isToolAccessError(err)) {
+      result.toolsMissing = true;
+    }
+    
+    return result;
   }
 }
 
