@@ -180,8 +180,19 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
     const event = makeCrashEvent();
     const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
 
-    if (!GDB_PATH || !fs.existsSync(GDB_PATH)) {
-      // When GDB is not available, should fall back to raw decode
+    // Check if GDB is executable (mirrors decodeCrash runtime behavior)
+    let isExecutable = false;
+    if (GDB_PATH) {
+      try {
+        fs.accessSync(GDB_PATH, fs.constants.X_OK);
+        isExecutable = true;
+      } catch {
+        isExecutable = false;
+      }
+    }
+
+    if (!isExecutable) {
+      // When GDB is not available or not executable, should fall back to raw decode
       expect(decoded.toolsMissing).toBe(true);
       expect(decoded.regs).toBeDefined();
     } else {
@@ -196,7 +207,18 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
     const event = makeCrashEvent();
     const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
 
-    if (!GDB_PATH || !fs.existsSync(GDB_PATH)) {
+    // Check if GDB is executable (mirrors decodeCrash runtime behavior)
+    let isExecutable = false;
+    if (GDB_PATH) {
+      try {
+        fs.accessSync(GDB_PATH, fs.constants.X_OK);
+        isExecutable = true;
+      } catch {
+        isExecutable = false;
+      }
+    }
+
+    if (!isExecutable) {
       // When GDB is not available, should indicate tools are missing
       expect(decoded.toolsMissing).toBe(true);
     } else {
@@ -213,7 +235,18 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
     const event = makeCrashEvent();
     const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
 
-    if (!GDB_PATH || !fs.existsSync(GDB_PATH)) {
+    // Check if GDB is executable (mirrors decodeCrash runtime behavior)
+    let isExecutable = false;
+    if (GDB_PATH) {
+      try {
+        fs.accessSync(GDB_PATH, fs.constants.X_OK);
+        isExecutable = true;
+      } catch {
+        isExecutable = false;
+      }
+    }
+
+    if (!isExecutable) {
       // When GDB is not available, should indicate tools are missing
       expect(decoded.toolsMissing).toBe(true);
     } else {
@@ -230,7 +263,18 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
     const event = makeCrashEvent();
     const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
 
-    if (!GDB_PATH || !fs.existsSync(GDB_PATH)) {
+    // Check if GDB is executable (mirrors decodeCrash runtime behavior)
+    let isExecutable = false;
+    if (GDB_PATH) {
+      try {
+        fs.accessSync(GDB_PATH, fs.constants.X_OK);
+        isExecutable = true;
+      } catch {
+        isExecutable = false;
+      }
+    }
+
+    if (!isExecutable) {
       // When GDB is not available, should indicate tools are missing
       expect(decoded.toolsMissing).toBe(true);
     } else {
@@ -257,9 +301,10 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
 
   it('raw decode fallback extracts MEPC register', async () => {
     const event = makeCrashEvent();
-    // Use undefined toolPath to force raw decode (no GDB)
-    const decoded = await decodeCrash(event, ELF_PATH, undefined, 'esp32c6');
+    // Use explicitly invalid toolPath to force raw decode (no GDB)
+    const decoded = await decodeCrash(event, ELF_PATH, '/nonexistent/gdb', 'esp32c6');
 
+    expect(decoded.toolsMissing).toBe(true);
     expect(decoded.regs).toBeDefined();
     // MEPC = 0x4080c1aa
     const mepc = decoded.regs?.['MEPC'] ?? decoded.regs?.['mepc'];
@@ -286,7 +331,7 @@ describe('decodeCoredumpElf', () => {
     expect(typeof result.rawOutput).toBe('string');
   });
 
-  it.skipIf(!fs.existsSync(B64_COREDUMP_PATH) || !fs.existsSync(ESP32_FIRMWARE_ELF_PATH) || !fs.existsSync(XTENSA_GDB_PATH))(
+  it.skipIf(!fs.existsSync(B64_COREDUMP_PATH) || !fs.existsSync(ESP32_FIRMWARE_ELF_PATH) || !XTENSA_GDB_PATH || !fs.existsSync(XTENSA_GDB_PATH))(
     'decodes an esp32 b64 coredump file with multiple threads',
     async () => {
       const result = await decodeCoredumpElf(
@@ -345,7 +390,7 @@ describe('decodeCoredumpBase64', () => {
     expect(typeof decodeCoredumpBase64).toBe('function');
   });
 
-  it.skipIf(!fs.existsSync(B64_COREDUMP_PATH) || !fs.existsSync(ESP32_FIRMWARE_ELF_PATH) || !fs.existsSync(XTENSA_GDB_PATH))(
+  it.skipIf(!fs.existsSync(B64_COREDUMP_PATH) || !fs.existsSync(ESP32_FIRMWARE_ELF_PATH) || !XTENSA_GDB_PATH || !fs.existsSync(XTENSA_GDB_PATH))(
     'decodes b64 text with CORE DUMP markers wrapping esp32 coredump',
     async () => {
       const b64Content = fs.readFileSync(B64_COREDUMP_PATH, 'utf-8');
