@@ -1,8 +1,19 @@
 # Changelog
 
+## [0.11.1] - 2026-03-28
+
+### Changed
+
+- **Tool missing warning** — ESP Decoder shows now a warning when needed GDB/addr2line tools are not found.
+
+### Maintenance
+
+- **Security updates** — Updated esbuild to 0.27.4 and vitest to 4.1.2.
+
 ## [0.11.0] - 2026-03-27
 
 ### Changed
+
 - **Monitor moved to bottom panel** — the ESP Crash Monitor now opens as a webview view in the bottom panel area (next to Terminal, Output, etc.) instead of an editor tab. The view is registered under its own "ESP Decoder" panel container and can be freely rearranged by the user.
 
 ## [0.10.2] - 2026-03-25
