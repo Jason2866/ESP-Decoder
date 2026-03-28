@@ -46,7 +46,7 @@ vi.mock('vscode', () => {
 // Import under test (after vscode mock is in place)
 // ---------------------------------------------------------------------------
 import { TrbrCrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
-import type { CrashEvent, CoredumpDecodedResult } from '../crashDecoder.js';
+import type { CrashEvent } from '../crashDecoder.js';
 import { getPioPackagesDir } from '../pioIntegration.js';
 
 // ---------------------------------------------------------------------------

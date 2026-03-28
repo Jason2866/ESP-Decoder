@@ -268,6 +268,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     this.utf8Decoder.end();
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async handleMessage(message: any): Promise<void> {
     switch (message.type) {
       case 'connect': {
@@ -565,6 +566,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private serializeCrashEvent(event: CrashEvent): any {
     return {
       id: event.id,
@@ -575,6 +577,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private serializeDecodedCrash(decoded: DecodedCrash): any {
     return {
       faultInfo: decoded.faultInfo,
@@ -586,6 +589,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private serializeCoredumpResult(result: CoredumpDecodedResult): any {
     return {
       threads: result.threads.map(t => ({
@@ -598,6 +602,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private postMessage(message: any): void {
     this.view?.webview.postMessage(message);
   }

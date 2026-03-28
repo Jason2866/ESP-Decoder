@@ -21,7 +21,6 @@ import type {
   Capturer,
   CapturerEvent,
   DecodeOptions,
-  CoredumpDecodeResult,
 } from 'trbr';
 import { getPioPackagesDir } from './pioIntegration';
 import { Addr2linePool } from './addr2lineResolver';
@@ -383,12 +382,12 @@ export async function decodeCrash(
     }
 
     // Build DecodeParams via trbr's createDecodeParams
-    let params: any;
+    let params: unknown;
     try {
       params = await createDecodeParams({
         elfPath,
         toolPath,
-        targetArch: resolvedArch as any,
+        targetArch: resolvedArch as unknown,
       });
     } catch (e) {
       write(`[ESP Decoder] createDecodeParams failed, using raw params: ${e instanceof Error ? e.message : String(e)}`);
@@ -472,6 +471,7 @@ export async function decodeCoredumpElf(
   targetArch?: string,
   log?: DecodeLogger,
 ): Promise<CoredumpDecodedResult> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const write = (msg: string) => log?.appendLine(msg);
 
   // Detect whether the file is b64-encoded and convert if necessary
@@ -709,11 +709,13 @@ async function decodeCoredumpElfInternal(
 
   try {
     // Create decode params with coredumpMode enabled
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let params: any;
     try {
       params = await createDecodeParams({
         elfPath,
         toolPath,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         targetArch: resolvedArch as any,
         coredumpMode: true,
       });
@@ -740,6 +742,7 @@ async function decodeCoredumpElfInternal(
       if (result.length === 0) {
         return { threads: [], rawOutput };
       }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const threads: ThreadDecodedCrash[] = result.map((threadResult: any) => {
         const decoded = convertDecodeResult(threadResult.result ?? threadResult, '');
         return {
@@ -919,6 +922,7 @@ function resolveTargetArch(
 /**
  * Convert trbr's DecodeResult (or CoredumpDecodeResult) to our DecodedCrash format.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function convertDecodeResult(result: any, crashText: string): DecodedCrash {
   // Get the stringified output from trbr for rawOutput
   let rawOutput: string;
@@ -999,6 +1003,7 @@ function convertDecodeResult(result: any, crashText: string): DecodedCrash {
 /**
  * Stringify an addr location from trbr's types.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function stringifyAddrLocation(location: any): string {
   if (!location) {
     return '??';
@@ -1035,6 +1040,7 @@ function extractAllCandidateAddresses(crashText: string): string[] {
  * Returns addresses (preserving duplicates) that fall within ESP code space (0x40000000–0x4FFFFFFF).
  * Used by createRawDecode fallback when no addr2line is available.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function extractStackCandidateAddresses(crashText: string): string[] {
   const addresses: string[] = [];
   const lines = crashText.split('\n');
@@ -1411,6 +1417,7 @@ async function enhanceWithHeuristicStackFrames(
   romElfPath?: string,
   pool?: Addr2linePool,
 ): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const write = (msg: string) => log?.appendLine(msg);
 
   // Extract ALL candidate code addresses from the crash text
