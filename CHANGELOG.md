@@ -6,10 +6,12 @@
 
 - **Tool missing warning** — ESP Decoder shows now a warning when needed GDB/addr2line tools are not found.
 - **Improved PlatformIO .elf detection** — Enhanced search for compiled .elf files to support non-standard PlatformIO setups, including custom build directories, multiple .elf files per environment, and custom-named firmware files.
+- **Better error classification** — Improved detection of tool-missing errors to avoid false positives from decode failures, malformed ELF files, or other non-tool-related issues.
 
 ### Maintenance
 
 - **Security updates** — Updated esbuild to 0.27.4 and vitest to 4.1.2.
+- **Code quality** — Refactored path expansion logic in PlatformIO integration to eliminate code duplication and improve maintainability.
 
 ## [0.11.0] - 2026-03-27
 
