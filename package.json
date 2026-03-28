@@ -165,10 +165,10 @@
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^8.56.1",
     "@typescript-eslint/parser": "^8.56.1",
-    "esbuild": "^0.21.0",
+    "esbuild": "^0.27.4",
     "eslint": "^10.0.3",
     "pioarduino-node-helpers": "^12.4.1",
     "typescript": "^5.4.0",
-    "vitest": "^1.6.0"
+    "vitest": "^4.1.2"
   }
 }
