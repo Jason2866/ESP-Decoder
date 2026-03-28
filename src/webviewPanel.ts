@@ -99,6 +99,11 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
               eventId: event.id,
               decoded: this.serializeDecodedCrash(decoded),
             });
+            if (decoded.toolsMissing) {
+              vscode.window.showWarningMessage(
+                'GDB/addr2line tools not found for this architecture. Build the project for the target chip first so the toolchain gets installed, or configure the tool path manually in settings.'
+              );
+            }
           } catch (err) {
             this.log.appendLine(`[ESP Decoder] Decode error for ${event.id}: ${err instanceof Error ? err.message : String(err)}`);
             this.postMessage({
@@ -362,6 +367,11 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
               eventId: event.id,
               decoded: this.serializeDecodedCrash(decoded),
             });
+            if (decoded.toolsMissing) {
+              vscode.window.showWarningMessage(
+                'GDB/addr2line tools not found for this architecture. Build the project for the target chip first so the toolchain gets installed, or configure the tool path manually in settings.'
+              );
+            }
           } catch (err) {
             this.postMessage({
               type: 'crashDecodeError',
@@ -478,6 +488,11 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         eventId,
         result: this.serializeCoredumpResult(result),
       });
+      if (result.toolsMissing) {
+        vscode.window.showWarningMessage(
+          'GDB/addr2line tools not found for this architecture. Build the project for the target chip first so the toolchain gets installed, or configure the tool path manually in settings.'
+        );
+      }
     } catch (err) {
       this.log.appendLine(
         `[ESP Decoder] Coredump decode error: ${err instanceof Error ? err.message : String(err)}`
@@ -533,6 +548,11 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         eventId,
         result: this.serializeCoredumpResult(result),
       });
+      if (result.toolsMissing) {
+        vscode.window.showWarningMessage(
+          'GDB/addr2line tools not found for this architecture. Build the project for the target chip first so the toolchain gets installed, or configure the tool path manually in settings.'
+        );
+      }
     } catch (err) {
       this.log.appendLine(
         `[ESP Decoder] Base64 coredump decode error: ${err instanceof Error ? err.message : String(err)}`

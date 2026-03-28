@@ -60,6 +60,8 @@ export interface DecodedCrash {
     allocSize: number;
   };
   rawOutput: string;
+  /** Set when decoding fell back to raw output because GDB/addr2line tools were not found. */
+  toolsMissing?: boolean;
 }
 
 export interface StackFrame {
@@ -75,6 +77,8 @@ export interface StackFrame {
 export interface CoredumpDecodedResult {
   threads: ThreadDecodedCrash[];
   rawOutput: string;
+  /** Set when decoding failed because GDB/addr2line tools were not found. */
+  toolsMissing?: boolean;
 }
 
 export interface ThreadDecodedCrash {
@@ -327,7 +331,9 @@ export async function decodeCrash(
     toolPath = autoDetectPioToolPath(crashEvent.kind, log);
     if (!toolPath) {
       write('[ESP Decoder] No toolPath (GDB/addr2line) found — returning raw decode');
-      return createRawDecode(crashEvent.rawText);
+      const raw = createRawDecode(crashEvent.rawText);
+      raw.toolsMissing = true;
+      return raw;
     }
   }
 
@@ -682,6 +688,7 @@ async function decodeCoredumpElfInternal(
       return {
         threads: [],
         rawOutput: 'No GDB toolchain found. Please configure a tool path.',
+        toolsMissing: true,
       };
     }
   }
