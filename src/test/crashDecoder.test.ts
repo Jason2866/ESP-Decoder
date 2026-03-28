@@ -103,8 +103,8 @@ function findPioGdb(kind: 'riscv' | 'xtensa'): string | undefined {
   return undefined;
 }
 
-const GDB_PATH = process.env.ESP_RISCV_GDB ?? findPioGdb('riscv') ?? '';
-const XTENSA_GDB_PATH = process.env.ESP_XTENSA_GDB ?? findPioGdb('xtensa') ?? '';
+const GDB_PATH = process.env.ESP_RISCV_GDB ?? findPioGdb('riscv');
+const XTENSA_GDB_PATH = process.env.ESP_XTENSA_GDB ?? findPioGdb('xtensa');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -176,26 +176,30 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
     };
   }
 
-  it.skipIf(!fs.existsSync(ELF_PATH) || !fs.existsSync(GDB_PATH))(
-    'decodes the crash and reports fault information',
-    async () => {
-      const event = makeCrashEvent();
-      const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
+  it('decodes the crash and reports fault information when GDB available', async () => {
+    const event = makeCrashEvent();
+    const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
 
-      // Fault info must be present
+    if (!GDB_PATH || !fs.existsSync(GDB_PATH)) {
+      // When GDB is not available, should fall back to raw decode
+      expect(decoded.toolsMissing).toBe(true);
+      expect(decoded.regs).toBeDefined();
+    } else {
+      // When GDB is available, fault info must be present
       expect(decoded.faultInfo).toBeDefined();
-
       // MCAUSE 0x02 = Illegal instruction
       expect(decoded.faultInfo?.faultMessage).toMatch(/illegal instruction/i);
     }
-  );
+  });
 
-  it.skipIf(!fs.existsSync(ELF_PATH) || !fs.existsSync(GDB_PATH))(
-    'resolves panic_abort in the stack trace',
-    async () => {
-      const event = makeCrashEvent();
-      const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
+  it('resolves panic_abort in the stack trace when GDB available', async () => {
+    const event = makeCrashEvent();
+    const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
 
+    if (!GDB_PATH || !fs.existsSync(GDB_PATH)) {
+      // When GDB is not available, should indicate tools are missing
+      expect(decoded.toolsMissing).toBe(true);
+    } else {
       // MEPC (0x4080c1aa) resolves to panic_abort in esp_system/panic.c
       // With ESPHome-style resolution (no address decrement), the address
       // appears directly in the heuristic stacktrace.
@@ -203,30 +207,33 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
         decoded.stacktrace.some((f) => f.function?.includes('panic_abort'))
       ).toBe(true);
     }
-  );
+  });
 
-  it.skipIf(!fs.existsSync(ELF_PATH) || !fs.existsSync(GDB_PATH))(
-    'resolves assert function from the stack trace (ESPHome-compatible)',
-    async () => {
-      const event = makeCrashEvent();
-      const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
+  it('resolves assert function from the stack trace when GDB available', async () => {
+    const event = makeCrashEvent();
+    const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
 
+    if (!GDB_PATH || !fs.existsSync(GDB_PATH)) {
+      // When GDB is not available, should indicate tools are missing
+      expect(decoded.toolsMissing).toBe(true);
+    } else {
       // 0x4081107c resolves to esp_libc_include_assert_impl (assert.c:96)
       // with ESPHome-style resolution (no address decrement).
       const hasAssertInTrace = decoded.stacktrace.some(
         (f) => f.function?.includes('assert')
       );
-
       expect(hasAssertInTrace).toBe(true);
     }
-  );
+  });
 
-  it.skipIf(!fs.existsSync(ELF_PATH) || !fs.existsSync(GDB_PATH))(
-    'matches ESPHome decoder output: all expected functions resolved',
-    async () => {
-      const event = makeCrashEvent();
-      const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
+  it('matches ESPHome decoder output when GDB available', async () => {
+    const event = makeCrashEvent();
+    const decoded = await decodeCrash(event, ELF_PATH, GDB_PATH, 'esp32c6');
 
+    if (!GDB_PATH || !fs.existsSync(GDB_PATH)) {
+      // When GDB is not available, should indicate tools are missing
+      expect(decoded.toolsMissing).toBe(true);
+    } else {
       // Expected resolved addresses matching ESPHome esp-stacktrace-decoder:
       //   0x4080c1aa → panic_abort
       //   0x4080c16e → esp_vApplicationTickHook (NOT esp_system_abort — no decrement)
@@ -246,21 +253,18 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
       expect(resolvedFuncs).toMatch(/ble_hs_hci_rx_evt/);
       expect(resolvedFuncs).toMatch(/vPortTaskWrapper/);
     }
-  );
+  });
 
-  it.skipIf(!fs.existsSync(ELF_PATH) || !fs.existsSync(GDB_PATH))(
-    'raw decode fallback extracts MEPC register',
-    async () => {
-      const event = makeCrashEvent();
-      // Use undefined toolPath to force raw decode (no GDB)
-      const decoded = await decodeCrash(event, ELF_PATH, undefined, 'esp32c6');
+  it('raw decode fallback extracts MEPC register', async () => {
+    const event = makeCrashEvent();
+    // Use undefined toolPath to force raw decode (no GDB)
+    const decoded = await decodeCrash(event, ELF_PATH, undefined, 'esp32c6');
 
-      expect(decoded.regs).toBeDefined();
-      // MEPC = 0x4080c1aa
-      const mepc = decoded.regs?.['MEPC'] ?? decoded.regs?.['mepc'];
-      expect(mepc).toBe(0x4080c1aa);
-    }
-  );
+    expect(decoded.regs).toBeDefined();
+    // MEPC = 0x4080c1aa
+    const mepc = decoded.regs?.['MEPC'] ?? decoded.regs?.['mepc'];
+    expect(mepc).toBe(0x4080c1aa);
+  });
 });
 
 describe('decodeCoredumpElf', () => {
