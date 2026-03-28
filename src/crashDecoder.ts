@@ -814,6 +814,7 @@ async function decodeCoredumpElfInternal(
     const result: CoredumpDecodedResult = {
       threads: [],
       rawOutput: `Coredump decode failed: ${errMsg}`,
+      toolsMissing: true,
     };
     
     // Only set toolsMissing for actual tool access/execution errors
