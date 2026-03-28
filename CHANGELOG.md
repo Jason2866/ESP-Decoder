@@ -5,6 +5,7 @@
 ### Changed
 
 - **Tool missing warning** — ESP Decoder shows now a warning when needed GDB/addr2line tools are not found.
+- **Improved PlatformIO .elf detection** — Enhanced search for compiled .elf files to support non-standard PlatformIO setups, including custom build directories, multiple .elf files per environment, and custom-named firmware files.
 
 ### Maintenance
 

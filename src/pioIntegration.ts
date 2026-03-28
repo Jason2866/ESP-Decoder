@@ -252,42 +252,6 @@ function parseEnvironments(sections: Sections): ParsedEnv[] {
 }
 
 // ---------------------------------------------------------------------------
-// Full INI parsing pipeline: parse → extra_configs → interpolate → envs
-// ---------------------------------------------------------------------------
-
-interface PioProjectInfo {
-  envs: ParsedEnv[];
-  coreDir?: string;
-}
-
-function parsePioProject(workspaceFolder: string): PioProjectInfo {
-  const platformIniPath = path.join(workspaceFolder, 'platformio.ini');
-  if (!fs.existsSync(platformIniPath)) {
-    return { envs: [] };
-  }
-
-  const content = fs.readFileSync(platformIniPath, 'utf8');
-  const sections = parsePlatformioIni(content);
-  mergeExtraConfigs(workspaceFolder, sections);
-  interpolateVariables(sections);
-
-  let coreDir: string | undefined;
-  const rawCoreDir = sections['platformio']?.['core_dir'];
-  if (rawCoreDir) {
-    let expanded = rawCoreDir.replace(/\$\{sysenv\.([^}]+)\}/g, (_: string, varName: string) => process.env[varName] ?? '');
-    if (expanded.startsWith('~')) {
-      expanded = os.homedir() + expanded.slice(1);
-    }
-    const resolved = path.resolve(workspaceFolder, expanded);
-    if (fs.existsSync(resolved)) {
-      coreDir = resolved;
-    }
-  }
-
-  return { envs: parseEnvironments(sections), coreDir };
-}
-
-// ---------------------------------------------------------------------------
 // Chip / architecture detection
 // ---------------------------------------------------------------------------
 
@@ -491,25 +455,147 @@ function findGdbPackage(packagesDir: string, isRiscV: boolean, chipName?: string
 }
 
 // ---------------------------------------------------------------------------
+// ELF file discovery helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Find all .elf files in a directory, excluding common non-firmware files.
+ */
+function findElfFilesInDir(dir: string, projectName?: string): string[] {
+  if (!fs.existsSync(dir)) {
+    return [];
+  }
+
+  const excluded = new Set(['bootloader.elf', 'partition-table.elf']);
+  const candidates: string[] = [];
+
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.elf')) {
+        continue;
+      }
+      if (excluded.has(entry.name)) {
+        continue;
+      }
+      candidates.push(path.join(dir, entry.name));
+    }
+  } catch {
+    return [];
+  }
+
+  // Prioritize firmware.elf and project-named .elf files
+  candidates.sort((a, b) => {
+    const aName = path.basename(a);
+    const bName = path.basename(b);
+    
+    if (aName === 'firmware.elf') return -1;
+    if (bName === 'firmware.elf') return 1;
+    
+    if (projectName) {
+      if (aName === `${projectName}.elf`) return -1;
+      if (bName === `${projectName}.elf`) return 1;
+    }
+    
+    return aName.localeCompare(bName);
+  });
+
+  return candidates;
+}
+
+/**
+ * Get the project name from platformio.ini [platformio] section.
+ */
+function getProjectName(workspaceFolder: string): string | undefined {
+  const platformIniPath = path.join(workspaceFolder, 'platformio.ini');
+  if (!fs.existsSync(platformIniPath)) {
+    return undefined;
+  }
+
+  try {
+    const content = fs.readFileSync(platformIniPath, 'utf8');
+    const sections = parsePlatformioIni(content);
+    return sections['platformio']?.['name'];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve the build directory for a PlatformIO project.
+ * Checks for custom build_dir in platformio.ini, falls back to .pio/build.
+ */
+function resolveBuildDir(workspaceFolder: string, sections: Sections): string {
+  const buildDirValue = sections['platformio']?.['build_dir'];
+  
+  if (buildDirValue) {
+    // Expand environment variables
+    let expanded = buildDirValue.replace(/\$\{sysenv\.([^}]+)\}/g, (_: string, varName: string) => 
+      process.env[varName] ?? ''
+    );
+    
+    // Expand home directory
+    if (expanded.startsWith('~')) {
+      expanded = os.homedir() + expanded.slice(1);
+    }
+    
+    const resolved = path.resolve(workspaceFolder, expanded);
+    if (fs.existsSync(resolved)) {
+      return resolved;
+    }
+  }
+  
+  // Default PlatformIO build directory
+  return path.join(workspaceFolder, '.pio', 'build');
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /**
  * Find PlatformIO build environments in the workspace.
  * Uses the full INI parser with extra_configs, extends, and variable
- * interpolation support.
+ * interpolation support. Searches for all .elf files in build directories,
+ * not just firmware.elf, to support non-standard PlatformIO setups.
  */
 export async function findPioEnvironments(workspaceFolder: string): Promise<PioEnvironment[]> {
   const envs: PioEnvironment[] = [];
-  const pioBuildDir = path.join(workspaceFolder, '.pio', 'build');
-
-  if (!fs.existsSync(pioBuildDir)) {
+  
+  const platformIniPath = path.join(workspaceFolder, 'platformio.ini');
+  if (!fs.existsSync(platformIniPath)) {
     return envs;
   }
 
   // Parse all environments from platformio.ini (+ extra_configs)
-  const { envs: parsedEnvs, coreDir } = parsePioProject(workspaceFolder);
+  const content = fs.readFileSync(platformIniPath, 'utf8');
+  const sections = parsePlatformioIni(content);
+  mergeExtraConfigs(workspaceFolder, sections);
+  interpolateVariables(sections);
+  
+  const { envs: parsedEnvs, coreDir } = { 
+    envs: parseEnvironments(sections), 
+    coreDir: sections['platformio']?.['core_dir'] 
+      ? (() => {
+          let expanded = sections['platformio']['core_dir'].replace(/\$\{sysenv\.([^}]+)\}/g, (_: string, varName: string) => process.env[varName] ?? '');
+          if (expanded.startsWith('~')) {
+            expanded = os.homedir() + expanded.slice(1);
+          }
+          const resolved = path.resolve(workspaceFolder, expanded);
+          return fs.existsSync(resolved) ? resolved : undefined;
+        })()
+      : undefined
+  };
+  
   const parsedEnvMap = new Map(parsedEnvs.map((e) => [e.name, e]));
+  const projectName = getProjectName(workspaceFolder);
+  
+  // Resolve build directory (supports custom build_dir)
+  const pioBuildDir = resolveBuildDir(workspaceFolder, sections);
+  
+  if (!fs.existsSync(pioBuildDir)) {
+    return envs;
+  }
 
   const entries = fs.readdirSync(pioBuildDir, { withFileTypes: true });
   for (const entry of entries) {
@@ -518,38 +604,47 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
     }
 
     const envName = entry.name;
-    const elfPath = path.join(pioBuildDir, envName, 'firmware.elf');
+    const envBuildDir = path.join(pioBuildDir, envName);
+    
+    // Find all .elf files in the environment's build directory
+    const elfFiles = findElfFilesInDir(envBuildDir, projectName);
+    
+    if (elfFiles.length === 0) {
+      continue;
+    }
 
-    if (fs.existsSync(elfPath)) {
-      const env: PioEnvironment = {
-        name: envName,
+    // Use the parsed board info if available, otherwise fall back to env name
+    const parsed = parsedEnvMap.get(envName);
+    const board = parsed?.board;
+
+    const chipName = getChipName(board || envName, workspaceFolder, coreDir);
+    const targetArch = CHIP_TARGET_MAP[chipName] ?? 'xtensa';
+    const isRiscV = isRiscVArch(targetArch);
+
+    const packagesDir = getPioPackagesDir(coreDir);
+    let toolPath: string | undefined;
+    let romElfPath: string | undefined;
+    
+    if (packagesDir) {
+      toolPath = findGdbPackage(packagesDir, isRiscV, chipName);
+      romElfPath = findRomElf(packagesDir, chipName);
+    }
+
+    // Create an entry for each .elf file found
+    for (let i = 0; i < elfFiles.length; i++) {
+      const elfPath = elfFiles[i];
+      const elfName = path.basename(elfPath, '.elf');
+      
+      // First .elf gets the standard name, others get suffixed
+      const displayName = i === 0 ? envName : `${envName}:${elfName}`;
+      
+      envs.push({
+        name: displayName,
         elfPath,
-      };
-
-      // Use the parsed board info if available, otherwise fall back to env name
-      const parsed = parsedEnvMap.get(envName);
-      const board = parsed?.board;
-
-      const chipName = getChipName(board || envName, workspaceFolder, coreDir);
-      const targetArch = CHIP_TARGET_MAP[chipName] ?? 'xtensa';
-      const isRiscV = isRiscVArch(targetArch);
-
-      const packagesDir = getPioPackagesDir(coreDir);
-      if (packagesDir) {
-        const toolPath = findGdbPackage(packagesDir, isRiscV, chipName);
-        if (toolPath) {
-          env.toolPath = toolPath;
-          env.targetArch = targetArch;
-        }
-
-        // Find ROM ELF for the chip (like filter_exception_decoder.py)
-        const romElfPath = findRomElf(packagesDir, chipName);
-        if (romElfPath) {
-          env.romElfPath = romElfPath;
-        }
-      }
-
-      envs.push(env);
+        toolPath,
+        targetArch,
+        romElfPath,
+      });
     }
   }
 
