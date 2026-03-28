@@ -459,6 +459,29 @@ function findGdbPackage(packagesDir: string, isRiscV: boolean, chipName?: string
 // ---------------------------------------------------------------------------
 
 /**
+ * Expand a PlatformIO path value with environment variables and home directory.
+ * Returns the resolved path if it exists, otherwise undefined.
+ */
+function expandPioPath(value: string | undefined, workspaceFolder: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  // Expand environment variables
+  let expanded = value.replace(/\$\{sysenv\.([^}]+)\}/g, (_: string, varName: string) => 
+    process.env[varName] ?? ''
+  );
+  
+  // Expand home directory
+  if (expanded.startsWith('~')) {
+    expanded = os.homedir() + expanded.slice(1);
+  }
+  
+  const resolved = path.resolve(workspaceFolder, expanded);
+  return fs.existsSync(resolved) ? resolved : undefined;
+}
+
+/**
  * Find all .elf files in a directory, excluding common non-firmware files.
  */
 function findElfFilesInDir(dir: string, projectName?: string): string[] {
@@ -506,7 +529,11 @@ function findElfFilesInDir(dir: string, projectName?: string): string[] {
 /**
  * Get the project name from platformio.ini [platformio] section.
  */
-function getProjectName(workspaceFolder: string): string | undefined {
+function getProjectName(workspaceFolder: string, sections?: Sections): string | undefined {
+  if (sections) {
+    return sections['platformio']?.['name'];
+  }
+
   const platformIniPath = path.join(workspaceFolder, 'platformio.ini');
   if (!fs.existsSync(platformIniPath)) {
     return undefined;
@@ -514,8 +541,8 @@ function getProjectName(workspaceFolder: string): string | undefined {
 
   try {
     const content = fs.readFileSync(platformIniPath, 'utf8');
-    const sections = parsePlatformioIni(content);
-    return sections['platformio']?.['name'];
+    const parsedSections = parsePlatformioIni(content);
+    return parsedSections['platformio']?.['name'];
   } catch {
     return undefined;
   }
@@ -529,18 +556,8 @@ function resolveBuildDir(workspaceFolder: string, sections: Sections): string {
   const buildDirValue = sections['platformio']?.['build_dir'];
   
   if (buildDirValue) {
-    // Expand environment variables
-    let expanded = buildDirValue.replace(/\$\{sysenv\.([^}]+)\}/g, (_: string, varName: string) => 
-      process.env[varName] ?? ''
-    );
-    
-    // Expand home directory
-    if (expanded.startsWith('~')) {
-      expanded = os.homedir() + expanded.slice(1);
-    }
-    
-    const resolved = path.resolve(workspaceFolder, expanded);
-    if (fs.existsSync(resolved)) {
+    const resolved = expandPioPath(buildDirValue, workspaceFolder);
+    if (resolved) {
       return resolved;
     }
   }
@@ -573,22 +590,11 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
   mergeExtraConfigs(workspaceFolder, sections);
   interpolateVariables(sections);
   
-  const { envs: parsedEnvs, coreDir } = { 
-    envs: parseEnvironments(sections), 
-    coreDir: sections['platformio']?.['core_dir'] 
-      ? (() => {
-          let expanded = sections['platformio']['core_dir'].replace(/\$\{sysenv\.([^}]+)\}/g, (_: string, varName: string) => process.env[varName] ?? '');
-          if (expanded.startsWith('~')) {
-            expanded = os.homedir() + expanded.slice(1);
-          }
-          const resolved = path.resolve(workspaceFolder, expanded);
-          return fs.existsSync(resolved) ? resolved : undefined;
-        })()
-      : undefined
-  };
+  const parsedEnvs = parseEnvironments(sections);
+  const coreDir = expandPioPath(sections['platformio']?.['core_dir'], workspaceFolder);
   
   const parsedEnvMap = new Map(parsedEnvs.map((e) => [e.name, e]));
-  const projectName = getProjectName(workspaceFolder);
+  const projectName = getProjectName(workspaceFolder, sections);
   
   // Resolve build directory (supports custom build_dir)
   const pioBuildDir = resolveBuildDir(workspaceFolder, sections);

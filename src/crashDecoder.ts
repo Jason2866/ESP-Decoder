@@ -60,8 +60,13 @@ function isToolAccessError(err: unknown): boolean {
     return true;
   }
 
-  // Tool not found messages
-  if (message.includes('command not found') || message.includes('not found')) {
+  // Tool not found messages - use stricter patterns to avoid false positives
+  if (
+    message.includes('command not found') ||
+    message.includes(': not found') ||
+    message.includes('is not recognized as an internal or external command') ||
+    (message.includes('no such file') && message.includes('directory'))
+  ) {
     return true;
   }
 
@@ -814,7 +819,6 @@ async function decodeCoredumpElfInternal(
     const result: CoredumpDecodedResult = {
       threads: [],
       rawOutput: `Coredump decode failed: ${errMsg}`,
-      toolsMissing: true,
     };
     
     // Only set toolsMissing for actual tool access/execution errors
