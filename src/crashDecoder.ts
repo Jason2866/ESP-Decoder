@@ -337,6 +337,16 @@ export async function decodeCrash(
     }
   }
 
+  // Validate that the resolved toolPath exists and is executable before invoking it.
+  try {
+    await fsPromises.access(toolPath, fs.constants.X_OK);
+  } catch {
+    write(`[ESP Decoder] toolPath '${toolPath}' is not executable or does not exist — returning raw decode`);
+    const raw = createRawDecode(crashEvent.rawText);
+    raw.toolsMissing = true;
+    return raw;
+  }
+
   try {
     // Resolve target architecture to a value trbr understands
     const resolvedArch = resolveTargetArch(targetArch, crashEvent.kind);
@@ -436,7 +446,9 @@ export async function decodeCrash(
   } catch (err) {
     const errMsg = err instanceof Error ? err.stack || err.message : String(err);
     write(`[ESP Decoder] decode failed: ${errMsg}`);
-    return createRawDecode(crashEvent.rawText);
+    const raw = createRawDecode(crashEvent.rawText);
+    raw.toolsMissing = true;
+    return raw;
   }
 }
 
@@ -753,6 +765,7 @@ async function decodeCoredumpElfInternal(
     return {
       threads: [],
       rawOutput: `Coredump decode failed: ${errMsg}`,
+      toolsMissing: true,
     };
   }
 }
