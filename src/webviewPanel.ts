@@ -1455,17 +1455,83 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       }
     });
 
+    // Command history
+    let commandHistory = [];
+    let historyIndex = -1;
+    let currentInput = '';
+
     document.getElementById('btn-send').addEventListener('click', sendInput);
     serialInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') sendInput();
+      if (e.key === 'Enter') {
+        sendInput();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        navigateHistory('up');
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        navigateHistory('down');
+      }
+    });
+
+    // Exit history navigation only when user actually edits input text
+    serialInput.addEventListener('input', () => {
+      if (historyIndex !== -1) {
+        historyIndex = -1;
+      }
     });
 
     function sendInput() {
       const val = serialInput.value;
       if (val) {
+        // Add to history (avoid consecutive duplicates)
+        if (commandHistory.length === 0 || commandHistory[commandHistory.length - 1] !== val) {
+          commandHistory.push(val);
+          // Limit history size to 100 commands
+          if (commandHistory.length > 100) {
+            commandHistory.shift();
+          }
+        }
         vscode.postMessage({ type: 'sendData', data: val });
         serialInput.value = '';
+        historyIndex = -1;
+        currentInput = '';
       }
+    }
+
+    function navigateHistory(direction) {
+      if (commandHistory.length === 0) return;
+
+      // Save current input when starting to navigate
+      if (historyIndex === -1) {
+        currentInput = serialInput.value;
+      }
+
+      if (direction === 'up') {
+        if (historyIndex === -1) {
+          // Start from the most recent command
+          historyIndex = commandHistory.length - 1;
+        } else if (historyIndex > 0) {
+          // Move to older command
+          historyIndex--;
+        }
+        serialInput.value = commandHistory[historyIndex];
+      } else if (direction === 'down') {
+        if (historyIndex === -1) {
+          // Already at current input, do nothing
+          return;
+        } else if (historyIndex < commandHistory.length - 1) {
+          // Move to newer command
+          historyIndex++;
+          serialInput.value = commandHistory[historyIndex];
+        } else {
+          // Return to current input
+          historyIndex = -1;
+          serialInput.value = currentInput;
+        }
+      }
+
+      // Move cursor to end of input
+      serialInput.setSelectionRange(serialInput.value.length, serialInput.value.length);
     }
 
     // Auto-scroll detection

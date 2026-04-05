@@ -6,6 +6,12 @@
 
 - **Monitor location setting** — users can now choose between opening the ESP Crash Monitor in the bottom panel (default, introduced in v0.11.0) or as an editor tab (legacy behavior). Configure via `esp-decoder.monitorLocation` setting.
 
+## [0.11.2] - 2026-04-05
+
+### Added
+
+- **Command history in serial monitor** — use Up/Down arrow keys to navigate through previously sent commands. History stores up to 100 commands and avoids consecutive duplicates.
+
 ## [0.11.1] - 2026-03-28
 
 ### Changed
