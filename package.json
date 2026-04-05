@@ -144,6 +144,19 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically scroll to bottom on new serial data"
+        },
+        "esp-decoder.monitorLocation": {
+          "type": "string",
+          "default": "panel",
+          "enum": [
+            "panel",
+            "editor"
+          ],
+          "enumDescriptions": [
+            "Open monitor in bottom panel (next to Terminal, Output, etc.)",
+            "Open monitor as editor tab (legacy behavior)"
+          ],
+          "description": "Location where the ESP Crash Monitor should open"
         }
       }
     }

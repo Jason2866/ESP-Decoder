@@ -69,7 +69,14 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('esp-decoder.openMonitor', () => {
       if (viewProvider) {
-        viewProvider.show();
+        const config = vscode.workspace.getConfiguration('esp-decoder');
+        const monitorLocation = config.get<string>('monitorLocation', 'panel');
+        
+        if (monitorLocation === 'editor') {
+          viewProvider.showAsEditor();
+        } else {
+          viewProvider.show();
+        }
       }
     })
   );

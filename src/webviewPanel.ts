@@ -14,6 +14,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   public static readonly viewType = 'esp-decoder.monitorView';
 
   private view: vscode.WebviewView | undefined;
+  private panel: vscode.WebviewPanel | undefined;
   private readonly extensionUri: vscode.Uri;
   private readonly serialManager: SerialPortManager;
   private readonly crashCapturer: TrbrCrashCapturer;
@@ -168,6 +169,53 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     } else {
       vscode.commands.executeCommand('esp-decoder.monitorView.focus');
     }
+  }
+
+  /**
+   * Open the monitor as an editor tab (legacy behavior).
+   * Creates a new WebviewPanel if one doesn't exist.
+   */
+  public showAsEditor(): void {
+    if (this.panel) {
+      this.panel.reveal();
+      return;
+    }
+
+    this.panel = vscode.window.createWebviewPanel(
+      'esp-decoder.monitor',
+      'ESP Crash Monitor',
+      vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        localResourceRoots: [this.extensionUri],
+        retainContextWhenHidden: true,
+      }
+    );
+
+    this.panel.webview.html = this.getHtmlContent();
+
+    // Handle messages from webview
+    this.panel.webview.onDidReceiveMessage(
+      (message) => {
+        this.handleMessage(message).catch((err) => {
+          this.log.appendLine(`[ERROR] message handler error: ${err}`);
+          this.postMessage({
+            type: 'error',
+            message: err instanceof Error ? err.message : String(err),
+          });
+          this.syncState();
+        });
+      },
+      null,
+      this.disposables
+    );
+
+    this.panel.onDidDispose(() => {
+      this.panel = undefined;
+    }, null, this.disposables);
+
+    // Send initial state
+    this.sendInitialState();
   }
 
   private sendInitialState(): void {
@@ -604,13 +652,22 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private postMessage(message: any): void {
-    this.view?.webview.postMessage(message);
+    if (this.view) {
+      this.view.webview.postMessage(message);
+    }
+    if (this.panel) {
+      this.panel.webview.postMessage(message);
+    }
   }
 
   public dispose(): void {
     this.cancelSerialFlush();
     this.crashCapturer.dispose();
     this.addr2linePool.disposeAll();
+    if (this.panel) {
+      this.panel.dispose();
+      this.panel = undefined;
+    }
     while (this.disposables.length) {
       const d = this.disposables.pop();
       d?.dispose();
