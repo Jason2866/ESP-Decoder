@@ -1413,11 +1413,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
         navigateHistory('down');
-      } else {
-        // Reset history navigation when user types
-        if (historyIndex !== -1) {
-          historyIndex = -1;
-        }
+      }
+    });
+
+    // Exit history navigation only when user actually edits input text
+    serialInput.addEventListener('input', () => {
+      if (historyIndex !== -1) {
+        historyIndex = -1;
       }
     });
 
