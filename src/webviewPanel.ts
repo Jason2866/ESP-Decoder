@@ -125,22 +125,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     );
   }
 
-  public resolveWebviewView(
-    webviewView: vscode.WebviewView,
-    _context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken
-  ): void {
-    this.view = webviewView;
-
-    webviewView.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [this.extensionUri],
-    };
-
-    webviewView.webview.html = this.getHtmlContent();
-
-    // Handle messages from webview
-    webviewView.webview.onDidReceiveMessage(
+  private wireWebview(webview: vscode.Webview): void {
+    webview.html = this.getHtmlContent();
+    webview.onDidReceiveMessage(
       (message) => {
         this.handleMessage(message).catch((err) => {
           this.log.appendLine(`[ERROR] message handler error: ${err}`);
@@ -154,6 +141,21 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       null,
       this.disposables
     );
+  }
+
+  public resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    _context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken
+  ): void {
+    this.view = webviewView;
+
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [this.extensionUri],
+    };
+
+    this.wireWebview(webviewView.webview);
 
     webviewView.onDidDispose(() => {
       this.view = undefined;
@@ -192,23 +194,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       }
     );
 
-    this.panel.webview.html = this.getHtmlContent();
-
-    // Handle messages from webview
-    this.panel.webview.onDidReceiveMessage(
-      (message) => {
-        this.handleMessage(message).catch((err) => {
-          this.log.appendLine(`[ERROR] message handler error: ${err}`);
-          this.postMessage({
-            type: 'error',
-            message: err instanceof Error ? err.message : String(err),
-          });
-          this.syncState();
-        });
-      },
-      null,
-      this.disposables
-    );
+    this.wireWebview(this.panel.webview);
 
     this.panel.onDidDispose(() => {
       this.panel = undefined;
