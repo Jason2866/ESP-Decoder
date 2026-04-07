@@ -1667,7 +1667,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           var lastEscape = part.lastIndexOf('\x1b');
           if (lastEscape !== -1) {
             var candidate = part.substring(lastEscape);
-            var completeEscape = new RegExp('^\\x1b(?:\\[[0-9;?]*[\\x20-\\x2f]*[\\x40-\\x7e]|[\\s\\S][\\x00-\\x1f]?)').test(candidate);
+            var completeEscape = new RegExp('^\\x1b(?:\\[[0-9;?]*[\\x20-\\x2f]*[\\x40-\\x7e]|[^\\[][\\x00-\\x1f]?)').test(candidate);
             if (!completeEscape) {
               ansiTail = candidate;
               renderText = part.substring(0, lastEscape);
