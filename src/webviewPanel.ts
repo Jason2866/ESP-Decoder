@@ -1277,6 +1277,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // Holds a trailing incomplete CSI sequence from the previous data chunk
     let ansiTail = '';
     let carriageReturn = false;
+    let currentLine = null;
 
     function resetAnsiState() {
       ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
@@ -1395,6 +1396,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       resetAnsiState();
       ansiTail = '';
       carriageReturn = false;
+      currentLine = null;
       crashList.innerHTML = '';
       crashCount = 0;
       crashCountBadge.style.display = 'none';
@@ -1636,34 +1638,52 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       var CRLF = CR + LF;
       var parts = text.split(new RegExp('(' + CRLF + '|' + CR + '|' + LF + ')'));
 
+      // Ensure there is a currentLine wrapper to accumulate spans into.
+      if (!currentLine) {
+        currentLine = document.createElement('div');
+        serialOutput.appendChild(currentLine);
+      }
+
       for (var p = 0; p < parts.length; p++) {
         var part = parts[p];
         if (p % 2 === 1) {
           if (part === CR) {
+            // Bare CR: mark for overwrite on next text chunk.
             carriageReturn = true;
           } else {
+            // LF or CRLF: emit a new logical line.
             carriageReturn = false;
+            currentLine = document.createElement('div');
+            serialOutput.appendChild(currentLine);
           }
           continue;
         }
         if (part === '') { continue; }
 
+        // Fix trailing-ANSI detection: find the last escape byte and only
+        // treat it as an incomplete tail if it doesn't form a complete sequence.
         var renderText = part;
         if (p === parts.length - 1) {
-          var partialMatch = /\\x1b(?:\\[.*)?$/.exec(part);
-          if (partialMatch) {
-            ansiTail = partialMatch[0];
-            renderText = part.substring(0, partialMatch.index);
+          var lastEscape = part.lastIndexOf('\x1b');
+          if (lastEscape !== -1) {
+            var candidate = part.substring(lastEscape);
+            var completeEscape = new RegExp('^\\x1b(?:\\[[0-9;?]*[\\x20-\\x2f]*[\\x40-\\x7e]|[\\s\\S][\\x00-\\x1f]?)').test(candidate);
+            if (!completeEscape) {
+              ansiTail = candidate;
+              renderText = part.substring(0, lastEscape);
+            }
           }
         }
 
         var lineFragment = renderAnsiText(renderText);
-        if (carriageReturn && serialOutput.lastChild) {
-          serialOutput.replaceChild(lineFragment, serialOutput.lastChild);
-        } else {
-          serialOutput.appendChild(lineFragment);
+        if (carriageReturn && currentLine) {
+          // Overwrite semantics: replace the current logical line wrapper.
+          var newLine = document.createElement('div');
+          serialOutput.replaceChild(newLine, currentLine);
+          currentLine = newLine;
+          carriageReturn = false;
         }
-        carriageReturn = false;
+        currentLine.appendChild(lineFragment);
       }
 
       var excess = serialOutput.childNodes.length - 10000;
