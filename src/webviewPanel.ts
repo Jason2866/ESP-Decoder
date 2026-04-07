@@ -1094,6 +1094,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     .ansi-underline { text-decoration: underline; }
     .ansi-strikethrough { text-decoration: line-through; }
     .ansi-underline.ansi-strikethrough { text-decoration: underline line-through; }
+    .ansi-blink { animation: ansi-blink 1s step-end infinite; }
+    .ansi-blink-fast { animation: ansi-blink 0.5s step-end infinite; }
+    .ansi-hidden { visibility: hidden; }
+    @keyframes ansi-blink { 50% { opacity: 0; } }
     .ansi-fg-black   { color: rgb(128,128,128); }
     .ansi-fg-red     { color: rgb(255,  0,  0); }
     .ansi-fg-green   { color: rgb(  0,255,  0); }
@@ -1272,6 +1276,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // ANSI colour state for the serial terminal
     const ansiState = {
       bold: false, italic: false, underline: false, strikethrough: false,
+      blink: false, fastBlink: false, hidden: false,
       fg: null, bg: null,
     };
     // Holds a trailing incomplete CSI sequence from the previous data chunk
@@ -1281,7 +1286,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
     function resetAnsiState() {
       ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
-      ansiState.strikethrough=false; ansiState.fg=null; ansiState.bg=null;
+      ansiState.strikethrough=false; ansiState.blink=false; ansiState.fastBlink=false;
+      ansiState.hidden=false; ansiState.fg=null; ansiState.bg=null;
     }
 
     function ansiApplyCode(code) {
@@ -1290,10 +1296,15 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         case  1: ansiState.bold=true; break;
         case  3: ansiState.italic=true; break;
         case  4: ansiState.underline=true; break;
+        case  5: ansiState.blink=true; break;
+        case  6: ansiState.fastBlink=true; break;
+        case  8: ansiState.hidden=true; break;
         case  9: ansiState.strikethrough=true; break;
         case 22: ansiState.bold=false; break;
         case 23: ansiState.italic=false; break;
         case 24: ansiState.underline=false; break;
+        case 25: ansiState.blink=false; ansiState.fastBlink=false; break;
+        case 28: ansiState.hidden=false; break;
         case 29: ansiState.strikethrough=false; break;
         case 30: ansiState.fg='black';   break;
         case 31: ansiState.fg='red';     break;
@@ -1319,13 +1330,17 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     function ansiMakeNode(text) {
       if (text === '') return null;
       const needsSpan = ansiState.bold || ansiState.italic || ansiState.underline ||
-                        ansiState.strikethrough || ansiState.fg || ansiState.bg;
+                        ansiState.strikethrough || ansiState.blink || ansiState.fastBlink ||
+                        ansiState.hidden || ansiState.fg || ansiState.bg;
       if (!needsSpan) return document.createTextNode(text);
       const s = document.createElement('span');
       if (ansiState.bold)          s.classList.add('ansi-bold');
       if (ansiState.italic)        s.classList.add('ansi-italic');
       if (ansiState.underline)     s.classList.add('ansi-underline');
       if (ansiState.strikethrough) s.classList.add('ansi-strikethrough');
+      if (ansiState.blink)         s.classList.add('ansi-blink');
+      if (ansiState.fastBlink)     s.classList.add('ansi-blink-fast');
+      if (ansiState.hidden)        s.classList.add('ansi-hidden');
       if (ansiState.fg)            s.classList.add('ansi-fg-' + ansiState.fg);
       if (ansiState.bg)            s.classList.add('ansi-bg-' + ansiState.bg);
       s.appendChild(document.createTextNode(text));
