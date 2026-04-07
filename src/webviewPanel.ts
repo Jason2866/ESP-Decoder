@@ -1690,6 +1690,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       if (excess > 0) {
         var keep = Array.from(serialOutput.childNodes).slice(excess);
         serialOutput.replaceChildren.apply(serialOutput, keep);
+        // Reset currentLine if it was removed during trimming
+        if (currentLine && !serialOutput.contains(currentLine)) {
+          currentLine = serialOutput.lastElementChild || null;
+        }
       }
 
       if (autoscroll && !scrollRAFPending) {
