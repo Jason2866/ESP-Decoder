@@ -1296,8 +1296,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         case  1: ansiState.bold=true; break;
         case  3: ansiState.italic=true; break;
         case  4: ansiState.underline=true; break;
-        case  5: ansiState.blink=true; break;
-        case  6: ansiState.fastBlink=true; break;
+        case  5: ansiState.blink=true; ansiState.fastBlink=false; break;
+        case  6: ansiState.fastBlink=true; ansiState.blink=false; break;
         case  8: ansiState.hidden=true; break;
         case  9: ansiState.strikethrough=true; break;
         case 22: ansiState.bold=false; break;
