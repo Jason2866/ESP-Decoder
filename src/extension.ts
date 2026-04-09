@@ -528,6 +528,44 @@ function isEspDevice(port: { vendorId?: string; manufacturer?: string }): boolea
 }
 
 /**
+ * On startup, check if an ESP device is already connected and auto-connect
+ * if the user previously opted in.
+ */
+async function tryAutoConnectToExisting(
+  serial: SerialPortManager,
+  log: vscode.OutputChannel,
+  ports: import('./serialPortManager').SerialPortInfo[],
+): Promise<void> {
+  if (serial.isConnected) {
+    return;
+  }
+  const config = vscode.workspace.getConfiguration('esp-decoder');
+  const autoConnect = config.get<string>('autoConnect', 'ask');
+  if (autoConnect !== 'on') {
+    return;
+  }
+
+  const espPort = ports.find((p) => isEspDevice(p));
+  if (!espPort) {
+    return;
+  }
+
+  log.appendLine(
+    `[ESP Decoder] ESP device already connected at startup: ${espPort.path} (VID:${espPort.vendorId ?? '?'}, ${espPort.manufacturer ?? 'unknown'})`,
+  );
+  serial.setPort(espPort.path);
+  const success = await serial.connect();
+  if (success) {
+    if (viewProvider) {
+      viewProvider.syncState();
+    }
+    vscode.window.showInformationMessage(
+      `ESP Decoder: Auto-connected to ${espPort.path} @ ${serial.baudRate}`,
+    );
+  }
+}
+
+/**
  * Poll for newly attached USB serial ports.  When a probable ESP device
  * appears, either auto-connect (if the user opted in) or ask the user
  * once whether auto-connect should be enabled.
@@ -537,11 +575,12 @@ function startUsbPolling(
   serial: SerialPortManager,
   log: vscode.OutputChannel,
 ): void {
-  // Seed the set of already-known ports so we only react to *new* ones.
-  serial.listPorts().then((ports) => {
+  // Check for already-connected ESP devices on startup.
+  serial.listPorts().then(async (ports) => {
     for (const p of ports) {
       knownPorts.add(p.path);
     }
+    await tryAutoConnectToExisting(serial, log, ports);
   });
 
   usbPollingTimer = setInterval(async () => {
