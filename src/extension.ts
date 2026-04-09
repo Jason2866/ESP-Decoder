@@ -20,6 +20,7 @@ let viewProvider: EspDecoderWebviewPanel | undefined;
 let outputChannel: vscode.OutputChannel;
 let usbPollingTimer: ReturnType<typeof setInterval> | undefined;
 let knownPorts: Set<string> = new Set();
+let isUploading = false;
 
 // Session state
 let sessionConfig: SessionConfig = {};
@@ -420,6 +421,7 @@ function subscribeToPioarduinoEvents(
         );
 
         // Tell pioarduino to wait until we have fully released the port.
+        isUploading = true;
         waitUntil(serial.releasePort());
       }),
     );
@@ -429,7 +431,11 @@ function subscribeToPioarduinoEvents(
         log.appendLine(
           `[ESP Decoder] onDidUpload (port=${port ?? 'auto'}, exitCode=${exitCode}) — reacquiring serial port`,
         );
-        await reacquireWithRetry(serial, log);
+        try {
+          await reacquireWithRetry(serial, log);
+        } finally {
+          isUploading = false;
+        }
       }),
     );
   }).catch((err) => {
@@ -592,8 +598,8 @@ function startUsbPolling(
   });
 
   usbPollingTimer = setInterval(async () => {
-    // Don't auto-connect while already connected.
-    if (serial.isConnected) {
+    // Don't auto-connect while already connected or during an upload.
+    if (serial.isConnected || isUploading) {
       return;
     }
 
