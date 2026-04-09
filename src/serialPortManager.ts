@@ -161,9 +161,16 @@ export class SerialPortManager extends vscode.Disposable {
 
       this.port.open((err) => {
         if (err) {
-          vscode.window.showErrorMessage(
-            `Failed to open ${this._selectedPath}: ${err.message}`
-          );
+          const msg = err.message || '';
+          if (msg.includes('temporarily unavailable') || msg.includes('lock') || msg.includes('busy') || msg.includes('Access denied')) {
+            vscode.window.showWarningMessage(
+              `Port ${this._selectedPath} is already in use by another application or VS Code window.`
+            );
+          } else {
+            vscode.window.showErrorMessage(
+              `Failed to open ${this._selectedPath}: ${msg}`
+            );
+          }
           this.port = null;
           resolve(false);
           return;
