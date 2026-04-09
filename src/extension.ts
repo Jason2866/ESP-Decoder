@@ -554,6 +554,9 @@ async function tryAutoConnectToExisting(
     `[ESP Decoder] ESP device already connected at startup: ${espPort.path} (VID:${espPort.vendorId ?? '?'}, ${espPort.manufacturer ?? 'unknown'})`,
   );
   serial.setPort(espPort.path);
+  if (viewProvider) {
+    viewProvider.syncState();
+  }
   const success = await serial.connect();
   if (success) {
     if (viewProvider) {
@@ -635,6 +638,9 @@ function startUsbPolling(
     // Auto-connect to the detected ESP port.
     log.appendLine(`[ESP Decoder] Auto-connecting to ${espPort.path}`);
     serial.setPort(espPort.path);
+    if (viewProvider) {
+      viewProvider.syncState();
+    }
     const success = await serial.connect();
     if (success) {
       // Ensure the webview reflects the new connection state (e.g. when the
