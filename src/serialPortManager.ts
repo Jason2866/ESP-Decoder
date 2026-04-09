@@ -49,21 +49,30 @@ export class SerialPortManager extends vscode.Disposable {
 
   async listPorts(): Promise<SerialPortInfo[]> {
     try {
-      const ports = await SerialPort.list();
-      return ports.map((p) => ({
-        path: p.path,
-        manufacturer: p.manufacturer,
-        serialNumber: p.serialNumber,
-        vendorId: p.vendorId,
-        productId: p.productId,
-        friendlyName: p.friendlyName,
-      }));
+      return await this.listPortsSilent();
     } catch (err) {
       vscode.window.showErrorMessage(
         `Failed to list serial ports: ${err instanceof Error ? err.message : err}`
       );
       return [];
     }
+  }
+
+  /**
+   * List serial ports without showing any UI on failure.
+   * Intended for background polling where errors should only be logged.
+   * Throws on failure instead of swallowing the error.
+   */
+  async listPortsSilent(): Promise<SerialPortInfo[]> {
+    const ports = await SerialPort.list();
+    return ports.map((p) => ({
+      path: p.path,
+      manufacturer: p.manufacturer,
+      serialNumber: p.serialNumber,
+      vendorId: p.vendorId,
+      productId: p.productId,
+      friendlyName: p.friendlyName,
+    }));
   }
 
   setPort(portPath: string): void {

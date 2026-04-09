@@ -578,12 +578,17 @@ function startUsbPolling(
   serial: SerialPortManager,
   log: vscode.OutputChannel,
 ): void {
+  let consecutiveFailures = 0;
+  const MAX_POLL_FAILURES = 5;
+
   // Check for already-connected ESP devices on startup.
-  serial.listPorts().then(async (ports) => {
+  serial.listPortsSilent().then(async (ports) => {
     for (const p of ports) {
       knownPorts.add(p.path);
     }
     await tryAutoConnectToExisting(serial, log, ports);
+  }).catch((err) => {
+    log.appendLine(`[ESP Decoder] Failed to list ports on startup: ${err instanceof Error ? err.message : err}`);
   });
 
   usbPollingTimer = setInterval(async () => {
@@ -598,7 +603,23 @@ function startUsbPolling(
       return;
     }
 
-    const ports = await serial.listPorts();
+    let ports: import('./serialPortManager').SerialPortInfo[];
+    try {
+      ports = await serial.listPortsSilent();
+      consecutiveFailures = 0;
+    } catch (err) {
+      consecutiveFailures++;
+      log.appendLine(
+        `[ESP Decoder] Port scan failed (${consecutiveFailures}/${MAX_POLL_FAILURES}): ${err instanceof Error ? err.message : err}`,
+      );
+      if (consecutiveFailures >= MAX_POLL_FAILURES && usbPollingTimer) {
+        clearInterval(usbPollingTimer);
+        usbPollingTimer = undefined;
+        log.appendLine('[ESP Decoder] USB polling disabled after repeated failures');
+      }
+      return;
+    }
+
     const currentPaths = new Set(ports.map((p) => p.path));
 
     // Detect newly appeared ports.
