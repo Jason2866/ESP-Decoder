@@ -598,6 +598,11 @@ function startUsbPolling(
     serial.setPort(espPort.path);
     const success = await serial.connect();
     if (success) {
+      // Ensure the webview reflects the new connection state (e.g. when the
+      // panel was already visible but missed the connectionChanged event).
+      if (viewProvider) {
+        viewProvider.syncState();
+      }
       vscode.window.showInformationMessage(
         `ESP Decoder: Auto-connected to ${espPort.path} @ ${serial.baudRate}`,
       );

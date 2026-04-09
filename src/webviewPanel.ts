@@ -208,7 +208,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     this.syncState();
   }
 
-  private syncState(): void {
+  public syncState(): void {
     this.postMessage({
       type: 'initialState',
       connected: this.serialManager.isConnected,
