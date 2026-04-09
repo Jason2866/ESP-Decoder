@@ -145,6 +145,21 @@
           "default": true,
           "description": "Automatically scroll to bottom on new serial data"
         },
+        "esp-decoder.autoConnect": {
+          "type": "string",
+          "default": "ask",
+          "enum": [
+            "ask",
+            "on",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Ask when an ESP device is detected",
+            "Automatically connect when an ESP device is detected",
+            "Never auto-connect"
+          ],
+          "description": "Automatically connect when an ESP device (Espressif/CP210x/CH340/FTDI) is plugged in"
+        },
         "esp-decoder.monitorLocation": {
           "type": "string",
           "default": "panel",

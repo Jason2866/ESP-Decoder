@@ -18,6 +18,8 @@ interface PioarduinoApi {
 let serialManager: SerialPortManager;
 let viewProvider: EspDecoderWebviewPanel | undefined;
 let outputChannel: vscode.OutputChannel;
+let usbPollingTimer: ReturnType<typeof setInterval> | undefined;
+let knownPorts: Set<string> = new Set();
 
 // Session state
 let sessionConfig: SessionConfig = {};
@@ -160,6 +162,9 @@ export function activate(context: vscode.ExtensionContext) {
       // This is handled by the webview
     })
   );
+
+  // Start USB device polling for auto-connect
+  startUsbPolling(context, serialManager, outputChannel);
 
   // Auto-detect ELF on activation if configured
   const config = vscode.workspace.getConfiguration('esp-decoder');
@@ -497,6 +502,114 @@ function isEspIdfBuildElf(elfPath: string): boolean {
 
   const lower = elfPath.toLowerCase();
   return lower.endsWith('.elf') && !lower.endsWith('/bootloader.elf') && !lower.endsWith('/partition-table.elf') && !lower.endsWith('\\bootloader.elf') && !lower.endsWith('\\partition-table.elf');
+}
+
+/**
+ * Known USB Vendor IDs for common ESP-compatible USB-to-serial chips.
+ */
+const ESP_VENDOR_IDS = new Set([
+  '303a', // Espressif (ESP32-S2/S3/C3/C6 native USB)
+  '10c4', // Silicon Labs CP210x
+  '1a86', // QinHeng CH340/CH341
+  '0403', // FTDI FT232/FT2232
+]);
+
+function isEspDevice(port: { vendorId?: string; manufacturer?: string }): boolean {
+  if (port.vendorId && ESP_VENDOR_IDS.has(port.vendorId.toLowerCase())) {
+    return true;
+  }
+  if (port.manufacturer) {
+    const mfr = port.manufacturer.toLowerCase();
+    return mfr.includes('espressif') || mfr.includes('silicon labs')
+      || mfr.includes('cp210') || mfr.includes('ch340')
+      || mfr.includes('ftdi') || mfr.includes('wch');
+  }
+  return false;
+}
+
+/**
+ * Poll for newly attached USB serial ports.  When a probable ESP device
+ * appears, either auto-connect (if the user opted in) or ask the user
+ * once whether auto-connect should be enabled.
+ */
+function startUsbPolling(
+  context: vscode.ExtensionContext,
+  serial: SerialPortManager,
+  log: vscode.OutputChannel,
+): void {
+  // Seed the set of already-known ports so we only react to *new* ones.
+  serial.listPorts().then((ports) => {
+    for (const p of ports) {
+      knownPorts.add(p.path);
+    }
+  });
+
+  usbPollingTimer = setInterval(async () => {
+    // Don't auto-connect while already connected.
+    if (serial.isConnected) {
+      return;
+    }
+
+    const config = vscode.workspace.getConfiguration('esp-decoder');
+    const autoConnect = config.get<string>('autoConnect', 'ask');
+    if (autoConnect === 'off') {
+      return;
+    }
+
+    const ports = await serial.listPorts();
+    const currentPaths = new Set(ports.map((p) => p.path));
+
+    // Detect newly appeared ports.
+    const newPorts = ports.filter((p) => !knownPorts.has(p.path));
+
+    // Update known set (also removes ports that disappeared).
+    knownPorts = currentPaths;
+
+    const espPort = newPorts.find((p) => isEspDevice(p));
+    if (!espPort) {
+      return;
+    }
+
+    log.appendLine(
+      `[ESP Decoder] ESP device detected: ${espPort.path} (VID:${espPort.vendorId ?? '?'}, ${espPort.manufacturer ?? 'unknown'})`,
+    );
+
+    if (autoConnect === 'ask') {
+      const choice = await vscode.window.showInformationMessage(
+        `ESP device detected on ${espPort.path}. Enable auto-connect for future devices?`,
+        'Yes, connect now',
+        'No, never',
+      );
+      if (choice === 'Yes, connect now') {
+        await config.update('autoConnect', 'on', vscode.ConfigurationTarget.Global);
+        log.appendLine('[ESP Decoder] Auto-connect enabled by user');
+      } else if (choice === 'No, never') {
+        await config.update('autoConnect', 'off', vscode.ConfigurationTarget.Global);
+        log.appendLine('[ESP Decoder] Auto-connect disabled by user');
+        return;
+      } else {
+        // Dismissed — don't connect, don't persist, ask again next time
+        return;
+      }
+    }
+
+    // Auto-connect to the detected ESP port.
+    log.appendLine(`[ESP Decoder] Auto-connecting to ${espPort.path}`);
+    serial.setPort(espPort.path);
+    const success = await serial.connect();
+    if (success) {
+      vscode.window.showInformationMessage(
+        `ESP Decoder: Auto-connected to ${espPort.path} @ ${serial.baudRate}`,
+      );
+    }
+  }, 2000);
+
+  context.subscriptions.push(new vscode.Disposable(() => {
+    if (usbPollingTimer) {
+      clearInterval(usbPollingTimer);
+      usbPollingTimer = undefined;
+    }
+  }));
 }
 
 export function deactivate(): void {

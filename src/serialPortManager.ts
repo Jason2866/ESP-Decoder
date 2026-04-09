@@ -66,6 +66,10 @@ export class SerialPortManager extends vscode.Disposable {
     }
   }
 
+  setPort(portPath: string): void {
+    this._selectedPath = portPath;
+  }
+
   async selectPort(): Promise<string | undefined> {
     const ports = await this.listPorts();
     if (ports.length === 0) {
