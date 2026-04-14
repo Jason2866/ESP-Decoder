@@ -130,7 +130,7 @@ Writes incoming serial data to a text file on disk. Click the **Log2File** butto
 
 ### File location and naming
 
-The log file is created in the first open workspace folder, or `$HOME` if no folder is open. By default the filename follows the pattern `Log_HH-MM-SS_DD-MM-YYYY.txt`. You can override it by typing a custom name into the filename field next to the button.
+The log file is created in the first open workspace folder, or `$HOME` if no folder is open. By default the filename follows the pattern `serial-YYYYMMDD_HHMMSS.log`. You can override it by typing a custom name into the filename field next to the button.
 
 ### Raw vs. filtered mode
 
