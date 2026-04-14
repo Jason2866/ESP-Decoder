@@ -559,13 +559,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       this.logFilterConfig = null;
     }
 
-    // Determine target directory: workspace folder or home
-    const folders = vscode.workspace.workspaceFolders;
-    const logDir = folders && folders.length > 0
-      ? folders[0].uri.fsPath
-      : os.homedir();
+    const logDir = await this.resolveLogDirectory();
+    if (!logDir) {
+      this.postMessage({ type: 'logFailed' });
+      return;
+    }
 
-    // Build filename: use custom name or generate default "Log_HH-MM-SS_DD-MM-YYYY.txt"
+    // Build filename: use custom name or generate default "serial-YYYYMMDD_HHMMSS.log"
     let filename: string;
     if (customFilename) {
       // Sanitise to prevent path traversal
@@ -573,9 +573,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     } else {
       const now = new Date();
       const pad = (n: number) => String(n).padStart(2, '0');
-      const timeStr = `${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
-      const dateStr = `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()}`;
-      filename = `Log_${timeStr}_${dateStr}.txt`;
+      const dateStr = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+      const timeStr = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      filename = `serial-${dateStr}_${timeStr}.log`;
     }
 
     this.logFilePath = path.join(logDir, filename);
@@ -596,6 +596,26 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       vscode.window.showErrorMessage(`Failed to start logging: ${msg}`);
       this.postMessage({ type: 'logFailed' });
     });
+  }
+
+  private async resolveLogDirectory(): Promise<string | null> {
+    const cfg = vscode.workspace.getConfiguration('esp-decoder');
+    const configuredDir = cfg.get<string>('logDirectory', 'logs').trim() || 'logs';
+    const workspaceDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    const resolvedDir = path.isAbsolute(configuredDir)
+      ? configuredDir
+      : path.join(workspaceDir ?? os.homedir(), configuredDir);
+
+    try {
+      await fs.promises.mkdir(resolvedDir, { recursive: true });
+      return resolvedDir;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log.appendLine(`[ESP Decoder] Failed to create log directory ${resolvedDir}: ${msg}`);
+      vscode.window.showErrorMessage(`Failed to create log directory: ${resolvedDir} (${msg})`);
+      return null;
+    }
   }
 
   /**
@@ -1549,7 +1569,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         <input type="checkbox" id="filter-log-filtered"> Filtered
       </label>
       <button id="filter-log2file" class="secondary" title="Start/stop logging serial output to a file" style="font-size:11px;padding:1px 7px">Log2File</button>
-      <input type="text" id="filter-log-filename" placeholder="Log_HH-MM-SS_DD-MM-YYYY.txt" title="Override default log filename" style="width:200px">
+      <input type="text" id="filter-log-filename" placeholder="serial-YYYYMMDD_HHMMSS.log" title="Override default log filename" style="width:200px">
     </div>
     <div id="serial-output"></div>
     <button id="btn-scroll-bottom" title="Scroll to bottom">&#8595; Scroll to bottom</button>

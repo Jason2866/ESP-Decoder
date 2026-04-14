@@ -48,6 +48,7 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 | `esp-decoder.targetArch` | `auto` | Target architecture (`auto`, `xtensa`, `riscv32`) |
 | `esp-decoder.serialMonitor.maxLines` | `5000` | Max lines in serial output |
 | `esp-decoder.serialMonitor.autoscroll` | `true` | Auto-scroll on new data |
+| `esp-decoder.logDirectory` | `logs` | Directory for Log2File output (relative to workspace by default) |
 
 ## How It Works
 

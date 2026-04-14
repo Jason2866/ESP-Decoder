@@ -145,6 +145,11 @@
           "default": true,
           "description": "Automatically scroll to bottom on new serial data"
         },
+        "esp-decoder.logDirectory": {
+          "type": "string",
+          "default": "logs",
+          "description": "Directory where Log2File output is written. Relative paths are resolved from the first workspace folder."
+        },
         "esp-decoder.monitorLocation": {
           "type": "string",
           "default": "panel",
