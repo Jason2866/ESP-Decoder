@@ -2,7 +2,7 @@
   "name": "esp-decoder",
   "displayName": "ESP Crash Decoder",
   "description": "Decode ESP32 crash dumps from serial port — powered by TraceBreaker (trbr).",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "publisher": "Jason2866",
   "license": "GPL-3.0",
   "icon": "assets/icon_large.png",
@@ -194,7 +194,6 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
-    "postinstall": "node scripts/fix-prebuilds.js",
     "build": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
     "package": "npx @vscode/vsce package",
@@ -202,7 +201,7 @@
     "test": "vitest run"
   },
   "overrides": {
-    "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.1"
+    "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.2"
   },
   "dependencies": {
     "serialport": "^13.0.0",
