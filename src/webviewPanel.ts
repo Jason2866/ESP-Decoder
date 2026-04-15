@@ -71,9 +71,17 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       })
     );
 
+    // Listen to serial port errors
+    this.disposables.push(
+      this.serialManager.onError((err) => {
+        this.log.appendLine(`[SerialError] ${err.message}`);
+      })
+    );
+
     // Listen to connection changes
     this.disposables.push(
       this.serialManager.onConnectionChange(async (connected) => {
+        this.log.appendLine(`[ConnectionChange] connected=${connected}`);
         if (!connected) {
           this.cancelSerialFlush();
           // Suspend active log session: close the file but remember settings
@@ -355,10 +363,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   private async handleMessage(message: any): Promise<void> {
     switch (message.type) {
       case 'connect': {
+        this.log.appendLine(`[Connect] requested, selectedPath=${this.serialManager.selectedPath}, isConnected=${this.serialManager.isConnected}`);
         try {
           if (!this.serialManager.selectedPath) {
             const port = await this.serialManager.selectPort();
             if (!port) {
+              this.log.appendLine('[Connect] No port selected, aborting');
               this.postMessage({
                 type: 'error',
                 message: 'No serial port selected. Please select a port first.',
@@ -366,9 +376,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
               this.syncState();
               break;
             }
+            this.log.appendLine(`[Connect] Port selected: ${port}`);
             this.postMessage({ type: 'portSelected', port });
           }
+          this.log.appendLine(`[Connect] Calling connect() for ${this.serialManager.selectedPath} @ ${this.serialManager.baudRate}`);
           const success = await this.serialManager.connect();
+          this.log.appendLine(`[Connect] connect() returned ${success}`);
           if (!success) {
             this.postMessage({
               type: 'error',
@@ -376,6 +389,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
             });
           }
         } catch (err) {
+          this.log.appendLine(`[Connect] Exception: ${err instanceof Error ? err.message : String(err)}`);
           this.postMessage({
             type: 'error',
             message: `Connect error: ${err instanceof Error ? err.message : String(err)}`,

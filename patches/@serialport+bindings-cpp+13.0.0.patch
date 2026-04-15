@@ -1,0 +1,54 @@
+diff --git a/node_modules/@serialport/bindings-cpp/src/serialport_win.cpp b/node_modules/@serialport/bindings-cpp/src/serialport_win.cpp
+--- a/node_modules/@serialport/bindings-cpp/src/serialport_win.cpp
++++ b/node_modules/@serialport/bindings-cpp/src/serialport_win.cpp
+@@ -326,7 +326,18 @@ bool IsClosingHandle(int fd) {
+ void __stdcall WriteIOCompletion(DWORD errorCode, DWORD bytesTransferred, OVERLAPPED* ov) {
+   WriteBaton* baton = static_cast<WriteBaton*>(ov->hEvent);
+   DWORD bytesWritten;
+-  if (!GetOverlappedResult(int2handle(baton->fd), ov, &bytesWritten, TRUE)) {
++
++  if (errorCode) {
++    ErrorCodeToString("Writing to COM port (WriteIOCompletion)", errorCode, baton->errorString);
++    baton->complete = true;
++    return;
++  }
++
++  // hEvent holds a user pointer (baton), not a valid event handle.
++  // GetOverlappedResult with bWait=TRUE would call WaitForSingleObject
++  // on hEvent if Internal is still STATUS_PENDING, which fails with
++  // ERROR_INVALID_HANDLE.  Temporarily clear it so the function falls
++  // back to the file-handle signalling path.
++  HANDLE savedEvent = ov->hEvent;
++  ov->hEvent = NULL;
++  if (!GetOverlappedResult(int2handle(baton->fd), ov, &bytesWritten, TRUE)) {
++    ov->hEvent = savedEvent;
+     errorCode = GetLastError();
+     ErrorCodeToString("Writing to COM port (GetOverlappedResult)", errorCode, baton->errorString);
+     baton->complete = true;
+     return;
+   }
++  ov->hEvent = savedEvent;
+   if (bytesWritten) {
+     baton->offset += bytesWritten;
+     if (baton->offset >= baton->bufferLength) {
+@@ -435,7 +446,16 @@ void __stdcall ReadIOCompletion(DWORD errorCode, DWORD bytesTransferred, OVERLAP
+   }
+ 
+   DWORD lastError;
+-  if (!GetOverlappedResult(int2handle(baton->fd), ov, &bytesTransferred, TRUE)) {
++  // hEvent holds a user pointer (baton), not a valid event handle.
++  // GetOverlappedResult with bWait=TRUE would call WaitForSingleObject
++  // on hEvent if Internal is still STATUS_PENDING, which fails with
++  // ERROR_INVALID_HANDLE.  Temporarily clear it so the function falls
++  // back to the file-handle signalling path.
++  HANDLE savedEvent = ov->hEvent;
++  ov->hEvent = NULL;
++  if (!GetOverlappedResult(int2handle(baton->fd), ov, &bytesTransferred, TRUE)) {
++    ov->hEvent = savedEvent;
+     lastError = GetLastError();
+     ErrorCodeToString("Reading from COM port (GetOverlappedResult)", lastError, baton->errorString);
+     baton->complete = true;
+     return;
+   }
++  ov->hEvent = savedEvent;
+   if (bytesTransferred) {

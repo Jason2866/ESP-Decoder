@@ -110,6 +110,7 @@ export class SerialPortManager extends vscode.Disposable {
   }
 
   async connect(): Promise<boolean> {
+    console.log('[ESP Decoder] connect() called, isConnected:', this._isConnected, 'path:', this._selectedPath);
     if (this._isConnected) {
       await this.disconnect();
     }
@@ -117,17 +118,20 @@ export class SerialPortManager extends vscode.Disposable {
     if (!this._selectedPath) {
       const selected = await this.selectPort();
       if (!selected) {
+        console.log('[ESP Decoder] No port selected, aborting connect');
         return false;
       }
     }
 
     return new Promise<boolean>((resolve) => {
+      console.log('[ESP Decoder] Creating SerialPort instance for', this._selectedPath, '@', this._baudRate);
       try {
         this.port = new SerialPort(
           {
             path: this._selectedPath!,
             baudRate: this._baudRate,
             autoOpen: false,
+            hupcl: false,
           },
         );
       } catch (err) {
@@ -140,17 +144,14 @@ export class SerialPortManager extends vscode.Disposable {
         return;
       }
 
-      this.port.on('data', (data: Buffer) => {
-        this._onData.fire(data);
-      });
-
       this.port.on('error', (err: Error) => {
-        console.error('[ESP Decoder] Serial port error:', err);
         this._onError.fire(err);
-        vscode.window.showErrorMessage(`Serial port error: ${err.message}`);
       });
 
-      this.port.on('close', () => {
+      this.port.on('close', (disconnectError?: Error | null) => {
+        if (disconnectError) {
+          this._onError.fire(disconnectError);
+        }
         this._isConnected = false;
         this._onConnectionChange.fire(false);
       });
@@ -164,6 +165,11 @@ export class SerialPortManager extends vscode.Disposable {
           resolve(false);
           return;
         }
+        // Register the data listener only after the port is open so the
+        // stream's first _read() runs with a fully initialised handle.
+        this.port!.on('data', (data: Buffer) => {
+          this._onData.fire(data);
+        });
         this._isConnected = true;
         this._onConnectionChange.fire(true);
         resolve(true);
