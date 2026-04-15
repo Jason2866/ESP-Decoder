@@ -194,6 +194,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
+    "postinstall": "node scripts/fix-prebuilds.js",
     "build": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
     "package": "npx @vscode/vsce package",
