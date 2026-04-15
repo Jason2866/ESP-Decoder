@@ -201,7 +201,7 @@
     "test": "vitest run"
   },
   "overrides": {
-    "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.0"
+    "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.1"
   },
   "dependencies": {
     "serialport": "^13.0.0",
