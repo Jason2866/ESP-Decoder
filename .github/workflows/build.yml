@@ -10,7 +10,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Rebuild the patched @serialport/bindings-cpp native module on Windows
+  # and produce the .node prebuilds that ship inside the VSIX.
+  rebuild-win:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            prebuild-dir: win32-x64
+          - os: windows-latest
+            arch: ia32
+            prebuild-dir: win32-ia32
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          architecture: ${{ matrix.arch }}
+      - name: Install dependencies (applies patch-package automatically)
+        run: npm install
+      - name: Rebuild native module from patched source
+        shell: bash
+        run: |
+          cd node_modules/@serialport/bindings-cpp
+          npx node-gyp rebuild
+      - name: Locate rebuilt .node file
+        id: find
+        shell: bash
+        run: |
+          built=$(find node_modules/@serialport/bindings-cpp/build -name '*.node' | head -1)
+          echo "built=$built" >> "$GITHUB_OUTPUT"
+      - name: Upload rebuilt prebuild
+        uses: actions/upload-artifact@v7
+        with:
+          name: prebuild-${{ matrix.prebuild-dir }}
+          path: ${{ steps.find.outputs.built }}
+
   build:
+    needs: rebuild-win
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -25,6 +64,27 @@ jobs:
           node-version: 24
       - name: Install NPM
         run: npm install
+      - name: Download patched win32-x64 prebuild
+        uses: actions/download-artifact@v8
+        with:
+          name: prebuild-win32-x64
+          path: /tmp/prebuilds/win32-x64
+      - name: Download patched win32-ia32 prebuild
+        uses: actions/download-artifact@v8
+        with:
+          name: prebuild-win32-ia32
+          path: /tmp/prebuilds/win32-ia32
+      - name: Replace Windows prebuilds with patched versions
+        run: |
+          for dir in win32-x64 win32-ia32; do
+            src=$(find /tmp/prebuilds/$dir -name '*.node' | head -1)
+            dest="node_modules/@serialport/bindings-cpp/prebuilds/$dir/@serialport+bindings-cpp.node"
+            if [ -f "$src" ]; then
+              cp -v "$src" "$dest"
+            else
+              echo "::warning::No rebuilt .node found for $dir"
+            fi
+          done
       - name: Run tests
         run: npm run test
       - name: Compile vsix package

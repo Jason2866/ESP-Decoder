@@ -193,6 +193,7 @@
     }
   },
   "scripts": {
+    "postinstall": "patch-package",
     "vscode:prepublish": "npm run build",
     "build": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
@@ -211,6 +212,7 @@
     "@typescript-eslint/parser": "^8.58.2",
     "esbuild": "^0.28.0",
     "eslint": "^10.2.0",
+    "patch-package": "^8.0.1",
     "pioarduino-node-helpers": "^12.4.4",
     "typescript": "6.0.2",
     "vitest": "^4.1.4"
