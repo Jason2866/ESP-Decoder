@@ -75,6 +75,9 @@ jobs:
   publish:
     needs: [prebuild, prebuild-linux-arm]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
 
@@ -104,7 +107,5 @@ jobs:
           echo "=== Final prebuilds ==="
           find prebuilds -type f
 
-      - name: Publish to npm
+      - name: Publish to NPM registry (OIDC Trusted Publishing)
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
