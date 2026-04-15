@@ -1,0 +1,110 @@
+name: Build prebuilds
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  prebuild:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Windows ────────────────────────────────────────────
+          - os: windows-latest
+            arch: x64
+          - os: windows-latest
+            arch: ia32
+          - os: windows-latest
+            arch: arm64
+          # ── macOS (universal binary) ───────────────────────────
+          - os: macos-latest
+            arch: x64+arm64
+          # ── Linux ──────────────────────────────────────────────
+          - os: ubuntu-latest
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build prebuilds
+        run: npx prebuildify --napi --target 20.0.0 --force --strip --verbose
+        if: matrix.arch != 'x64+arm64'
+
+      - name: Build universal macOS prebuild
+        run: npx prebuildify --napi --target 20.0.0 --force --strip --verbose --arch x64+arm64
+        if: matrix.arch == 'x64+arm64'
+
+      - name: Upload prebuilds
+        uses: actions/upload-artifact@v7
+        with:
+          name: prebuilds-${{ matrix.os }}-${{ matrix.arch }}
+          path: prebuilds/
+
+  # Also cross-compile Linux ARM variants
+  prebuild-linux-arm:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [arm, arm64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm install
+      - name: Cross-compile Linux ARM
+        run: npx prebuildify-cross --napi --target 20.0.0 --force --strip --verbose --arch ${{ matrix.arch }}
+      - name: Upload prebuilds
+        uses: actions/upload-artifact@v7
+        with:
+          name: prebuilds-linux-${{ matrix.arch }}
+          path: prebuilds/
+
+  publish:
+    needs: [prebuild, prebuild-linux-arm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Download all prebuilds
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/all-prebuilds
+          pattern: prebuilds-*
+
+      - name: Merge prebuilds
+        run: |
+          mkdir -p prebuilds
+          for dir in /tmp/all-prebuilds/prebuilds-*/; do
+            cp -rv "$dir"/* prebuilds/ 2>/dev/null || true
+          done
+          echo "=== Final prebuilds ==="
+          find prebuilds -type f
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
