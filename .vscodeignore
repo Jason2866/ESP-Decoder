@@ -3,7 +3,6 @@
 src/**
 test/**
 debug/**
-fork-template/**
 *.ts
 *.map
 .editorconfig
