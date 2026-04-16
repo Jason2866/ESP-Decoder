@@ -354,6 +354,57 @@ describe('TrbrCrashCapturer – ESP8266 exception crash', () => {
     expect(event?.rawText).toContain('>>>stack>>>');
     expect(event?.rawText).toContain('<<<stack<<<');
   });
+
+  it('is not captured without flush (no Rebooting... terminator)', () => {
+    // ESP8266 fixture has no "Rebooting..." line, so the crash block is only
+    // finalized via flush(). Pushing data alone must NOT emit an event.
+    let detected: CrashEvent | undefined;
+    capturer.onCrashDetected((e) => { if (!detected) { detected = e; } });
+    capturer.pushData(Buffer.from(ESP8266_CRASH_TEXT, 'utf8'));
+    // No flush — block must remain pending
+    expect(detected).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: ESP32 Guru Meditation captured via trbr native path
+// ---------------------------------------------------------------------------
+
+describe('TrbrCrashCapturer – ESP32 Guru Meditation (trbr native path)', () => {
+  let capturer: TrbrCrashCapturer;
+
+  beforeEach(() => {
+    capturer = new TrbrCrashCapturer();
+  });
+
+  const GURU_CRASH = [
+    'Guru Meditation Error: Core  0 panic\'ed (LoadProhibited). Exception was unhandled.',
+    'Core  0 register dump:',
+    'PC      : 0x400d1234  PS      : 0x00060030  A0      : 0x800d5678  A1      : 0x3ffb1234',
+    'EXCVADDR: 0x00000000  EXCCAUSE: 0x0000001c',
+    'Backtrace: 0x400d1234:0x3ffb1234 0x400d5678:0x3ffb5678',
+    '',
+    'Rebooting...',
+  ].join('\n');
+
+  it('detects the crash via trbr (not fallback)', () => {
+    const event = feedCrashText(capturer, GURU_CRASH);
+    expect(event).toBeDefined();
+    // trbr-native events have numeric IDs (e.g. "000001"), not "fallback-..." prefixed
+    expect(event!.id).not.toMatch(/^fallback-/);
+  });
+
+  it('classifies the crash as xtensa', () => {
+    const event = feedCrashText(capturer, GURU_CRASH);
+    expect(event?.kind).toBe('xtensa');
+  });
+
+  it('includes backtrace and registers in the raw text', () => {
+    const event = feedCrashText(capturer, GURU_CRASH);
+    expect(event?.rawText).toContain('Backtrace:');
+    expect(event?.rawText).toContain('EXCVADDR');
+    expect(event?.rawText).toContain('EXCCAUSE');
+  });
 });
 
 // ---------------------------------------------------------------------------
