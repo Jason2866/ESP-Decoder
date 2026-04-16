@@ -31,7 +31,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(outputChannel);
 
   try {
-    serialManager = new SerialPortManager();
+    serialManager = new SerialPortManager(outputChannel);
   } catch (err) {
     outputChannel.appendLine(`FATAL: Failed to create SerialPortManager: ${err}`);
     vscode.window.showErrorMessage(`ESP Decoder: Failed to initialize serial port manager: ${err instanceof Error ? err.message : String(err)}`);

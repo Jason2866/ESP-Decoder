@@ -75,6 +75,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     this.disposables.push(
       this.serialManager.onError((err) => {
         this.log.appendLine(`[SerialError] ${err.message}`);
+        this.postMessage({ type: 'error', message: err.message });
       })
     );
 
