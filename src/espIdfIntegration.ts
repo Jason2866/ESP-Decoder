@@ -127,8 +127,8 @@ function findGdbFromIdfTools(chipTarget: string | undefined): string | undefined
 
     const toolPrefixes = isXtensa
       ? chipTarget === 'esp8266'
-        ? ['xtensa-lx106-elf', 'xtensa-esp-elf-gdb', 'xtensa-esp32-elf', 'xtensa-esp32s2-elf', 'xtensa-esp32s3-elf']
-        : ['xtensa-esp-elf-gdb', 'xtensa-esp32-elf', 'xtensa-esp32s2-elf', 'xtensa-esp32s3-elf', 'xtensa-lx106-elf']
+        ? ['xtensa-lx106-elf', 'xtensa-esp-elf', 'xtensa-esp32-elf', 'xtensa-esp32s2-elf', 'xtensa-esp32s3-elf']
+        : ['xtensa-esp-elf', 'xtensa-esp32-elf', 'xtensa-esp32s2-elf', 'xtensa-esp32s3-elf', 'xtensa-lx106-elf']
       : ['riscv32-esp-elf'];
 
     for (const prefix of toolPrefixes) {
