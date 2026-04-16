@@ -388,7 +388,10 @@ export async function decodeCrash(
   };
 
   if (!toolPath) {
-    toolPath = autoDetectPioToolPath(crashEvent.kind, log);
+    const isEsp8266Crash = crashEvent.kind === 'xtensa'
+      && />>>stack>>>/.test(crashEvent.rawText)
+      && !/Backtrace:/i.test(crashEvent.rawText);
+    toolPath = autoDetectPioToolPath(crashEvent.kind, log, isEsp8266Crash ? 'esp8266' : undefined);
     if (!toolPath) {
       write('[ESP Decoder] No toolPath (GDB/addr2line) found — returning raw decode');
       const raw = createRawDecode(crashEvent.rawText);
@@ -893,6 +896,7 @@ async function decodeCoredumpElfInternal(
 function autoDetectPioToolPath(
   crashKind: 'xtensa' | 'riscv' | 'unknown',
   log?: DecodeLogger,
+  chip?: string,
 ): string | undefined {
   const ext = process.platform === 'win32' ? '.exe' : '';
   const pioPackagesDir = getPioPackagesDir();
@@ -916,7 +920,8 @@ function autoDetectPioToolPath(
   }
 
   // Xtensa — try common variants (ESP32/S2/S3 + ESP8266 lx106)
-  const xtensaVariants = [
+  const lx106Entry = { pkg: 'toolchain-xtensa', bin: `xtensa-lx106-elf-gdb${ext}` };
+  const esp32Variants = [
     { pkg: 'tool-xtensa-esp-elf-gdb',     bin: `xtensa-esp32-elf-gdb${ext}` },
     { pkg: 'tool-xtensa-esp-elf-gdb',     bin: `xtensa-esp32s3-elf-gdb${ext}` },
     { pkg: 'tool-xtensa-esp-elf-gdb',     bin: `xtensa-esp32s2-elf-gdb${ext}` },
@@ -924,8 +929,11 @@ function autoDetectPioToolPath(
     { pkg: 'toolchain-xtensa-esp32s3-elf', bin: `xtensa-esp32s3-elf-gdb${ext}` },
     { pkg: 'toolchain-xtensa-esp32-elf',   bin: `xtensa-esp32-elf-gdb${ext}` },
     { pkg: 'toolchain-xtensa-esp32s2-elf', bin: `xtensa-esp32s2-elf-gdb${ext}` },
-    { pkg: 'toolchain-xtensa',            bin: `xtensa-lx106-elf-gdb${ext}` },
   ];
+  const isLx106 = chip && /esp8266|lx106/i.test(chip);
+  const xtensaVariants = isLx106
+    ? [lx106Entry, ...esp32Variants]
+    : [...esp32Variants, lx106Entry];
   for (const { pkg, bin } of xtensaVariants) {
     const c = path.join(pioPackagesDir, pkg, 'bin', bin);
     if (fs.existsSync(c)) { return c; }
