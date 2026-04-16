@@ -1841,7 +1841,7 @@ function parseXtensaFaultInfo(text: string): DecodedCrash['faultInfo'] | undefin
     const excvMatch = line.match(/\bEXCVADDR\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
     if (excvMatch) { faultAddr = excvMatch[1]; }
     const exccMatch = line.match(/\bEXCCAUSE\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
-    if (exccMatch) { faultCode = parseInt(exccMatch[1], 16); }
+    if (exccMatch && faultCode === undefined) { faultCode = parseInt(exccMatch[1], 16); }
   }
 
   if (faultCode !== undefined && faultCode < XTENSA_EXCEPTIONS.length) {

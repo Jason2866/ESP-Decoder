@@ -491,7 +491,9 @@ describe('decodeCrash – ESP8266 raw decode', () => {
 // ---------------------------------------------------------------------------
 // ESP8266 fast-path: addr2line resolution with a stubbed binary
 // ---------------------------------------------------------------------------
-describe('decodeCrash – ESP8266 addr2line fast-path', () => {
+const isWindows = process.platform === 'win32';
+
+describe.skipIf(isWindows)('decodeCrash – ESP8266 addr2line fast-path', () => {
   // Create a temp directory with a fake GDB and addr2line binary pair
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-test-'));
   const binDir = path.join(tmpDir, 'bin');
