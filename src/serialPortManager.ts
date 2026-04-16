@@ -16,6 +16,7 @@ export class SerialPortManager extends vscode.Disposable {
   private _baudRate: number;
   private _isConnected = false;
   private readonly log: vscode.OutputChannel;
+  private readonly ownsLog: boolean;
 
   private readonly _onData = new vscode.EventEmitter<Buffer>();
   readonly onData = this._onData.event;
@@ -32,6 +33,7 @@ export class SerialPortManager extends vscode.Disposable {
 
   constructor(outputChannel?: vscode.OutputChannel) {
     super(() => this.dispose());
+    this.ownsLog = !outputChannel;
     this.log = outputChannel || vscode.window.createOutputChannel('ESP Decoder');
     const config = vscode.workspace.getConfiguration('esp-decoder');
     this._baudRate = config.get<number>('defaultBaudRate', 115200);
@@ -58,7 +60,7 @@ export class SerialPortManager extends vscode.Disposable {
         serialNumber: p.serialNumber,
         vendorId: p.vendorId,
         productId: p.productId,
-        friendlyName: p.friendlyName,
+        friendlyName: (p as unknown as Record<string, unknown>).friendlyName as string | undefined,
       }));
     } catch (err) {
       vscode.window.showErrorMessage(
@@ -154,6 +156,7 @@ export class SerialPortManager extends vscode.Disposable {
         if (disconnectError) {
           this._onError.fire(disconnectError);
         }
+        this.port = null;
         if (this._isConnected) {
           this._isConnected = false;
           this._onConnectionChange.fire(false);
@@ -276,5 +279,8 @@ export class SerialPortManager extends vscode.Disposable {
     this._onData.dispose();
     this._onError.dispose();
     this._onConnectionChange.dispose();
+    if (this.ownsLog) {
+      this.log.dispose();
+    }
   }
 }

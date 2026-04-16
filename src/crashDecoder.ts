@@ -21,6 +21,7 @@ import type {
   Capturer,
   CapturerEvent,
   DecodeOptions,
+  DecodeParams,
 } from 'trbr';
 import { getPioPackagesDir } from './pioIntegration';
 import { Addr2linePool } from './addr2lineResolver';
@@ -427,16 +428,16 @@ export async function decodeCrash(
     }
 
     // Build DecodeParams via trbr's createDecodeParams
-    let params: unknown;
+    let params: DecodeParams;
     try {
       params = await createDecodeParams({
         elfPath,
         toolPath,
-        targetArch: resolvedArch as unknown,
+        targetArch: resolvedArch,
       });
     } catch (e) {
       write(`[ESP Decoder] createDecodeParams failed, using raw params: ${e instanceof Error ? e.message : String(e)}`);
-      params = { elfPath, toolPath, targetArch: resolvedArch };
+      params = { elfPath, toolPath: toolPath!, targetArch: resolvedArch };
     }
 
     // Build decode options
@@ -765,8 +766,7 @@ async function decodeCoredumpElfInternal(
       params = await createDecodeParams({
         elfPath,
         toolPath,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        targetArch: resolvedArch as any,
+        targetArch: resolvedArch,
         coredumpMode: true,
       });
     } catch (e) {
@@ -906,6 +906,7 @@ function autoDetectPioToolPath(
  * Valid trbr target architectures.
  */
 const VALID_TRBR_TARGETS = ['xtensa', 'esp32c2', 'esp32c3', 'esp32c6', 'esp32h2', 'esp32h4', 'esp32p4'] as const;
+type TrbrTarget = (typeof VALID_TRBR_TARGETS)[number];
 
 /** ELF e_machine values for ESP chip families */
 const ELF_MACHINE_XTENSA = 0x5e; // 94
@@ -954,7 +955,7 @@ async function detectElfArch(
 function resolveTargetArch(
   configArch: string | undefined,
   crashKind: 'xtensa' | 'riscv' | 'unknown'
-): string {
+): TrbrTarget {
   if (configArch && configArch !== 'auto') {
     // Map legacy 'riscv32' to a concrete trbr target (default esp32c3)
     if (configArch === 'riscv32') {
@@ -962,7 +963,7 @@ function resolveTargetArch(
     }
     // Pass through if it's already a valid trbr target
     if ((VALID_TRBR_TARGETS as readonly string[]).includes(configArch)) {
-      return configArch;
+      return configArch as TrbrTarget;
     }
     // Unknown arch, fall through to auto-detect
   }
