@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.21.0] - 2026-04-16
+
+### Added
+
+- **ESP8266 crash decode support** — full crash detection and decoding for ESP8266 `Exception (N):` crashes with `>>>stack>>>` / `<<<stack<<<` stack dumps.
+  - Exception cause lookup (e.g. Exception 28 → LoadProhibited).
+  - Register parsing for ESP8266 format (`epc1=`, `excvaddr=`, `depc=`).
+  - Heuristic stack address extraction from ESP8266 hex dump lines.
+  - Fast-path addr2line resolution for stack addresses (same pattern as Xtensa Backtrace).
+  - Fallback-based crash detection — works around trbr framer limitations (case-sensitive `detectKind`, missing `>>>stack>>>` flush guard).
+
 ## [0.20.1] - 2026-04-16
 
 ### Fixed

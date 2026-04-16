@@ -1,6 +1,6 @@
 # ESP Crash Decoder — VS Code Extension
 
-Decode ESP32 crash dumps directly from the serial port in VS Code.  
+Decode ESP32x/ESP8266 crash dumps directly from the serial port in VS Code.  
 Powered by [TraceBreaker (trbr)](https://github.com/dankeboy36/trbr).
 Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/items?itemName=pioarduino.pioarduino-ide) and
 [**Espressif IDF**](https://marketplace.visualstudio.com/items?itemName=espressif.esp-idf-extension).
