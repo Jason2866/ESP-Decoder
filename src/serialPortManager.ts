@@ -194,13 +194,7 @@ export class SerialPortManager extends vscode.Disposable {
       }
 
       this.port.close((err) => {
-        this.port = null;
         if (err) {
-          // close failed — the 'close' event may not fire, so ensure state is updated
-          if (this._isConnected) {
-            this._isConnected = false;
-            this._onConnectionChange.fire(false);
-          }
           reject(err);
         } else {
           // The 'close' event handler will set _isConnected and fire the event
