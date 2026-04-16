@@ -19,7 +19,6 @@
   ],
   "keywords": [
     "esp32",
-    "esp8266",
     "crash",
     "backtrace",
     "decode",
