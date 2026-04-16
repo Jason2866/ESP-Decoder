@@ -7,9 +7,10 @@
  *   firmware.elf        – the matching firmware ELF with debug symbols
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { fileURLToPath } from 'url';
 
 // ---------------------------------------------------------------------------
@@ -484,6 +485,84 @@ describe('decodeCrash – ESP8266 raw decode', () => {
     const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', '/nonexistent/gdb', 'xtensa');
 
     expect(decoded.faultInfo?.faultAddr).toBe('0x00000000');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ESP8266 fast-path: addr2line resolution with a stubbed binary
+// ---------------------------------------------------------------------------
+describe('decodeCrash – ESP8266 addr2line fast-path', () => {
+  // Create a temp directory with a fake GDB and addr2line binary pair
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-test-'));
+  const binDir = path.join(tmpDir, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+
+  const fakeGdbPath = path.join(binDir, 'xtensa-lx106-elf-gdb');
+  const fakeAddr2linePath = path.join(binDir, 'xtensa-lx106-elf-addr2line');
+
+  // The fake addr2line script outputs resolved function/file info for every address
+  const addr2lineScript = `#!/bin/sh
+for addr in "$@"; do
+  case "$addr" in
+    -* | /* ) continue ;;
+    0x*)
+      echo "$addr"
+      echo "app_main"
+      echo "/home/user/project/main.cpp:42"
+      ;;
+  esac
+done
+`;
+
+  fs.writeFileSync(fakeGdbPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  fs.writeFileSync(fakeAddr2linePath, addr2lineScript, { mode: 0o755 });
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeEsp8266CrashEvent(): CrashEvent {
+    const lines = ESP8266_CRASH_TEXT.split('\n').filter((l) => l.trim().length > 0);
+    return {
+      id: 'test-esp8266-fast-001',
+      kind: 'xtensa',
+      lines,
+      rawText: ESP8266_CRASH_TEXT,
+      timestamp: Date.now(),
+    };
+  }
+
+  it('resolves frames via addr2line fast-path (toolsMissing is false)', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', fakeGdbPath, 'xtensa');
+
+    expect(decoded.toolsMissing).toBeFalsy();
+    expect(decoded.stacktrace.length).toBeGreaterThan(0);
+
+    // All frames should have resolved function and file info from the stub
+    for (const frame of decoded.stacktrace) {
+      expect(frame.function).toBe('app_main');
+      expect(frame.file).toContain('main.cpp');
+    }
+  });
+
+  it('resolves known address 0x40201df1 to a non-empty function/file', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', fakeGdbPath, 'xtensa');
+
+    const frame = decoded.stacktrace.find((f) => f.address.toLowerCase() === '0x40201df1');
+    expect(frame).toBeDefined();
+    expect(frame!.function).toBeTruthy();
+    expect(frame!.file).toBeTruthy();
+  });
+
+  it('includes fault info from parseXtensaFaultInfo', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', fakeGdbPath, 'xtensa');
+
+    expect(decoded.faultInfo).toBeDefined();
+    expect(decoded.faultInfo?.faultCode).toBe(28);
+    expect(decoded.faultInfo?.faultMessage).toContain('LoadProhibited');
   });
 });
 

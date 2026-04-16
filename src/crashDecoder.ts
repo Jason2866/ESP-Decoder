@@ -1903,7 +1903,7 @@ function parseFaultInfo(text: string): DecodedCrash['faultInfo'] | undefined {
 
   // Extract excvaddr / EXCVADDR as fault address
   for (const line of lines) {
-    const excvMatch = line.match(/\bexcvaddr\s*=\s*(0x[0-9a-fA-F]+)/i);
+    const excvMatch = line.match(/\bexcvaddr\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
     if (excvMatch) {
       faultAddr = excvMatch[1];
       break;
