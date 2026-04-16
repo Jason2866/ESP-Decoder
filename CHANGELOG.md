@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.20.1] - 2026-04-16
+
+### Fixed
+- **Windows ARM64** — port could not be opened. Fixed by using a patched fork of `serialport/bindings-cpp` (`npm:@jason2866/serialport-bindings-cpp@^13.0.2`).
+
+## [0.20.0] - 2026-04-14
+
+### Added
+
+- **Serial monitor filter toolbar** — a new filter toolbar lets you transform, suppress, and annotate incoming serial output in real time. All filter settings are persisted via the **Save** button to VS Code settings (`esp-decoder.serialFilters.*`).
+  - **Timestamp filter** — prepends a dimmed `[HH:MM:SS.mmm]` timestamp to every line.
+  - **Suppress filter** — hides lines matching a user-defined regex.
+  - **Highlight filter** — wraps regex matches in ANSI inverse-video styling to make them visually stand out.
+  - **Dedup filter** — collapses repeated regex matches within a single line after a configurable threshold, showing a live `×N` counter badge instead.
+  - **Log2File** — writes incoming serial data to a timestamped log file on disk, with optional filtered mode that applies Suppress, Timestamp, and Dedup filters before writing. Automatically closes and reopens log files across pioarduino upload cycles.
+
 ## [0.12.0] - 2026-04-09
 
 ### Added
