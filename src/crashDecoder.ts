@@ -134,24 +134,38 @@ export interface ThreadDecodedCrash {
 }
 
 /**
- * Patterns that trbr's built-in framer recognizes as crash-block starters.
+ * Patterns that trbr's built-in framer recognizes as crash-block starters
+ * AND correctly finalizes (via flush guards or quiet period).
  * Used to determine whether trbr will detect a crash on its own.
  */
 const TRBR_START_PATTERNS = [
   /Guru Meditation Error:/i,
   /panic'ed/i,
-  /^Exception\s+\(\d+\):?/i,
 ];
 
 /**
- * Additional crash-start patterns that trbr's framer does NOT recognize.
- * These occur on ESP32-C6/C2/H2 (RISC-V) chips when an assert or abort
- * fires without a "Guru Meditation Error:" wrapper.
+ * Additional crash-start patterns handled by our fallback detector.
+ *
+ * These need fallback detection for two reasons:
+ *
+ * 1. Patterns trbr doesn't recognize at all:
+ *    - "assert failed:" / "abort() was called" / "Core N register dump:"
+ *      (RISC-V chips without "Guru Meditation Error:" wrapper)
+ *
+ * 2. ESP8266 "Exception (N):": trbr's framer DOES recognize this as a start
+ *    pattern, but has two bugs that prevent it from working:
+ *    - flush() only finalizes blocks containing Backtrace:/Stack memory:/
+ *      Rebooting.../ELF file SHA256: — ESP8266's >>>stack>>> is not matched
+ *    - detectKind() uses case-sensitive /EXCVADDR/ but ESP8266 outputs
+ *      lowercase "excvaddr=", so kind becomes "unknown" and
+ *      parseESP8266PanicOutput is never called
+ *    Until these are fixed upstream in trbr, the fallback handles ESP8266.
  */
 const FALLBACK_START_PATTERNS = [
   /^assert failed:/i,
   /^abort\(\) was called/i,
   /^Core\s+\d+\s+register dump:/i,
+  /^Exception\s+\(\d+\):?/i,
 ];
 
 /**
@@ -159,8 +173,8 @@ const FALLBACK_START_PATTERNS = [
  * Uses trbr's proven crash framing logic (handles Stack memory, register dumps,
  * Backtrace lines, and Rebooting... terminators correctly).
  *
- * Includes a fallback detector for crash formats that trbr's framer doesn't
- * recognize (e.g. "assert failed:" on RISC-V chips without "Guru Meditation Error:").
+ * Includes a fallback detector for crash formats where trbr's framer has
+ * limitations — see FALLBACK_START_PATTERNS for details.
  */
 export class TrbrCrashCapturer {
   private capturer: Capturer;
@@ -301,13 +315,14 @@ export class TrbrCrashCapturer {
   private fbLooksLikeCrash(): boolean {
     return this.fbLines.some(l =>
       /Core\s+\d+\s+register dump:/i.test(l) ||
-      /^Stack memory:/i.test(l)
+      /^Stack memory:/i.test(l) ||
+      /^>>>stack>>>/i.test(l)
     );
   }
 
   private fbDetectKind(): 'xtensa' | 'riscv' | 'unknown' {
     const riscvPatterns = [/MCAUSE/, /\bMEPC\b/, /MHARTID/];
-    const xtensaPatterns = [/Backtrace:/, /EXCCAUSE/, /EXCVADDR/];
+    const xtensaPatterns = [/Backtrace:/, /EXCCAUSE/i, /excvaddr/i, /\bepc1=/i];
     if (this.fbLines.some(l => riscvPatterns.some(p => p.test(l)))) { return 'riscv'; }
     if (this.fbLines.some(l => xtensaPatterns.some(p => p.test(l)))) { return 'xtensa'; }
     return 'unknown';
@@ -409,6 +424,40 @@ export async function decodeCrash(
           // Resolve backtrace frames and register annotations in parallel
           const [frames, regAnnotations] = await Promise.all([
             resolveAddressesViaAddr2line(btAddrs, elfPath, addr2linePath, log, romElfPath, addr2linePool),
+            hasRegs
+              ? resolveRegisterAddresses(regs, elfPath, addr2linePath, log, romElfPath)
+              : Promise.resolve(undefined),
+          ]);
+
+          if (frames.length > 0) {
+            return {
+              faultInfo,
+              stacktrace: frames,
+              regs: hasRegs ? regs : undefined,
+              regAnnotations,
+              rawOutput: '',
+            };
+          }
+        }
+      }
+    }
+
+    // === ESP8266 fast-path: resolve stack addresses via addr2line ===
+    // Same pattern as the Xtensa Backtrace fast-path above, but for ESP8266's
+    // >>>stack>>> hex dump format. trbr's decode() would go through GDB which
+    // is heavier; addr2line is faster and sufficient for stack address resolution.
+    // ESP8266 crashes use >>>stack>>> / <<<stack<<< format without Backtrace: lines
+    if (crashEvent.kind === 'xtensa' && />>>stack>>>/.test(crashEvent.rawText) && !/Backtrace:/i.test(crashEvent.rawText)) {
+      const addr2linePath = deriveAddr2linePath(toolPath!, log);
+      if (addr2linePath) {
+        const stackAddrs = extractEsp8266StackAddresses(crashEvent.rawText);
+        if (stackAddrs.length > 0) {
+          const faultInfo = parseXtensaFaultInfo(crashEvent.rawText);
+          const regs = parseRegisters(crashEvent.rawText);
+          const hasRegs = Object.keys(regs).length > 0;
+
+          const [frames, regAnnotations] = await Promise.all([
+            resolveAddressesViaAddr2line(stackAddrs, elfPath, addr2linePath, log, romElfPath, addr2linePool),
             hasRegs
               ? resolveRegisterAddresses(regs, elfPath, addr2linePath, log, romElfPath)
               : Promise.resolve(undefined),
@@ -866,7 +915,7 @@ function autoDetectPioToolPath(
     return undefined;
   }
 
-  // Xtensa — try common variants
+  // Xtensa — try common variants (ESP32/S2/S3 + ESP8266 lx106)
   const xtensaVariants = [
     { pkg: 'tool-xtensa-esp-elf-gdb',     bin: `xtensa-esp32-elf-gdb${ext}` },
     { pkg: 'tool-xtensa-esp-elf-gdb',     bin: `xtensa-esp32s3-elf-gdb${ext}` },
@@ -875,6 +924,7 @@ function autoDetectPioToolPath(
     { pkg: 'toolchain-xtensa-esp32s3-elf', bin: `xtensa-esp32s3-elf-gdb${ext}` },
     { pkg: 'toolchain-xtensa-esp32-elf',   bin: `xtensa-esp32-elf-gdb${ext}` },
     { pkg: 'toolchain-xtensa-esp32s2-elf', bin: `xtensa-esp32s2-elf-gdb${ext}` },
+    { pkg: 'toolchain-xtensa',            bin: `xtensa-lx106-elf-gdb${ext}` },
   ];
   for (const { pkg, bin } of xtensaVariants) {
     const c = path.join(pioPackagesDir, pkg, 'bin', bin);
@@ -1700,6 +1750,42 @@ async function resolveRegisterAddresses(
 }
 
 /**
+ * Extract candidate code addresses from ESP8266 >>>stack>>> / <<<stack<<< block.
+ * Returns all 32-bit values in ESP code space (0x40000000–0x4FFFFFFF).
+ */
+function extractEsp8266StackAddresses(text: string): string[] {
+  const addresses: string[] = [];
+  const lines = text.split('\n');
+  let inStack = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^>>>stack>>>/.test(trimmed)) {
+      inStack = true;
+      continue;
+    }
+    if (/^<<<stack<<</.test(trimmed)) {
+      break;
+    }
+    if (inStack) {
+      // Stack lines: "3ffffec0:  3ffee55c 3ffee55c 3ffee6dc 40201df1"
+      const match = trimmed.match(/^([0-9a-fA-F]{8}):\s+((?:[0-9a-fA-F]{8}\s*)+)/);
+      if (match) {
+        const words = match[2].trim().split(/\s+/);
+        for (const word of words) {
+          const val = parseInt(word, 16);
+          if (val >= 0x40000000 && val < 0x50000000) {
+            addresses.push(`0x${val.toString(16).padStart(8, '0')}`);
+          }
+        }
+      }
+    }
+  }
+
+  return addresses;
+}
+
+/**
  * Extract PC addresses from Xtensa-style backtrace lines.
  * Format: "Backtrace: 0xPC:0xSP 0xPC:0xSP ..."
  */
@@ -1734,8 +1820,16 @@ function parseXtensaFaultInfo(text: string): DecodedCrash['faultInfo'] | undefin
       coreId = parseInt(guruMatch[1], 10);
       faultMessage = guruMatch[2];
     }
+    // ESP8266 "Exception (N):" format
+    const exceptionMatch = line.match(/^Exception\s+\((\d+)\):?/i);
+    if (exceptionMatch && faultCode === undefined) {
+      faultCode = parseInt(exceptionMatch[1], 10);
+    }
     const pcMatch = line.match(/\bPC\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
     if (pcMatch && !programCounter) { programCounter = pcMatch[1]; }
+    // ESP8266 epc1= register format
+    const epc1Match = line.match(/\bepc1\s*=\s*(0x[0-9a-fA-F]+)/i);
+    if (epc1Match && !programCounter) { programCounter = epc1Match[1]; }
     const excvMatch = line.match(/\bEXCVADDR\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
     if (excvMatch) { faultAddr = excvMatch[1]; }
     const exccMatch = line.match(/\bEXCCAUSE\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
@@ -1773,8 +1867,10 @@ function parseFaultInfo(text: string): DecodedCrash['faultInfo'] | undefined {
     }
   }
 
-  // Detect "assert failed:" / "abort() was called" fault messages (RISC-V chips)
+  // Detect fault messages from various crash formats
   let faultMessage: string | undefined;
+  let faultCode: number | undefined;
+  let faultAddr: string | undefined;
   for (const line of lines) {
     const assertMatch = line.match(/^(assert failed:.+)/i);
     if (assertMatch) {
@@ -1784,6 +1880,24 @@ function parseFaultInfo(text: string): DecodedCrash['faultInfo'] | undefined {
     const abortMatch = line.match(/^(abort\(\) was called.+)/i);
     if (abortMatch) {
       faultMessage = abortMatch[1];
+      break;
+    }
+    // ESP8266 "Exception (N):" format
+    const exceptionMatch = line.match(/^Exception\s+\((\d+)\):?/i);
+    if (exceptionMatch) {
+      const exCode = parseInt(exceptionMatch[1], 10);
+      faultCode = exCode;
+      const desc = exCode >= 0 && exCode < XTENSA_EXCEPTIONS.length ? XTENSA_EXCEPTIONS[exCode] : null;
+      faultMessage = desc ? `Exception ${exCode}: ${desc}` : `Exception ${exCode}`;
+      break;
+    }
+  }
+
+  // Extract excvaddr / EXCVADDR as fault address
+  for (const line of lines) {
+    const excvMatch = line.match(/\bexcvaddr\s*=\s*(0x[0-9a-fA-F]+)/i);
+    if (excvMatch) {
+      faultAddr = excvMatch[1];
       break;
     }
   }
@@ -1801,16 +1915,16 @@ function parseFaultInfo(text: string): DecodedCrash['faultInfo'] | undefined {
   for (const line of lines) {
     const epcMatch = line.match(/EPC1?\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
     if (epcMatch) {
-      return { coreId, programCounter: epcMatch[1], faultMessage };
+      return { coreId, programCounter: epcMatch[1], faultCode, faultAddr, faultMessage };
     }
     const mepcMatch = line.match(/MEPC\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
     if (mepcMatch) {
-      return { coreId, programCounter: mepcMatch[1], faultMessage };
+      return { coreId, programCounter: mepcMatch[1], faultCode, faultAddr, faultMessage };
     }
   }
 
   if (faultMessage) {
-    return { coreId, faultMessage };
+    return { coreId, faultCode, faultAddr, faultMessage };
   }
 
   return undefined;
@@ -1822,7 +1936,7 @@ function parseFaultInfo(text: string): DecodedCrash['faultInfo'] | undefined {
 function parseRegisters(text: string): Record<string, number> {
   const regs: Record<string, number> = {};
   const regPattern =
-    /\b(EPC\d|EXCVADDR|EXCCAUSE|MTVAL|MEPC|MCAUSE|MSTATUS|MTVEC|MHARTID|SP|A\d+|RA|GP|TP|S\d+(?:\/FP)?|T\d+|PC)\s*[:=]\s*(0x[0-9a-fA-F]+)/gi;
+    /\b(EPC\d|EXCVADDR|EXCCAUSE|DEPC|MTVAL|MEPC|MCAUSE|MSTATUS|MTVEC|MHARTID|SP|A\d+|RA|GP|TP|S\d+(?:\/FP)?|T\d+|PC)\s*[:=]\s*(0x[0-9a-fA-F]+)/gi;
 
   let match;
   while ((match = regPattern.exec(text)) !== null) {
@@ -1853,14 +1967,27 @@ function createRawDecode(crashText: string): DecodedCrash {
     }
   }
 
-  // If no backtrace frames found, extract addresses from Stack memory dump (RISC-V)
+  // If no backtrace frames found, extract addresses from stack dumps
   if (frames.length === 0) {
     const lines = crashText.split('\n');
     let inStackMemory = false;
+    let inEsp8266Stack = false;
     for (const line of lines) {
       const trimmed = line.trim();
+      // RISC-V "Stack memory:" format (values prefixed with 0x)
       if (/^Stack memory:/i.test(trimmed)) {
         inStackMemory = true;
+        inEsp8266Stack = false;
+        continue;
+      }
+      // ESP8266 ">>>stack>>>" format (plain hex values)
+      if (/^>>>stack>>>/.test(trimmed)) {
+        inEsp8266Stack = true;
+        inStackMemory = false;
+        continue;
+      }
+      if (/^<<<stack<<</.test(trimmed)) {
+        inEsp8266Stack = false;
         continue;
       }
       if (inStackMemory) {
@@ -1869,13 +1996,26 @@ function createRawDecode(crashText: string): DecodedCrash {
           const addrs = hexMatch[1].trim().split(/\s+/);
           for (const addr of addrs) {
             const val = parseInt(addr, 16);
-            // Heuristic: addresses in code space (0x4000_0000+) are likely return addresses
-            if (val >= 0x40000000) {
+            if (val >= 0x40000000 && val < 0x50000000) {
               frames.push({ address: addr });
             }
           }
         } else {
           inStackMemory = false;
+        }
+      }
+      if (inEsp8266Stack) {
+        // ESP8266 stack lines: "3ffffec0:  3ffee55c 3ffee55c 3ffee6dc 40201df1"
+        // Skip header lines (ctx:, sp:, end:, offset:)
+        const hexMatch = trimmed.match(/^([0-9a-fA-F]{8}):\s+((?:[0-9a-fA-F]{8}\s*)+)/);
+        if (hexMatch) {
+          const words = hexMatch[2].trim().split(/\s+/);
+          for (const word of words) {
+            const val = parseInt(word, 16);
+            if (val >= 0x40000000 && val < 0x50000000) {
+              frames.push({ address: `0x${val.toString(16).padStart(8, '0')}` });
+            }
+          }
         }
       }
     }

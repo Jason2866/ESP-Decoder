@@ -109,7 +109,7 @@ function findGdbFromIdfTools(chipTarget: string | undefined): string | undefined
   const isXtensa = chipTarget ? XTENSA_CHIPS.has(chipTarget) : true;
 
   const preferredNames = isXtensa
-    ? ['xtensa-esp-elf-gdb', 'xtensa-esp32-elf-gdb', 'xtensa-esp32s2-elf-gdb', 'xtensa-esp32s3-elf-gdb']
+    ? ['xtensa-esp-elf-gdb', 'xtensa-esp32-elf-gdb', 'xtensa-esp32s2-elf-gdb', 'xtensa-esp32s3-elf-gdb', 'xtensa-lx106-elf-gdb']
     : ['riscv32-esp-elf-gdb'];
 
   const fromPath = findExecutableInPath(preferredNames);
