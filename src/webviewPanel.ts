@@ -1802,32 +1802,48 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         var code = codes[ci];
         // Extended foreground: 38;5;n or 38;2;r;g;b
         if (code === 38 && ci + 1 < codes.length) {
-          if (codes[ci + 1] === 5 && ci + 2 < codes.length) {
-            var idx = codes[ci + 2];
-            if (idx >= 0 && idx <= 255 && ANSI_256[idx]) {
-              ansiState.fg = null; ansiState.fgRgb = ANSI_256[idx];
-            }
-            ci += 2; continue;
+          if (codes[ci + 1] === 5) {
+            if (ci + 2 < codes.length) {
+              var idx = codes[ci + 2];
+              if (idx >= 0 && idx <= 255 && ANSI_256[idx]) {
+                ansiState.fg = null; ansiState.fgRgb = ANSI_256[idx];
+              }
+              ci += 2;
+            } else { ci += 1; }
+            continue;
           }
-          if (codes[ci + 1] === 2 && ci + 4 < codes.length) {
-            ansiState.fg = null;
-            ansiState.fgRgb = 'rgb(' + codes[ci+2] + ',' + codes[ci+3] + ',' + codes[ci+4] + ')';
-            ci += 4; continue;
+          if (codes[ci + 1] === 2) {
+            if (ci + 4 < codes.length) {
+              ansiState.fg = null;
+              ansiState.fgRgb = 'rgb(' + codes[ci+2] + ',' + codes[ci+3] + ',' + codes[ci+4] + ')';
+              ci += 4;
+            } else {
+              ci = codes.length - 1;
+            }
+            continue;
           }
         }
         // Extended background: 48;5;n or 48;2;r;g;b
         if (code === 48 && ci + 1 < codes.length) {
-          if (codes[ci + 1] === 5 && ci + 2 < codes.length) {
-            var idx = codes[ci + 2];
-            if (idx >= 0 && idx <= 255 && ANSI_256[idx]) {
-              ansiState.bg = null; ansiState.bgRgb = ANSI_256[idx];
-            }
-            ci += 2; continue;
+          if (codes[ci + 1] === 5) {
+            if (ci + 2 < codes.length) {
+              var idx = codes[ci + 2];
+              if (idx >= 0 && idx <= 255 && ANSI_256[idx]) {
+                ansiState.bg = null; ansiState.bgRgb = ANSI_256[idx];
+              }
+              ci += 2;
+            } else { ci += 1; }
+            continue;
           }
-          if (codes[ci + 1] === 2 && ci + 4 < codes.length) {
-            ansiState.bg = null;
-            ansiState.bgRgb = 'rgb(' + codes[ci+2] + ',' + codes[ci+3] + ',' + codes[ci+4] + ')';
-            ci += 4; continue;
+          if (codes[ci + 1] === 2) {
+            if (ci + 4 < codes.length) {
+              ansiState.bg = null;
+              ansiState.bgRgb = 'rgb(' + codes[ci+2] + ',' + codes[ci+3] + ',' + codes[ci+4] + ')';
+              ci += 4;
+            } else {
+              ci = codes.length - 1;
+            }
+            continue;
           }
         }
         switch (code) {
@@ -1904,11 +1920,19 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       if (ansiState.blink)         s.classList.add('ansi-blink');
       if (ansiState.fastBlink)     s.classList.add('ansi-blink-fast');
       if (ansiState.hidden)        s.classList.add('ansi-hidden');
-      if (ansiState.reverse)       s.classList.add('ansi-reverse');
-      if (ansiState.fgRgb)         s.style.color = ansiState.fgRgb;
-      else if (ansiState.fg)       s.classList.add('ansi-fg-' + ansiState.fg);
-      if (ansiState.bgRgb)         s.style.backgroundColor = ansiState.bgRgb;
-      else if (ansiState.bg)       s.classList.add('ansi-bg-' + ansiState.bg);
+      var localFgRgb = ansiState.fgRgb, localBgRgb = ansiState.bgRgb;
+      var localFg = ansiState.fg, localBg = ansiState.bg;
+      if (ansiState.reverse) {
+        localFgRgb = ansiState.bgRgb; localBgRgb = ansiState.fgRgb;
+        localFg = ansiState.bg; localBg = ansiState.fg;
+        if (!localFgRgb && !localFg && !localBgRgb && !localBg) {
+          s.classList.add('ansi-reverse');
+        }
+      }
+      if (localFgRgb)         s.style.color = localFgRgb;
+      else if (localFg)       s.classList.add('ansi-fg-' + localFg);
+      if (localBgRgb)         s.style.backgroundColor = localBgRgb;
+      else if (localBg)       s.classList.add('ansi-bg-' + localBg);
       s.appendChild(document.createTextNode(text));
       return s;
     }
