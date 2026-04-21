@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.0] - 2026-04-21
+
+### Added
+- **Enhanced ANSI color output rendering:** — The viewer now supports extended color formats including 256-color palette selections and full true RGB color sequences.
+
+### Fixed
+- **ANSI color4** — Wrong blink for ANSI escape code `\033[38;5;xxxm`
+
 ## [0.21.2] - 2026-04-18
 
 ### Fixed

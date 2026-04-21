@@ -1815,7 +1815,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           if (codes[ci + 1] === 2) {
             if (ci + 4 < codes.length) {
               ansiState.fg = null;
-              ansiState.fgRgb = 'rgb(' + codes[ci+2] + ',' + codes[ci+3] + ',' + codes[ci+4] + ')';
+              var r = Math.max(0, Math.min(255, codes[ci+2]));
+              var g = Math.max(0, Math.min(255, codes[ci+3]));
+              var b = Math.max(0, Math.min(255, codes[ci+4]));
+              ansiState.fgRgb = 'rgb(' + r + ',' + g + ',' + b + ')';
               ci += 4;
             } else {
               ci = codes.length - 1;
@@ -1838,7 +1841,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           if (codes[ci + 1] === 2) {
             if (ci + 4 < codes.length) {
               ansiState.bg = null;
-              ansiState.bgRgb = 'rgb(' + codes[ci+2] + ',' + codes[ci+3] + ',' + codes[ci+4] + ')';
+              var r = Math.max(0, Math.min(255, codes[ci+2]));
+              var g = Math.max(0, Math.min(255, codes[ci+3]));
+              var b = Math.max(0, Math.min(255, codes[ci+4]));
+              ansiState.bgRgb = 'rgb(' + r + ',' + g + ',' + b + ')';
               ci += 4;
             } else {
               ci = codes.length - 1;
