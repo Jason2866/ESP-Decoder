@@ -1750,6 +1750,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       bold: false, italic: false, underline: false, strikethrough: false,
       blink: false, fastBlink: false, hidden: false, dim: false, reverse: false,
       fg: null, bg: null,
+      fgRgb: null, bgRgb: null,
     };
     // Holds a trailing incomplete CSI sequence from the previous data chunk
     let ansiTail = '';
@@ -1761,50 +1762,129 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     var CRLF = CR + LF;
     const LINE_SPLIT_RE = new RegExp('(' + CRLF + '|' + CR + '|' + LF + ')');
 
+    // Standard 256-color palette (indices 0-255)
+    var ANSI_256 = (function () {
+      var t = [];
+      // 0-7: standard colors
+      t[0]='rgb(0,0,0)';      t[1]='rgb(128,0,0)';    t[2]='rgb(0,128,0)';
+      t[3]='rgb(128,128,0)';  t[4]='rgb(0,0,128)';    t[5]='rgb(128,0,128)';
+      t[6]='rgb(0,128,128)';  t[7]='rgb(192,192,192)';
+      // 8-15: bright colors
+      t[8]='rgb(128,128,128)'; t[9]='rgb(255,0,0)';   t[10]='rgb(0,255,0)';
+      t[11]='rgb(255,255,0)';  t[12]='rgb(99,153,255)'; t[13]='rgb(255,0,255)';
+      t[14]='rgb(0,255,255)';  t[15]='rgb(255,255,255)';
+      // 16-231: 6x6x6 color cube
+      for (var i = 0; i < 216; i++) {
+        var r = Math.floor(i / 36), g = Math.floor((i % 36) / 6), b = i % 6;
+        t[16 + i] = 'rgb(' + (r ? r * 40 + 55 : 0) + ',' +
+                              (g ? g * 40 + 55 : 0) + ',' +
+                              (b ? b * 40 + 55 : 0) + ')';
+      }
+      // 232-255: grayscale ramp
+      for (var i = 0; i < 24; i++) {
+        var v = i * 10 + 8;
+        t[232 + i] = 'rgb(' + v + ',' + v + ',' + v + ')';
+      }
+      return t;
+    })();
+
     function resetAnsiState() {
       ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
       ansiState.strikethrough=false; ansiState.blink=false; ansiState.fastBlink=false;
       ansiState.hidden=false; ansiState.dim=false; ansiState.reverse=false;
       ansiState.fg=null; ansiState.bg=null;
+      ansiState.fgRgb=null; ansiState.bgRgb=null;
     }
 
-    function ansiApplyCode(code) {
-      switch (code) {
-        case  0: resetAnsiState(); break;
-        case  1: ansiState.bold=true; break;
-        case  2: ansiState.dim=true; break;
-        case  3: ansiState.italic=true; break;
-        case  4: ansiState.underline=true; break;
-        case  5: ansiState.blink=true; ansiState.fastBlink=false; break;
-        case  6: ansiState.fastBlink=true; ansiState.blink=false; break;
-        case  7: ansiState.reverse=true; break;
-        case  8: ansiState.hidden=true; break;
-        case  9: ansiState.strikethrough=true; break;
-        case 22: ansiState.bold=false; ansiState.dim=false; break;
-        case 23: ansiState.italic=false; break;
-        case 24: ansiState.underline=false; break;
-        case 25: ansiState.blink=false; ansiState.fastBlink=false; break;
-        case 27: ansiState.reverse=false; break;
-        case 28: ansiState.hidden=false; break;
-        case 29: ansiState.strikethrough=false; break;
-        case 30: ansiState.fg='black';   break;
-        case 31: ansiState.fg='red';     break;
-        case 32: ansiState.fg='green';   break;
-        case 33: ansiState.fg='yellow';  break;
-        case 34: ansiState.fg='blue';    break;
-        case 35: ansiState.fg='magenta'; break;
-        case 36: ansiState.fg='cyan';    break;
-        case 37: ansiState.fg='white';   break;
-        case 39: ansiState.fg=null; break;
-        case 40: ansiState.bg='black';   break;
-        case 41: ansiState.bg='red';     break;
-        case 42: ansiState.bg='green';   break;
-        case 43: ansiState.bg='yellow';  break;
-        case 44: ansiState.bg='blue';    break;
-        case 45: ansiState.bg='magenta'; break;
-        case 46: ansiState.bg='cyan';    break;
-        case 47: ansiState.bg='white';   break;
-        case 49: ansiState.bg=null; break;
+    // Process an array of SGR codes, handling extended color sequences (38;5;n, 38;2;r;g;b, etc.)
+    function ansiApplyCodes(codes) {
+      for (var ci = 0; ci < codes.length; ci++) {
+        var code = codes[ci];
+        // Extended foreground: 38;5;n or 38;2;r;g;b
+        if (code === 38 && ci + 1 < codes.length) {
+          if (codes[ci + 1] === 5 && ci + 2 < codes.length) {
+            var idx = codes[ci + 2];
+            if (idx >= 0 && idx <= 255 && ANSI_256[idx]) {
+              ansiState.fg = null; ansiState.fgRgb = ANSI_256[idx];
+            }
+            ci += 2; continue;
+          }
+          if (codes[ci + 1] === 2 && ci + 4 < codes.length) {
+            ansiState.fg = null;
+            ansiState.fgRgb = 'rgb(' + codes[ci+2] + ',' + codes[ci+3] + ',' + codes[ci+4] + ')';
+            ci += 4; continue;
+          }
+        }
+        // Extended background: 48;5;n or 48;2;r;g;b
+        if (code === 48 && ci + 1 < codes.length) {
+          if (codes[ci + 1] === 5 && ci + 2 < codes.length) {
+            var idx = codes[ci + 2];
+            if (idx >= 0 && idx <= 255 && ANSI_256[idx]) {
+              ansiState.bg = null; ansiState.bgRgb = ANSI_256[idx];
+            }
+            ci += 2; continue;
+          }
+          if (codes[ci + 1] === 2 && ci + 4 < codes.length) {
+            ansiState.bg = null;
+            ansiState.bgRgb = 'rgb(' + codes[ci+2] + ',' + codes[ci+3] + ',' + codes[ci+4] + ')';
+            ci += 4; continue;
+          }
+        }
+        switch (code) {
+          case  0: resetAnsiState(); break;
+          case  1: ansiState.bold=true; break;
+          case  2: ansiState.dim=true; break;
+          case  3: ansiState.italic=true; break;
+          case  4: ansiState.underline=true; break;
+          case  5: ansiState.blink=true; ansiState.fastBlink=false; break;
+          case  6: ansiState.fastBlink=true; ansiState.blink=false; break;
+          case  7: ansiState.reverse=true; break;
+          case  8: ansiState.hidden=true; break;
+          case  9: ansiState.strikethrough=true; break;
+          case 22: ansiState.bold=false; ansiState.dim=false; break;
+          case 23: ansiState.italic=false; break;
+          case 24: ansiState.underline=false; break;
+          case 25: ansiState.blink=false; ansiState.fastBlink=false; break;
+          case 27: ansiState.reverse=false; break;
+          case 28: ansiState.hidden=false; break;
+          case 29: ansiState.strikethrough=false; break;
+          case 30: ansiState.fg='black';   ansiState.fgRgb=null; break;
+          case 31: ansiState.fg='red';     ansiState.fgRgb=null; break;
+          case 32: ansiState.fg='green';   ansiState.fgRgb=null; break;
+          case 33: ansiState.fg='yellow';  ansiState.fgRgb=null; break;
+          case 34: ansiState.fg='blue';    ansiState.fgRgb=null; break;
+          case 35: ansiState.fg='magenta'; ansiState.fgRgb=null; break;
+          case 36: ansiState.fg='cyan';    ansiState.fgRgb=null; break;
+          case 37: ansiState.fg='white';   ansiState.fgRgb=null; break;
+          case 39: ansiState.fg=null; ansiState.fgRgb=null; break;
+          case 40: ansiState.bg='black';   ansiState.bgRgb=null; break;
+          case 41: ansiState.bg='red';     ansiState.bgRgb=null; break;
+          case 42: ansiState.bg='green';   ansiState.bgRgb=null; break;
+          case 43: ansiState.bg='yellow';  ansiState.bgRgb=null; break;
+          case 44: ansiState.bg='blue';    ansiState.bgRgb=null; break;
+          case 45: ansiState.bg='magenta'; ansiState.bgRgb=null; break;
+          case 46: ansiState.bg='cyan';    ansiState.bgRgb=null; break;
+          case 47: ansiState.bg='white';   ansiState.bgRgb=null; break;
+          case 49: ansiState.bg=null; ansiState.bgRgb=null; break;
+          // Bright foreground colors (90-97)
+          case 90: ansiState.fg=null; ansiState.fgRgb=ANSI_256[8];  break;
+          case 91: ansiState.fg=null; ansiState.fgRgb=ANSI_256[9];  break;
+          case 92: ansiState.fg=null; ansiState.fgRgb=ANSI_256[10]; break;
+          case 93: ansiState.fg=null; ansiState.fgRgb=ANSI_256[11]; break;
+          case 94: ansiState.fg=null; ansiState.fgRgb=ANSI_256[12]; break;
+          case 95: ansiState.fg=null; ansiState.fgRgb=ANSI_256[13]; break;
+          case 96: ansiState.fg=null; ansiState.fgRgb=ANSI_256[14]; break;
+          case 97: ansiState.fg=null; ansiState.fgRgb=ANSI_256[15]; break;
+          // Bright background colors (100-107)
+          case 100: ansiState.bg=null; ansiState.bgRgb=ANSI_256[8];  break;
+          case 101: ansiState.bg=null; ansiState.bgRgb=ANSI_256[9];  break;
+          case 102: ansiState.bg=null; ansiState.bgRgb=ANSI_256[10]; break;
+          case 103: ansiState.bg=null; ansiState.bgRgb=ANSI_256[11]; break;
+          case 104: ansiState.bg=null; ansiState.bgRgb=ANSI_256[12]; break;
+          case 105: ansiState.bg=null; ansiState.bgRgb=ANSI_256[13]; break;
+          case 106: ansiState.bg=null; ansiState.bgRgb=ANSI_256[14]; break;
+          case 107: ansiState.bg=null; ansiState.bgRgb=ANSI_256[15]; break;
+        }
       }
     }
 
@@ -1813,7 +1893,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       const needsSpan = ansiState.bold || ansiState.italic || ansiState.underline ||
                         ansiState.strikethrough || ansiState.blink || ansiState.fastBlink ||
                         ansiState.hidden || ansiState.dim || ansiState.reverse ||
-                        ansiState.fg || ansiState.bg;
+                        ansiState.fg || ansiState.bg || ansiState.fgRgb || ansiState.bgRgb;
       if (!needsSpan) return document.createTextNode(text);
       const s = document.createElement('span');
       if (ansiState.bold)          s.classList.add('ansi-bold');
@@ -1825,8 +1905,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       if (ansiState.fastBlink)     s.classList.add('ansi-blink-fast');
       if (ansiState.hidden)        s.classList.add('ansi-hidden');
       if (ansiState.reverse)       s.classList.add('ansi-reverse');
-      if (ansiState.fg)            s.classList.add('ansi-fg-' + ansiState.fg);
-      if (ansiState.bg)            s.classList.add('ansi-bg-' + ansiState.bg);
+      if (ansiState.fgRgb)         s.style.color = ansiState.fgRgb;
+      else if (ansiState.fg)       s.classList.add('ansi-fg-' + ansiState.fg);
+      if (ansiState.bgRgb)         s.style.backgroundColor = ansiState.bgRgb;
+      else if (ansiState.bg)       s.classList.add('ansi-bg-' + ansiState.bg);
       s.appendChild(document.createTextNode(text));
       return s;
     }
@@ -2200,10 +2282,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         if (node) { fragment.appendChild(node); }
         i = match.index + match[0].length;
         if (match[2] === 'm') {
-          var codes = match[1] === '' ? ['0'] : match[1].split(';');
-          for (var ci = 0; ci < codes.length; ci++) {
-            ansiApplyCode(parseInt(codes[ci], 10) || 0);
-          }
+          var codes = match[1] === '' ? [0] : match[1].split(';').map(function(c) { return parseInt(c, 10) || 0; });
+          ansiApplyCodes(codes);
         }
       }
       var tail = ansiMakeNode(text.substring(i));
