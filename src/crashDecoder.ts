@@ -8,7 +8,7 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 
-// Import trbr as a library dependency
+// Vendored trbr implementation (lives in ./vendor/trbr).
 import {
   decode,
   stringifyDecodeResult,
@@ -16,13 +16,13 @@ import {
   isParsedGDBLine,
   isGDBLine,
   createCapturer,
-} from 'trbr';
+} from './vendor/trbr';
 import type {
   Capturer,
   CapturerEvent,
   DecodeOptions,
   DecodeParams,
-} from 'trbr';
+} from './vendor/trbr';
 import { getPioPackagesDir } from './pioIntegration';
 import { Addr2linePool } from './addr2lineResolver';
 

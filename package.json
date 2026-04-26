@@ -204,8 +204,7 @@
     "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.5"
   },
   "dependencies": {
-    "serialport": "^13.0.0",
-    "trbr": "^0.3.1"
+    "serialport": "^13.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -19,7 +19,6 @@ async function main() {
       'vscode',
       'serialport',
       '@serialport/bindings-cpp',
-      'trbr',
     ],
     logLevel: 'info',
     plugins: [],
