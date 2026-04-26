@@ -1610,9 +1610,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       <input type="text" id="serial-input" placeholder="Type command and press Enter..."
         autocomplete="off" spellcheck="false" />
       <select id="line-ending" title="Line ending appended when sending">
-        <option value="crlf">CRLF (\r\n)</option>
-        <option value="lf">LF (\n)</option>
-        <option value="cr">CR (\r)</option>
+        <option value="crlf">CRLF (\\r\\n)</option>
+        <option value="lf">LF (\\n)</option>
+        <option value="cr">CR (\\r)</option>
         <option value="none">None</option>
       </select>
       <button id="btn-send">Send</button>
@@ -2211,7 +2211,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
     // Line-ending selector: remember choice across reloads
     const lineEndingSelect = document.getElementById('line-ending');
-    const LINE_ENDINGS = { crlf: '\r\n', lf: '\n', cr: '\r', none: '' };
+    const LINE_ENDINGS = { crlf: '\\r\\n', lf: '\\n', cr: '\\r', none: '' };
     try {
       const saved = localStorage.getItem('esp-decoder.lineEnding');
       if (saved && Object.prototype.hasOwnProperty.call(LINE_ENDINGS, saved)) {
@@ -2233,7 +2233,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
             commandHistory.shift();
           }
         }
-        const ending = LINE_ENDINGS[lineEndingSelect.value] ?? '\r\n';
+        const ending = LINE_ENDINGS[lineEndingSelect.value] ?? '\\r\\n';
         vscode.postMessage({ type: 'sendData', data: val + ending });
         serialInput.value = '';
         historyIndex = -1;
