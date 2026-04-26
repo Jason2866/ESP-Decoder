@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.22.1] - 2026-04-26
+
+### Fixed
+- **Serial Monitor — blank lines** — Empty lines in device output (e.g. consecutive `\n\n`) are now rendered as visible blank rows instead of collapsing to zero height (#35).
+- **Serial Monitor — ANSI color with Timestamp** — When the `Timestamp` filter is enabled, multi-line coloured output (e.g. an `ESP_LOGI` message containing embedded newlines) now keeps its colour on every line. Previously the timestamp's `\x1b[0m` reset wiped the active SGR state, causing all but the first line to render uncoloured (#35).
+
 ## [0.22.0] - 2026-04-21
 
 ### Added

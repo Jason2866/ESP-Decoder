@@ -1135,6 +1135,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       word-break: break-all;
       background: var(--bg);
     }
+    /* Each serial line is rendered as a <div>; ensure empty lines (e.g. blank
+       lines from "\n\n" in device output) still occupy one row of height
+       instead of collapsing to zero. */
+    #serial-output > div {
+      min-height: 1.4em;
+    }
 
     .serial-input-row {
       display: flex;
@@ -1689,7 +1695,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       if (filterState.timestamp && !filterState._lineStarted) {
         var now = new Date();
         var ts = now.toISOString().slice(11, 23);
-        out = ESC + '[2m[' + ts + ']' + ESC + '[0m ' + out;
+        // Save the current SGR state, render the timestamp dim, then restore
+        // the previous SGR state so multi-line coloured output (e.g. an
+        // ESP_LOGI message containing embedded newlines) keeps its colour
+        // on every line instead of being reset by the timestamp's [0m.
+        var restore = ansiStateToSgr();
+        out = ESC + '[0m' + ESC + '[2m[' + ts + ']' + ESC + '[0m' + restore + ' ' + out;
         filterState._lineStarted = true;
       } else if (out !== '') {
         filterState._lineStarted = true;
@@ -1794,6 +1805,38 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       ansiState.hidden=false; ansiState.dim=false; ansiState.reverse=false;
       ansiState.fg=null; ansiState.bg=null;
       ansiState.fgRgb=null; ansiState.bgRgb=null;
+    }
+
+    // Serialize the current ansiState back into an SGR escape sequence so
+    // we can restore it after temporarily injecting our own SGR codes
+    // (e.g. a dim timestamp prefix at the start of each line).
+    function ansiStateToSgr() {
+      var codes = [];
+      if (ansiState.bold)          { codes.push(1); }
+      if (ansiState.dim)           { codes.push(2); }
+      if (ansiState.italic)        { codes.push(3); }
+      if (ansiState.underline)     { codes.push(4); }
+      if (ansiState.blink)         { codes.push(5); }
+      if (ansiState.fastBlink)     { codes.push(6); }
+      if (ansiState.reverse)       { codes.push(7); }
+      if (ansiState.hidden)        { codes.push(8); }
+      if (ansiState.strikethrough) { codes.push(9); }
+      var fgMap = { black:30, red:31, green:32, yellow:33, blue:34, magenta:35, cyan:36, white:37 };
+      var bgMap = { black:40, red:41, green:42, yellow:43, blue:44, magenta:45, cyan:46, white:47 };
+      if (ansiState.fgRgb) {
+        var mfg = /rgb\((\d+),(\d+),(\d+)\)/.exec(ansiState.fgRgb);
+        if (mfg) { codes.push(38, 2, +mfg[1], +mfg[2], +mfg[3]); }
+      } else if (ansiState.fg && fgMap[ansiState.fg] !== undefined) {
+        codes.push(fgMap[ansiState.fg]);
+      }
+      if (ansiState.bgRgb) {
+        var mbg = /rgb\((\d+),(\d+),(\d+)\)/.exec(ansiState.bgRgb);
+        if (mbg) { codes.push(48, 2, +mbg[1], +mbg[2], +mbg[3]); }
+      } else if (ansiState.bg && bgMap[ansiState.bg] !== undefined) {
+        codes.push(bgMap[ansiState.bg]);
+      }
+      if (codes.length === 0) { return ''; }
+      return ESC + '[' + codes.join(';') + 'm';
     }
 
     // Process an array of SGR codes, handling extended color sequences (38;5;n, 38;2;r;g;b, etc.)
