@@ -433,7 +433,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       case 'sendData':
         if (message.data) {
           try {
-            await this.serialManager.sendData(message.data + '\r\n');
+            // Webview appends the user-selected line ending; send as-is.
+            await this.serialManager.sendData(message.data);
           } catch (err) {
             vscode.window.showErrorMessage(
               `Failed to send: ${err instanceof Error ? err.message : err}`
@@ -1162,6 +1163,17 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       outline: none;
     }
 
+    .serial-input-row select {
+      background: var(--input-bg);
+      color: var(--input-fg);
+      border: 1px solid var(--input-border);
+      padding: 2px 4px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 11px;
+      outline: none;
+      cursor: pointer;
+    }
+
     /* Filter toolbar */
     .filter-toolbar {
       display: flex;
@@ -1597,6 +1609,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     <div class="serial-input-row">
       <input type="text" id="serial-input" placeholder="Type command and press Enter..."
         autocomplete="off" spellcheck="false" />
+      <select id="line-ending" title="Line ending appended when sending">
+        <option value="crlf">CRLF (\r\n)</option>
+        <option value="lf">LF (\n)</option>
+        <option value="cr">CR (\r)</option>
+        <option value="none">None</option>
+      </select>
       <button id="btn-send">Send</button>
     </div>
   </div>
@@ -2191,6 +2209,19 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       }
     });
 
+    // Line-ending selector: remember choice across reloads
+    const lineEndingSelect = document.getElementById('line-ending');
+    const LINE_ENDINGS = { crlf: '\r\n', lf: '\n', cr: '\r', none: '' };
+    try {
+      const saved = localStorage.getItem('esp-decoder.lineEnding');
+      if (saved && Object.prototype.hasOwnProperty.call(LINE_ENDINGS, saved)) {
+        lineEndingSelect.value = saved;
+      }
+    } catch (_) { /* localStorage may be unavailable */ }
+    lineEndingSelect.addEventListener('change', () => {
+      try { localStorage.setItem('esp-decoder.lineEnding', lineEndingSelect.value); } catch (_) {}
+    });
+
     function sendInput() {
       const val = serialInput.value;
       if (val) {
@@ -2202,7 +2233,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
             commandHistory.shift();
           }
         }
-        vscode.postMessage({ type: 'sendData', data: val });
+        const ending = LINE_ENDINGS[lineEndingSelect.value] ?? '\r\n';
+        vscode.postMessage({ type: 'sendData', data: val + ending });
         serialInput.value = '';
         historyIndex = -1;
         currentInput = '';
