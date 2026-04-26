@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.22.2] - 2026-04-26
+
+### Added
+- **Serial Monitor — selectable line ending** — New dropdown next to the Send button lets you choose the line terminator appended to outgoing commands: `CRLF (\r\n)` (default, unchanged behavior), `LF (\n)`, `CR (\r)` or `None`. The choice is remembered across panel reloads and VS Code restarts via webview `localStorage` (#34).
+
 ## [0.22.1] - 2026-04-26
 
 ### Fixed
