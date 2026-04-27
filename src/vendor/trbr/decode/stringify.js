@@ -8,14 +8,13 @@ import { isParsedGDBLine } from './decode.js'
 /** @typedef {import('./coredump.js').ThreadDecodeResult} ThreadDecodeResult */
 
 const defaultOptions = {
-  forceColor: false,
   lineSeparator: '\r\n',
 }
 
 /**
  * @typedef {Object} StringifyOptions
  * @property {'force' | 'disable'} [color]
- * @property {string} [lineSeparator='\n'] Default is `'\n'`
+ * @property {string} [lineSeparator='\r\n'] Default is `'\r\n'`
  */
 
 /**
@@ -200,9 +199,8 @@ function stringifyThreadsInfo(result, colorizeFn) {
     const tid = thread.threadId.toString().padStart(2)
     const tcb = thread.TCB.toString().padEnd(12)
     const top = thread.result.stacktraceLines?.[0]
-    lines.push(
-      ` ${mark}${tid}  process ${tcb} ${stringifyAddrLocation(top, colorizeFn)}`
-    )
+    const topText = top ? stringifyAddrLocation(top, colorizeFn) : ''
+    lines.push(` ${mark}${tid}  process ${tcb} ${topText}`)
   }
   return lines
 }

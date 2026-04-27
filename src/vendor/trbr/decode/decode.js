@@ -3,6 +3,7 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
 import { AbortError } from '../abort.js'
@@ -140,7 +141,7 @@ export function isDecodeInputStreamSource(arg) {
     arg !== null &&
     typeof arg === 'object' &&
     'inputStream' in arg &&
-    arg.inputStream instanceof require('stream').Readable
+    arg.inputStream instanceof Readable
   )
 }
 
@@ -293,31 +294,12 @@ export async function decode(
           }
         })
         const fd = await fs.open(coredumpInput, 'w')
-        /** @type {import('node:fs').WriteStream | undefined} */
-        let target
-        try {
-          target = fd.createWriteStream()
-          await pipeline(decodeInput.inputStream, target)
-        } finally {
-          Promise.allSettled([
-            fd.close(),
-            new Promise((resolve, reject) =>
-              target?.close((err) => {
-                if (err) {
-                  reject(err)
-                } else {
-                  resolve(undefined)
-                }
-              })
-            ),
-          ]).then((cleanupTasks) =>
-            cleanupTasks.forEach((task) => {
-              if (task.status === 'rejected') {
-                console.error('Failed to close stream:', task.reason)
-              }
-            })
-          )
-        }
+        // The WriteStream takes ownership of the FileHandle and closes it
+        // when the pipeline finishes (success or error). Do not close `fd`
+        // manually — that would race with the stream and double-close the
+        // underlying descriptor.
+        const target = fd.createWriteStream()
+        await pipeline(decodeInput.inputStream, target)
       }
       if (!coredumpInput) {
         throw new Error(
@@ -354,7 +336,7 @@ export async function decode(
     } else if (isDecodeInputStreamSource(decodeInput)) {
       input = ''
       for await (const chunk of decodeInput.inputStream) {
-        input = chunk.toString()
+        input += chunk.toString()
       }
     } else {
       input = decodeInput

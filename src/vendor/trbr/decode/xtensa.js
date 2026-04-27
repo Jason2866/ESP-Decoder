@@ -87,7 +87,8 @@ export async function decodeXtensa(params, input, options) {
     frames: addrLines.length,
   })
   let faultMessage
-  if (panicInfo.faultCode) {
+  if (typeof panicInfo.faultCode === 'number') {
+    // Use explicit type check so fault code 0 ("Illegal instruction") is preserved.
     faultMessage = exceptions[panicInfo.faultCode]
   }
 

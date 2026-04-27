@@ -147,11 +147,6 @@ function parseBacktrace(raw) {
 }
 
 /**
- * @param {string} str
- * @param {string} key
- * @returns {string | undefined}
- */
-/**
  * @param {DecodeCoredumpParams} params
  * @param {DecodeInputFileSource} input
  * @param {boolean} [tryRepair]
@@ -301,7 +296,7 @@ export async function decodeCoredump(
 
       const btParsed = parseBacktrace(btOut)
       const stacktraceLines = btParsed.map((frame, index) => {
-        const args = frameArgs[index]?.args || ''
+        const args = frameArgs[index]?.args || []
         return {
           regAddr: frame.addr,
           lineNumber: frame.line ?? '??',
@@ -317,7 +312,7 @@ export async function decodeCoredump(
         TCB: threadTcbs[tid],
         result: {
           faultInfo: {
-            coreId: parseInt(tid),
+            coreId: parseInt(tid, 10),
             programCounter: {
               addr: programCounter,
               location: stacktraceLines[0] ?? {
@@ -340,7 +335,7 @@ export async function decodeCoredump(
 
   if (!results.length && tryRepair) {
     const raw = await fs.readFile(input.inputPath)
-    const fallback = await tryRawElfFallback(params, raw)
+    const fallback = await tryRawElfFallback(params, raw, options)
     if (fallback) {
       return fallback
     }

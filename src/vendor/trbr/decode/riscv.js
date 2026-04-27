@@ -183,7 +183,11 @@ function parse({ input, target }) {
       for (const match of regMatches) {
         const regName = match[1]
         const regAddr = parseInt(match[2], 16)
-        if (regAddr && regNameValidator(regName)) {
+        if (Number.isNaN(regAddr)) {
+          continue
+        }
+        if (regNameValidator(regName)) {
+          // Record the register even when its value is 0 (e.g. X0 is always 0).
           currentRegDump.regs[regName] = regAddr
           if (regName === 'MEPC') {
             programCounter = regAddr // PC equivalent
@@ -1319,7 +1323,7 @@ export async function decodeRiscv(params, input, options) {
   })
 
   const includeFrameVars = shouldIncludeFrameVars(options)
-  const [stacktraceLines, [programCounter, faultAdd], globals] =
+  const [stacktraceLines, [programCounter, faultAddr], globals] =
     await Promise.all([
       processPanicOutput(params, panicInfo, options, log),
       addr2line(
@@ -1334,7 +1338,7 @@ export async function decodeRiscv(params, input, options) {
   if (!includeFrameVars) {
     log('skip globals/locals (includeFrameVars=false)')
   }
-  log('addr2line done', { programCounter, faultAdd })
+  log('addr2line done', { programCounter, faultAddr })
   log('globals count', globals.length)
   stacktraceLines.forEach((line, index) => {
     log('stacktrace line', index, line)
@@ -1343,7 +1347,7 @@ export async function decodeRiscv(params, input, options) {
   return createDecodeResult(
     panicInfo,
     programCounter,
-    faultAdd,
+    faultAddr,
     stacktraceLines,
     globals
   )

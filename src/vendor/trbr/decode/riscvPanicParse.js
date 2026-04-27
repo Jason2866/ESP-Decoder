@@ -129,7 +129,11 @@ function parse({ input, target }) {
       for (const match of regMatches) {
         const regName = match[1]
         const regAddr = parseInt(match[2], 16)
-        if (regAddr && regNameValidator(regName)) {
+        if (Number.isNaN(regAddr)) {
+          continue
+        }
+        if (regNameValidator(regName)) {
+          // Record the register even when its value is 0 (e.g. X0 is always 0).
           currentRegDump.regs[regName] = regAddr
           if (regName === 'MEPC') {
             programCounter = regAddr
@@ -172,7 +176,9 @@ function getStackAddrAndData({ stackDump }) {
   let stackBaseAddr = 0
   let baseAddr = 0
   let bytesInLine = 0
-  let stackData = Buffer.alloc(0)
+  /** @type {Buffer[]} */
+  const chunks = []
+  let totalLength = 0
 
   stackDump.forEach((line) => {
     const prevBaseAddr = baseAddr
@@ -191,9 +197,11 @@ function getStackAddrAndData({ stackDump }) {
       })
     )
     bytesInLine = lineData.length
-    stackData = Buffer.concat([stackData, lineData])
+    chunks.push(lineData)
+    totalLength += bytesInLine
   })
 
+  const stackData = Buffer.concat(chunks, totalLength)
   return { stackBaseAddr, stackData }
 }
 

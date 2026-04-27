@@ -166,13 +166,6 @@ export function parseLine(line, log = createRegAddrLogger()) {
  * @param {ParsedGDBLine} entry
  * @returns {GDBLine | ParsedGDBLine}
  */
-/**
- * Normalize a parsed GDB line entry. If both file and lineNumber are missing or
- * unknown, omit them. If either is present but unknown, default to '??'.
- *
- * @param {ParsedGDBLine} entry
- * @returns {GDBLine | ParsedGDBLine}
- */
 function normalizeParsedLine(entry) {
   const { file, lineNumber, method, regAddr } = entry
   const parsedMethod = parseMethodSignature(method)
@@ -196,11 +189,17 @@ function normalizeParsedLine(entry) {
   const hasValidMethod =
     parsedMethod.name &&
     parsedMethod.name !== '' &&
-    parsedMethod.name !== '??' &&
-    parsedMethod.name !== '?? ()'
+    parsedMethod.name !== '??'
 
   if (!hasValidLine && hasValidMethod) {
-    return { regAddr, lineNumber: parsedMethod.name }
+    // Carry the method name in the dedicated `method` field instead of
+    // overloading `lineNumber`, which must be either a numeric string or '??'.
+    return {
+      regAddr,
+      method: parsedMethod.name,
+      file: '??',
+      lineNumber: '??',
+    }
   }
 
   return { regAddr, lineNumber: lineNumber || '??' }
