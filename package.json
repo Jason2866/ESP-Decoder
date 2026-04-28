@@ -15,6 +15,7 @@
   },
   "categories": [
     "Debuggers",
+    "Testing",
     "Other"
   ],
   "keywords": [
@@ -23,6 +24,7 @@
     "crash",
     "backtrace",
     "decode",
+    "exception",
     "platformio",
     "pioarduino",
     "arduino",
