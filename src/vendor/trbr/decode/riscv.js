@@ -15,6 +15,7 @@ import {
 import { resolveGlobalSymbols } from './globals.js'
 import { parseLines } from './regAddr.js'
 import { toHexString } from './regs.js'
+import { gdbRegsInfoRiscvIlp32 } from './riscvPanicParse.js'
 
 // Based on the work of:
 //  - [Peter Dragun](https://github.com/peterdragun)
@@ -48,42 +49,6 @@ function createRiscvLogger(debug) {
 /** @typedef {import('./decode.js').AddrLine} AddrLine */
 /** @typedef {import('./decode.js').PanicInfoWithStackData} PanicInfoWithStackData */
 /** @typedef {import('../tool.js').RiscvTargetArch} RiscvTargetArch */
-const gdbRegsInfoRiscvIlp32 = /** @type {const} */ ([
-  'X0',
-  'RA',
-  'SP',
-  'GP',
-  'TP',
-  'T0',
-  'T1',
-  'T2',
-  'S0/FP',
-  'S1',
-  'A0',
-  'A1',
-  'A2',
-  'A3',
-  'A4',
-  'A5',
-  'A6',
-  'A7',
-  'S2',
-  'S3',
-  'S4',
-  'S5',
-  'S6',
-  'S7',
-  'S8',
-  'S9',
-  'S10',
-  'S11',
-  'T3',
-  'T4',
-  'T5',
-  'T6',
-  'MEPC', // where execution is happening (PC) and where it resumes after exception (MEPC).
-])
-
 /** @type {Record<RiscvTargetArch, DecodeFunction>} */
 export const riscvDecoders = /** @type {const} */ ({
   esp32c2: decodeRiscv,
@@ -287,7 +252,7 @@ function parsePanicOutput({ input, target }) {
   // When multiple cores are present, select the first one (typically the
   // crashing core in ESP-IDF panic output). Deterministic selection ensures
   // we consistently decode the same core across multiple runs.
-  const activeCore = regDumps.length > 1 ? regDumps[0] : regDumps[0]
+  const activeCore = regDumps[0]
   if (regDumps.length > 1) {
     console.warn(
       `[trbr][riscv] Multi-core dump detected (${regDumps.length} cores); ` +

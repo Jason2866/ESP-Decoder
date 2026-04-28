@@ -49,6 +49,7 @@ vi.mock('vscode', () => {
 import { TrbrCrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
 import type { CrashEvent } from '../crashDecoder.js';
 import { getPioPackagesDir } from '../pioIntegration.js';
+import { registerSets } from '../vendor/trbr/decode/regs.js';
 
 // ---------------------------------------------------------------------------
 // Fixture paths
@@ -680,5 +681,38 @@ describe('decodeCoredumpBase64', () => {
     );
     expect(result).toBeDefined();
     expect(result.threads).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RISC-V register layout validation
+// ---------------------------------------------------------------------------
+
+describe('RISC-V register layout', () => {
+  it('has correct register count in registerSets.riscv', () => {
+    expect(registerSets.riscv).toHaveLength(33);
+  });
+
+  it('has X0 at index 0 in registerSets.riscv', () => {
+    expect(registerSets.riscv[0]).toBe('X0');
+  });
+
+  it('has S0/FP at index 8 in registerSets.riscv', () => {
+    expect(registerSets.riscv[8]).toBe('S0/FP');
+  });
+
+  it('has MEPC at index 32 in registerSets.riscv', () => {
+    expect(registerSets.riscv[32]).toBe('MEPC');
+  });
+
+  it('matches the expected GDB ILP32 register order', () => {
+    // This must match gdbRegsInfoRiscvIlp32 in riscvPanicParse.js
+    const expectedOrder = [
+      'X0', 'RA', 'SP', 'GP', 'TP', 'T0', 'T1', 'T2', 'S0/FP', 'S1',
+      'A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7',
+      'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 'S10', 'S11',
+      'T3', 'T4', 'T5', 'T6', 'MEPC',
+    ];
+    expect(registerSets.riscv).toEqual(expectedOrder);
   });
 });

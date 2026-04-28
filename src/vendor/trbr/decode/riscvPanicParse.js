@@ -4,7 +4,7 @@
 
 const defaultRiscvTarget = /** @type {const} */ ('esp32c3')
 
-const gdbRegsInfoRiscvIlp32 = /** @type {const} */ ([
+export const gdbRegsInfoRiscvIlp32 = /** @type {const} */ ([
   'X0',
   'RA',
   'SP',
