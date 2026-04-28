@@ -95,6 +95,7 @@ function createRegNameValidator(type) {
 
 /**
  * @typedef {Object} StackDump
+ * @property {number} coreId
  * @property {number} baseAddr
  * @property {number[]} data
  */
@@ -168,7 +169,7 @@ function parse({ input, target }) {
       if (line.trim() === 'Stack memory:') {
         inStackMemory = true
       }
-    } else if (inStackMemory) {
+    } else if (inStackMemory && currentRegDump) {
       const match = line.match(/^([0-9a-fA-F]+):\s*((?:0x[0-9a-fA-F]+\s*)+)/)
       if (match) {
         const baseAddr = parseInt(match[1], 16)
@@ -176,7 +177,7 @@ function parse({ input, target }) {
           .trim()
           .split(/\s+/)
           .map((hex) => parseInt(hex, 16))
-        stackDump.push({ baseAddr, data })
+        stackDump.push({ coreId: currentRegDump.coreId, baseAddr, data })
       }
     }
   })
@@ -261,7 +262,10 @@ function parsePanicOutput({ input, target }) {
   }
 
   const { coreId, regs } = activeCore
-  const { stackBaseAddr, stackData } = getStackAddrAndData({ stackDump })
+  // Filter stack segments to only those belonging to the selected core
+  // to avoid "Invalid base address" errors from non-contiguous segments
+  const filteredStackDump = stackDump.filter((seg) => seg.coreId === coreId)
+  const { stackBaseAddr, stackData } = getStackAddrAndData({ stackDump: filteredStackDump })
 
   return {
     coreId,
@@ -1078,7 +1082,12 @@ async function expandVariable(client, variable, options) {
         }
       }
     } finally {
-      await client.sendCommand(`-var-delete ${varObject}`)
+      // Best-effort cleanup: don't let delete failures mask successful decoding
+      try {
+        await client.sendCommand(`-var-delete ${varObject}`)
+      } catch {
+        // Swallow cleanup errors
+      }
     }
   }
 }

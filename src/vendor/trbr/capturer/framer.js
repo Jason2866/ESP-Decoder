@@ -78,10 +78,10 @@ export class CrashFramer {
     /** @type {FramedCrashBlock[]} */
     const finalized = []
     this._finalizeIfQuiet(finalized, atMs)
-    // Finalize on flush only when the active crash already looks complete.
-    // This avoids trailing partial events at stop-capture while still
-    // emitting complete blocks without waiting for an extra quiet period.
-    if (this._active && isCompleteBlock(this._active.lines)) {
+    // Finalize any active crash block on flush. The _finalize method has
+    // internal protection (hasSignal check) to avoid emitting incomplete
+    // blocks without a valid reason line.
+    if (this._active) {
       this._finalize(finalized)
     }
     return finalized

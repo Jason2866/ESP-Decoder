@@ -50,6 +50,7 @@ import { TrbrCrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64
 import type { CrashEvent } from '../crashDecoder.js';
 import { getPioPackagesDir } from '../pioIntegration.js';
 import { registerSets } from '../vendor/trbr/decode/regs.js';
+import { gdbRegsInfoRiscvIlp32 } from '../vendor/trbr/decode/riscvPanicParse.js';
 
 // ---------------------------------------------------------------------------
 // Fixture paths
@@ -706,13 +707,7 @@ describe('RISC-V register layout', () => {
   });
 
   it('matches the expected GDB ILP32 register order', () => {
-    // This must match gdbRegsInfoRiscvIlp32 in riscvPanicParse.js
-    const expectedOrder = [
-      'X0', 'RA', 'SP', 'GP', 'TP', 'T0', 'T1', 'T2', 'S0/FP', 'S1',
-      'A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7',
-      'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 'S10', 'S11',
-      'T3', 'T4', 'T5', 'T6', 'MEPC',
-    ];
-    expect(registerSets.riscv).toEqual(expectedOrder);
+    // Use the canonical sequence from riscvPanicParse.js to avoid drift
+    expect(registerSets.riscv).toEqual(gdbRegsInfoRiscvIlp32);
   });
 });

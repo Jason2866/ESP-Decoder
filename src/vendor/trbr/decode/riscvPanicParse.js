@@ -65,6 +65,7 @@ if (gdbRegsInfoRiscvIlp32[32] !== 'MEPC') {
 
 /**
  * @typedef {Object} StackDump
+ * @property {number} coreId
  * @property {number} baseAddr
  * @property {number[]} data
  */
@@ -165,7 +166,7 @@ function parse({ input, target }) {
       if (line.trim() === 'Stack memory:') {
         inStackMemory = true
       }
-    } else if (inStackMemory) {
+    } else if (inStackMemory && currentRegDump) {
       const match = line.match(/^([0-9a-fA-F]+):\s*((?:0x[0-9a-fA-F]+\s*)+)/)
       if (match) {
         const baseAddr = parseInt(match[1], 16)
@@ -173,7 +174,7 @@ function parse({ input, target }) {
           .trim()
           .split(/\s+/)
           .map((hex) => parseInt(hex, 16))
-        stackDump.push({ baseAddr, data })
+        stackDump.push({ coreId: currentRegDump.coreId, baseAddr, data })
       }
     }
   })
