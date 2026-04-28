@@ -358,14 +358,14 @@ describe('TrbrCrashCapturer – ESP8266 exception crash', () => {
     expect(event?.rawText).toContain('<<<stack<<<');
   });
 
-  it('is not captured without flush (no Rebooting... terminator)', () => {
-    // ESP8266 fixture has no "Rebooting..." line, so the crash block is only
-    // finalized via flush(). Pushing data alone must NOT emit an event.
+  it('is captured without flush when ESP8266 stack end marker is present', () => {
+    // ESP8266 fixture has no "Rebooting..." line, but it includes "<<<stack<<<"
+    // which now finalizes the block immediately.
     let detected: CrashEvent | undefined;
     capturer.onCrashDetected((e) => { if (!detected) { detected = e; } });
     capturer.pushData(Buffer.from(ESP8266_CRASH_TEXT, 'utf8'));
-    // No flush — block must remain pending
-    expect(detected).toBeUndefined();
+    expect(detected).toBeDefined();
+    expect(detected?.rawText).toContain('<<<stack<<<');
   });
 });
 

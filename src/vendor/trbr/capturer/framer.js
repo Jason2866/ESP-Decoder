@@ -63,7 +63,7 @@ export class CrashFramer {
       this._active.reasonLine = line.trim()
     }
 
-    if (/^Rebooting\.\.\./i.test(line.trim())) {
+    if (isImmediateFinalizeLine(line)) {
       this._finalize(finalized)
     }
 
@@ -147,7 +147,18 @@ function isCompleteBlock(lines) {
       /^Stack memory:/i,
       /^Rebooting\.\.\./i,
       /ELF file SHA256:/i,
-      />>>stack>>>/i, // ESP8266 stack marker
+      />>>stack>>>/i, // ESP8266 stack block start marker
+      /^<<<stack<<</i, // ESP8266 stack block end marker
     ].some((pattern) => pattern.test(line.trim()))
   )
+}
+
+/**
+ * End-of-crash lines that should finalize immediately (without quiet timeout).
+ * @param {string} line
+ * @returns {boolean}
+ */
+function isImmediateFinalizeLine(line) {
+  const trimmed = line.trim()
+  return /^Rebooting\.\.\./i.test(trimmed) || /^<<<stack<<</i.test(trimmed)
 }
