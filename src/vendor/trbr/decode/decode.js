@@ -162,9 +162,9 @@ export function isDecodeInputStreamSource(arg) {
 /**
  * @typedef {Object} FaultInfo
  * @property {number} coreId
- * @property {AddrLine} programCounter PC at fault (PC for ESP32, MEPC for
+ * @property {AddrLine | undefined} programCounter PC at fault (PC for ESP32, MEPC for
  *   RISC-V, EPC1 for ESP8266)
- * @property {AddrLine} [faultAddr] EXCVADDR for ESP32, EXCVADDR for RISC-V and
+ * @property {AddrLine | undefined} [faultAddr] EXCVADDR for ESP32, EXCVADDR for RISC-V and
  *   ESP8266
  * @property {number} [faultCode] EXCCAUSE for ESP32, EXCCODE for RISC-V
  * @property {string} [faultMessage]
@@ -488,6 +488,7 @@ export async function debugAllAddrs(toolPath, elfPath, rawAddresses) {
   const padding = String(lines.length - 1).length
   console.log(
     lines
+      .filter((line) => line !== undefined)
       .map((line) => line.location)
       .map(stringifyAddr)
       .map(

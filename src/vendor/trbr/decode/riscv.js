@@ -282,11 +282,18 @@ function parsePanicOutput({ input, target }) {
   if (regDumps.length === 0) {
     throw new Error('No register dumps found')
   }
+  // When multiple cores are present, select the first one (typically the
+  // crashing core in ESP-IDF panic output). Deterministic selection ensures
+  // we consistently decode the same core across multiple runs.
+  const activeCore = regDumps.length > 1 ? regDumps[0] : regDumps[0]
   if (regDumps.length > 1) {
-    throw new Error('Handling of multi-core register dumps not implemented')
+    console.warn(
+      `[trbr][riscv] Multi-core dump detected (${regDumps.length} cores); ` +
+        `decoding core ${activeCore.coreId} (first)`
+    )
   }
 
-  const { coreId, regs } = regDumps[0]
+  const { coreId, regs } = activeCore
   const { stackBaseAddr, stackData } = getStackAddrAndData({ stackDump })
 
   return {
@@ -334,10 +341,27 @@ export class GdbServer {
     this.server = server
 
     await new Promise((resolve, reject) => {
+      /** @type {(() => void)[]} */
+      const listeners = []
+
+      const cleanup = () => {
+        for (const remove of listeners) {
+          remove()
+        }
+      }
+
       const abortHandler = () => {
         this.debug('User abort')
-        reject(new AbortError())
+        cleanup()
         this.close()
+        reject(new AbortError())
+      }
+
+      const errorHandler = (/** @type {Error} */ err) => {
+        this.debug('Server error', err)
+        cleanup()
+        this.close()
+        reject(err)
       }
 
       if (signal.aborted) {
@@ -346,10 +370,18 @@ export class GdbServer {
       }
 
       signal.addEventListener('abort', abortHandler)
-      server.on('listening', () => {
-        signal.removeEventListener('abort', abortHandler)
+      listeners.push(() => signal.removeEventListener('abort', abortHandler))
+
+      server.on('error', errorHandler)
+      listeners.push(() => server.removeListener('error', errorHandler))
+
+      const listeningHandler = () => {
+        cleanup()
         resolve(undefined)
-      })
+      }
+      server.on('listening', listeningHandler)
+      listeners.push(() => server.removeListener('listening', listeningHandler))
+
       server.listen(0)
     })
 
@@ -1260,7 +1292,7 @@ async function processPanicOutput(
 
 /**
  * @param {PanicInfoWithStackData} panicInfo
- * @param {AddrLine} programCounter
+ * @param {AddrLine | undefined} programCounter
  * @param {AddrLine | undefined} faultAddr
  * @param {(GDBLine | ParsedGDBLine)[]} stacktraceLines
  * @param {FrameVar[]} [globals]

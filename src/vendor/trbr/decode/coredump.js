@@ -149,8 +149,8 @@ function parseBacktrace(raw) {
 /**
  * @param {DecodeCoredumpParams} params
  * @param {DecodeInputFileSource} input
- * @param {boolean} [tryRepair]
  * @param {import('./decode.js').DecodeOptions} [options={}] Default is `{}`
+ * @param {boolean} [tryRepair=true] Default is `true`
  * @returns {Promise<CoredumpDecodeResult>}
  */
 export async function decodeCoredump(

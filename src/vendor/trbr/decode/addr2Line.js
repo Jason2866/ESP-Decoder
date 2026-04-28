@@ -170,6 +170,8 @@ class GDBSession {
       this.gdb.on('error', onError)
       this.gdb.stdout.on('data', onData)
       this.gdb.stderr.on('data', onData)
+      // Process any data already buffered by the constructor's _onData
+      onData()
     })
   }
 
@@ -236,7 +238,7 @@ function buildAddr2LineAddrs(addrs) {
  * @param {Pick<DecodeParams, 'elfPath' | 'toolPath'>} params
  * @param {(number | AddrLine | undefined)[]} addrs
  * @param {DecodeOptions} [options={}] Default is `{}`
- * @returns {Promise<AddrLine[]>}
+ * @returns {Promise<(AddrLine | undefined)[]>}
  */
 export async function addr2line({ elfPath, toolPath }, addrs, options = {}) {
   const addresses = buildAddr2LineAddrs(addrs)
@@ -272,6 +274,9 @@ export async function addr2line({ elfPath, toolPath }, addrs, options = {}) {
 
   return addrs.map((addrOrLine) => {
     const addr = typeof addrOrLine === 'object' ? addrOrLine.addr : addrOrLine
-    return results.get(addr) || { location: '??' }
+    if (addr === undefined) {
+      return undefined
+    }
+    return results.get(addr)
   })
 }
