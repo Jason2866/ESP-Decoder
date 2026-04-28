@@ -229,12 +229,6 @@ function buildAddr2LineAddrs(addrs) {
 }
 
 /**
- * @typedef {Object} RegsInfo
- * @property {Record<number, Record<string, number>>} threadRegs
- * @property {number} [currentThreadAddr]
- */
-
-/**
  * @param {Pick<DecodeParams, 'elfPath' | 'toolPath'>} params
  * @param {(number | AddrLine | undefined)[]} addrs
  * @param {DecodeOptions} [options={}] Default is `{}`

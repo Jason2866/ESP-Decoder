@@ -88,6 +88,7 @@ const gdbRegsInfoRiscvIlp32 = /** @type {const} */ ([
 export const riscvDecoders = /** @type {const} */ ({
   esp32c2: decodeRiscv,
   esp32c3: decodeRiscv,
+  esp32c5: decodeRiscv,
   esp32c6: decodeRiscv,
   esp32h2: decodeRiscv,
   esp32h4: decodeRiscv,
@@ -98,6 +99,7 @@ export const riscvDecoders = /** @type {const} */ ({
 const gdbRegsInfo = {
   esp32c2: gdbRegsInfoRiscvIlp32,
   esp32c3: gdbRegsInfoRiscvIlp32,
+  esp32c5: gdbRegsInfoRiscvIlp32,
   esp32c6: gdbRegsInfoRiscvIlp32,
   esp32h2: gdbRegsInfoRiscvIlp32,
   esp32h4: gdbRegsInfoRiscvIlp32,

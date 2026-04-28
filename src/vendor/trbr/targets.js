@@ -9,6 +9,7 @@ export const defaultTargetArch = /** @type {const} */ ('xtensa')
 const riscTargetArchs = /** @type {const} */ ([
   'esp32c2',
   'esp32c3',
+  'esp32c5',
   'esp32c6',
   'esp32h2',
   'esp32h4',

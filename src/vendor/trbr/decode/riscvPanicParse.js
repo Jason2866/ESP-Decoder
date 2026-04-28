@@ -71,6 +71,7 @@ const gdbRegsInfoRiscvIlp32 = /** @type {const} */ ([
 const gdbRegsInfo = {
   esp32c2: gdbRegsInfoRiscvIlp32,
   esp32c3: gdbRegsInfoRiscvIlp32,
+  esp32c5: gdbRegsInfoRiscvIlp32,
   esp32c6: gdbRegsInfoRiscvIlp32,
   esp32h2: gdbRegsInfoRiscvIlp32,
   esp32h4: gdbRegsInfoRiscvIlp32,
