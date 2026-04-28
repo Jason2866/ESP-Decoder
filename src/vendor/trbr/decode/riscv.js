@@ -3,7 +3,7 @@
 import net from 'node:net'
 
 import { AbortError, neverSignal } from '../abort.js'
-import { isRiscvTargetArch } from '../tool.js'
+import { isRiscvTargetArch } from '../targets.js'
 import { addr2line } from './addr2Line.js'
 import {
   GdbMiClient,

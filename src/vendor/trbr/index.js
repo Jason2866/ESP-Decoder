@@ -12,9 +12,4 @@ export {
 } from './decode/decode.js'
 export { createDecodeParams } from './decode/decodeParams.js'
 export { stringifyDecodeResult } from './decode/stringify.js'
-export {
-  findTargetArch,
-  findToolPath,
-  isRiscvTargetArch,
-  resolveToolPath,
-} from './tool.js'
+export { isRiscvTargetArch } from './targets.js'
