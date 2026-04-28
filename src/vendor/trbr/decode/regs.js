@@ -33,9 +33,9 @@ export const registerSets = /** @type {const} */ ({
     'WINDOWBASE',
     'WINDOWSTART',
   ],
-  // TODO: compare with gdbRegsInfoRiscvIlp32
+  // Order matches gdbRegsInfoRiscvIlp32 in riscvPanicParse.js (source of truth)
   riscv: [
-    'MEPC',
+    'X0',
     'RA',
     'SP',
     'GP',
@@ -43,7 +43,7 @@ export const registerSets = /** @type {const} */ ({
     'T0',
     'T1',
     'T2',
-    'S0',
+    'S0/FP',
     'S1',
     'A0',
     'A1',
@@ -67,11 +67,7 @@ export const registerSets = /** @type {const} */ ({
     'T4',
     'T5',
     'T6',
-    'MSTATUS',
-    'MTVEC',
-    'MCAUSE',
-    'MTVAL',
-    'MHARTID',
+    'MEPC',
   ],
 })
 

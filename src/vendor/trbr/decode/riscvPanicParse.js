@@ -40,6 +40,23 @@ const gdbRegsInfoRiscvIlp32 = /** @type {const} */ ([
   'MEPC',
 ])
 
+// Sanity check: verify expected register count and key indices to prevent regressions
+// This must match registerSets.riscv in regs.js
+if (gdbRegsInfoRiscvIlp32.length !== 33) {
+  throw new Error(
+    `gdbRegsInfoRiscvIlp32 expected 33 registers, got ${gdbRegsInfoRiscvIlp32.length}`
+  )
+}
+if (gdbRegsInfoRiscvIlp32[0] !== 'X0') {
+  throw new Error(`gdbRegsInfoRiscvIlp32[0] expected 'X0', got '${gdbRegsInfoRiscvIlp32[0]}'`)
+}
+if (gdbRegsInfoRiscvIlp32[8] !== 'S0/FP') {
+  throw new Error(`gdbRegsInfoRiscvIlp32[8] expected 'S0/FP', got '${gdbRegsInfoRiscvIlp32[8]}'`)
+}
+if (gdbRegsInfoRiscvIlp32[32] !== 'MEPC') {
+  throw new Error(`gdbRegsInfoRiscvIlp32[32] expected 'MEPC', got '${gdbRegsInfoRiscvIlp32[32]}'`)
+}
+
 /**
  * @typedef {Object} RegisterDump
  * @property {number} coreId
