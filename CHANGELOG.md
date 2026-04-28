@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.23.0] - 2026-04-28
+
+### Changed
+- **Vendored trbr runtime integration** — `trbr` is now fully vendored under `src/vendor/trbr` and used directly by `src/crashDecoder.ts`, removing the external runtime dependency and related build externals (#38).
+- **Crash capture pipeline cleanup** — legacy fallback/workaround paths were removed in favor of the integrated trbr framer/capturer flow, reducing duplicate crash-detection logic (#38).
+
+### Fixed
+- **ESP8266 frame finalization** — crash blocks now finalize immediately when the `<<<stack<<<` end marker is received (in addition to `Rebooting...`), avoiding delayed emit via quiet-timeout (#38).
+- **RISC-V register mapping consistency** — decoder paths now use a single source of truth for ILP32 register metadata (`gdbRegsInfoRiscvIlp32`) to avoid layout mismatches (#38).
+- **Dual-core coreId decoding** — fixed coreId handling for two-core MCUs in the decode path (#38).
+- **ESP32-C5 target support** — added target handling required for ESP32-C5 decoding flow (#38).
+
 ## [0.22.2] - 2026-04-26
 
 ### Added
