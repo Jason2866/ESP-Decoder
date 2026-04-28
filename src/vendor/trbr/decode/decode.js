@@ -56,7 +56,7 @@ import { decodeXtensa } from './xtensa.js'
 
 /**
  * @typedef {Object} AddrLine
- * @property {number} [addr]
+ * @property {number | string} [addr] Number or hex string like '0x40001234'
  * @property {AddrLocation} location
  */
 
@@ -69,7 +69,7 @@ export function isAddrLine(arg) {
     arg !== null &&
     typeof arg === 'object' &&
     'addr' in arg &&
-    (typeof arg.addr === 'number' || arg.addr === undefined) &&
+    (typeof arg.addr === 'number' || typeof arg.addr === 'string' || arg.addr === undefined) &&
     'location' in arg &&
     (typeof arg.location === 'string' ||
       isGDBLine(arg.location) ||

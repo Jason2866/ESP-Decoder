@@ -216,12 +216,17 @@ function buildAddr2LineAddrs(addrs) {
   const dedupedAddrs = new Set()
   for (const addr of addrs) {
     let addrNumber
-    if (typeof addr === 'object') {
-      addrNumber = addr.addr
+    if (typeof addr === 'object' && addr !== null) {
+      const a = addr.addr
+      if (typeof a === 'string') {
+        addrNumber = parseInt(a, 16)
+      } else if (typeof a === 'number') {
+        addrNumber = a
+      }
     } else if (typeof addr === 'number') {
       addrNumber = addr
     }
-    if (addrNumber !== undefined && !dedupedAddrs.has(addrNumber)) {
+    if (addrNumber !== undefined && !Number.isNaN(addrNumber) && !dedupedAddrs.has(addrNumber)) {
       dedupedAddrs.add(addrNumber)
     }
   }

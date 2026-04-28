@@ -246,6 +246,8 @@ export async function decodeCoredump(
       log('regs', tid, Object.keys(regsAsNamed))
 
       const programCounter = regsAsNamed['pc']
+      const programCounterHex =
+        programCounter !== undefined ? toHexString(programCounter) : '??'
 
       const btOut = await client.sendCommand('-stack-list-frames')
       log('stack frames raw length', btOut.length)
@@ -314,9 +316,9 @@ export async function decodeCoredump(
           faultInfo: {
             coreId: parseInt(tid, 10),
             programCounter: {
-              addr: programCounter,
+              addr: programCounterHex,
               location: stacktraceLines[0] ?? {
-                regAddr: toHexString(programCounter),
+                regAddr: programCounterHex,
                 lineNumber: '??',
               },
             },
