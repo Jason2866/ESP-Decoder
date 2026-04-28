@@ -6,6 +6,8 @@ const crashPatterns = [
   /Guru Meditation Error:/i,
   /panic'ed/i,
   /^Exception\s+\(\d+\):?/i,
+  /^assert failed:/i,
+  /^abort\(\) was called/i,
 ]
 
 // Both the start and reason heuristics use the same set of crash markers.
@@ -145,6 +147,7 @@ function isCompleteBlock(lines) {
       /^Stack memory:/i,
       /^Rebooting\.\.\./i,
       /ELF file SHA256:/i,
+      />>>stack>>>/i, // ESP8266 stack marker
     ].some((pattern) => pattern.test(line.trim()))
   )
 }

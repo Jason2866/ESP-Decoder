@@ -505,15 +505,22 @@ function resolveOptions(options) {
  * @returns {import('./types.js').CapturerEventKind}
  */
 function detectKind(lines) {
-  const riscvHints = [/MCAUSE/, /\bMEPC\b/, /Stack memory:/, /MHARTID/]
+  const riscvHints = [
+    /MCAUSE/i,
+    /\bMEPC\b/i,
+    /MHARTID/i,
+  ]
   if (lines.some((line) => riscvHints.some((hint) => hint.test(line)))) {
     return 'riscv'
   }
   const xtensaHints = [
-    /Backtrace:/,
-    /EXCCAUSE/,
-    /EXCVADDR/,
-    /Guru Meditation Error:/,
+    /Backtrace:/i,
+    /EXCCAUSE/i,
+    /EXCVADDR/i,
+    /Guru Meditation Error:/i,
+    /^assert failed:/i,
+    /^abort\(\) was called/i,
+    /^Exception\s+\(\d+\):?/i,
   ]
   if (lines.some((line) => xtensaHints.some((hint) => hint.test(line)))) {
     return 'xtensa'
