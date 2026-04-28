@@ -108,7 +108,7 @@ export class CrashFramer {
     }
     const lines = this._active.lines
     const hasSignal = lines.some((line) => isStartLine(line))
-    if (hasSignal && lines.length > 0) {
+    if (hasSignal && lines.length > 0 && isCompleteBlock(lines)) {
       finalized.push({
         lines: [...lines],
         startedAt: this._active.startedAt,
