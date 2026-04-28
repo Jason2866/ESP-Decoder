@@ -50,7 +50,19 @@ export async function resolveBuildProperties(
     signal: options?.signal,
   })
 
-  const { build_properties } = JSON.parse(stdout)
+  /** @type {{ build_properties: string[] }} */
+  let parsed
+  try {
+    parsed = JSON.parse(stdout)
+  } catch (err) {
+    const cause = err instanceof Error ? err : new Error(String(err))
+    throw new Error(
+      `Failed to parse JSON output from 'arduino-cli board details' for fqbn '${fqbn}': ${cause.message}. Raw stdout: ${stdout}`,
+      // @ts-expect-error -- ErrorOptions are supported on Node 16.9+
+      { cause }
+    )
+  }
+  const { build_properties } = parsed
   return parseBuildProperties(build_properties)
 }
 

@@ -2,17 +2,15 @@
 
 /** @typedef {import('./types.js').FramedCrashBlock} FramedCrashBlock */
 
-const startPatterns = [
+const crashPatterns = [
   /Guru Meditation Error:/i,
   /panic'ed/i,
   /^Exception\s+\(\d+\):?/i,
 ]
 
-const reasonPatterns = [
-  /Guru Meditation Error:/i,
-  /panic'ed/i,
-  /^Exception\s+\(\d+\):?/i,
-]
+// Both the start and reason heuristics use the same set of crash markers.
+const startPatterns = crashPatterns
+const reasonPatterns = crashPatterns
 
 /**
  * @typedef {Object} FramerState

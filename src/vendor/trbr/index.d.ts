@@ -2,8 +2,6 @@
 // src/vendor/trbr/. Only the surface consumed by esp-decoder is declared.
 // The runtime implementation lives in ./index.js (and the files it imports).
 
-import type { EventEmitter } from 'node:events';
-
 // ---------------------------------------------------------------------------
 // Core types
 // ---------------------------------------------------------------------------
@@ -185,6 +183,15 @@ export interface CapturerEvent {
 
 export type CapturerListener = (event: CapturerEvent) => void;
 
+export interface CapturerEvaluateContext {
+  event: CapturerEvent;
+  signal?: AbortSignal;
+}
+
+export type CapturerEvaluateFn = (
+  context: CapturerEvaluateContext
+) => Promise<CapturerEvaluated>;
+
 export interface CapturerEvaluateOptions {
   signal?: AbortSignal;
 }
@@ -202,6 +209,7 @@ export interface CapturerOptions {
   maxRawBytes?: number;
   maxRawLines?: number;
   now?: () => number;
+  evaluateEvent?: CapturerEvaluateFn;
 }
 
 export class Capturer {
@@ -212,12 +220,12 @@ export class Capturer {
   getRawState(): CapturerRawState;
   on(eventName: CapturerEventName, listener: CapturerListener): () => void;
   evaluate(eventId: string, options?: CapturerEvaluateOptions): Promise<CapturerEvaluated>;
-  _eventBus: EventEmitter;
 }
 
 export function createCapturer(options?: CapturerOptions): Capturer;
 
 export class AbortError extends Error {
   constructor();
-  code: string;
+  name: 'AbortError';
+  code: 'ABORT_ERR';
 }

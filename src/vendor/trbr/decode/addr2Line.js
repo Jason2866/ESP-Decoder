@@ -38,12 +38,40 @@ class GDBSession {
     this.current = null
     this.gdb.stdout.on('data', (chunk) => this._onData(chunk))
     this.gdb.stderr.on('data', (chunk) => this._onData(chunk))
-    this.gdb.on('error', (err) => this.current?.reject(err))
+    this.gdb.on('error', (err) =>
+      this._terminate(err instanceof Error ? err : new Error(String(err)))
+    )
     this.gdb.on('exit', (code, signal) => {
       if (code !== 0 && signal !== 'SIGTERM') {
-        console.warn(`GDB exited with code ${code} or signal ${signal}`)
+        const exitErr = new Error(
+          `GDB exited unexpectedly (code=${code}, signal=${signal})`
+        )
+        console.warn(exitErr.message)
+        this._terminate(exitErr)
       }
     })
+  }
+
+  /**
+   * Mark the session as terminally failed and reject the in-flight command
+   * plus every queued command with the given error so callers don't hang.
+   *
+   * @param {Error} err
+   */
+  _terminate(err) {
+    if (!this.error) {
+      this.error = err
+    }
+    if (this.current) {
+      const { reject } = this.current
+      this.current = null
+      reject(this.error)
+    }
+    /** @type {CommandQueueItem | undefined} */
+    let item
+    while ((item = this.queue.shift())) {
+      item.reject(this.error)
+    }
   }
 
   /** @param {Buffer} chunk */
@@ -76,6 +104,12 @@ class GDBSession {
 
   start() {
     return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        this.gdb.off('error', onError)
+        this.gdb.stdout.off('data', onData)
+        this.gdb.stderr.off('data', onData)
+      }
+
       // GDB not found
       const onError = (/** @type {Error} */ error) => {
         let userError = error
@@ -86,10 +120,15 @@ class GDBSession {
         ) {
           userError = new Error(`GDB tool not found at ${this.toolPath}`)
         }
+        cleanup()
         reject(userError)
       }
 
-      const onData = (/** @type {Buffer} */ chunk) => {
+      const onData = () => {
+        // The constructor's _onData listener has already appended the chunk
+        // to this.buffer. Inspect it (do not re-append) and only consume the
+        // initial GDB banner prompt here.
+
         // ELF is not found
         if (
           !this.didExecuteFirstCommand &&
@@ -99,6 +138,7 @@ class GDBSession {
             this.error = new Error(
               `The ELF file does not exist or is not readable: ${this.elfPath}`
             )
+            cleanup()
             reject(this.error)
           }
           return
@@ -114,15 +154,16 @@ class GDBSession {
             this.error = new Error(
               `The ELF file is not in executable format: ${this.elfPath}`
             )
+            cleanup()
             reject(this.error)
           }
           return
         }
 
-        this.buffer += chunk.toString()
         const idx = this.buffer.indexOf(prompt)
         if (idx !== -1) {
           this.buffer = this.buffer.slice(idx + prompt.length)
+          cleanup()
           resolve('')
         }
       }
