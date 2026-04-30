@@ -51,10 +51,25 @@ export class SerialPortManager extends vscode.Disposable {
     return this._isConnected;
   }
 
+  private filterPorts<T extends { path: string; manufacturer?: string }>(
+    ports: T[]
+  ): T[] {
+    if (process.platform === 'darwin') {
+      return ports.filter((port) => !/\.(Bluetooth|debug)/i.test(port.path));
+    } else if (process.platform === 'linux') {
+      return ports.filter((port) => !/\/(ttyS\d+|rfcomm)/.test(port.path));
+    } else if (process.platform === 'win32') {
+      return ports.filter(
+        (port) => !/bluetooth/i.test(port.manufacturer || '')
+      );
+    }
+    return ports;
+  }
+
   async listPorts(): Promise<SerialPortInfo[]> {
     try {
       const ports = await SerialPort.list();
-      return ports.map((p) => ({
+      const mappedPorts = ports.map((p) => ({
         path: p.path,
         manufacturer: p.manufacturer,
         serialNumber: p.serialNumber,
@@ -62,6 +77,7 @@ export class SerialPortManager extends vscode.Disposable {
         productId: p.productId,
         friendlyName: (p as unknown as Record<string, unknown>).friendlyName as string | undefined,
       }));
+      return this.filterPorts(mappedPorts);
     } catch (err) {
       vscode.window.showErrorMessage(
         `Failed to list serial ports: ${err instanceof Error ? err.message : err}`
