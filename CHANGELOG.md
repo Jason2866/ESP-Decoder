@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.1] - 2026-04-30
+
+### Changed
+- **Port filtering** — integrated platform-specific port filters to exclude non-serial devices:
+  - **macOS**: Filters out Bluetooth and debug ports (`.Bluetooth`, `.debug` suffixes).
+  - **Linux**: Filters out system serial ports (`ttyS*`) and Bluetooth RFCOMM ports (`rfcomm`).
+  - **Windows**: Filters out Bluetooth devices by manufacturer name.
+
 ## [0.24.0] - 2026-04-30
 
 ### Added

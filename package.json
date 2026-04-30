@@ -2,7 +2,7 @@
   "name": "esp-decoder",
   "displayName": "ESP Crash Decoder",
   "description": "Decode ESP32 / ESP8266 crash dumps from serial port",
-  "version": "0.24.0",
+  "version": "0.24.1",
   "publisher": "Jason2866",
   "license": "GPL-3.0",
   "icon": "assets/icon_large.png",
@@ -54,7 +54,8 @@
         {
           "type": "webview",
           "id": "esp-decoder.monitorView",
-          "name": "ESP Crash Monitor"
+          "name": "ESP Crash Monitor",
+          "icon": "assets/icon.svg"
         }
       ]
     },
