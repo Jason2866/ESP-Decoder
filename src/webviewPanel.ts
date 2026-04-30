@@ -2037,7 +2037,14 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // Match file:line[:col] references in serial output. The path must end in
     // a recognised source-file extension (case-insensitive) so we don't mis-fire
     // on numeric tokens like timestamps. Captures: 1=path, 2=line, 3=col?.
-    var SERIAL_LINK_RE = /((?:[A-Za-z]:)?[\\w./\\\\-]+\\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|ino|s|asm|tcc|ipp)):(\\d+)(?::(\\d+))?/gi;
+    //
+    // Two path forms are accepted:
+    //   * Anchored (drive letter "C:\", leading "/" / "\", or "./" / "../"):
+    //     allows whitespace inside the path so that e.g.
+    //     "C:\\Users\\me\\My Project\\main.cpp:42" is matched.
+    //   * Plain relative path without spaces (e.g. "src/main.cpp", "WiFi.h"):
+    //     forbids whitespace to avoid swallowing surrounding log text.
+    var SERIAL_LINK_RE = /((?:(?:[A-Za-z]:[\\\\/]|[\\\\/]|\\.\\.?[\\\\/])[\\w./\\\\ -]+|[\\w.-]+(?:[\\\\/][\\w.-]+)*)\\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|ino|s|asm|tcc|ipp)):(\\d+)(?::(\\d+))?/gi;
 
     function makeSerialFileLink(file, line, col) {
       var span = document.createElement('span');
@@ -2158,19 +2165,39 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     });
 
     // Show pointer cursor on serial-file-link only while Ctrl/Cmd is held so
-    // plain mouse interaction (text selection) feels normal.
+    // plain mouse interaction (text selection) feels normal. Keydown/keyup
+    // alone is not enough: if the modifier was held *before* the webview gained
+    // focus, no keydown ever fires inside the iframe. Pointer events carry a
+    // current ctrlKey/metaKey snapshot, so we sync the class from those too.
+    function setModLinkActive(on) {
+      document.body.classList.toggle('mod-link-active', !!on);
+    }
     document.addEventListener('keydown', function(e) {
-      if (e.key === 'Control' || e.key === 'Meta') {
-        document.body.classList.add('mod-link-active');
+      if (e.key === 'Control' || e.key === 'Meta' || e.ctrlKey || e.metaKey) {
+        setModLinkActive(true);
       }
     });
     document.addEventListener('keyup', function(e) {
       if (e.key === 'Control' || e.key === 'Meta') {
-        document.body.classList.remove('mod-link-active');
+        setModLinkActive(e.ctrlKey || e.metaKey);
       }
     });
+    document.addEventListener('pointermove', function(e) {
+      setModLinkActive(e.ctrlKey || e.metaKey);
+    });
+    document.addEventListener('pointerover', function(e) {
+      setModLinkActive(e.ctrlKey || e.metaKey);
+    });
+    document.addEventListener('pointerout', function(e) {
+      // Keep class while still inside the document; only clear once pointer
+      // leaves the document entirely.
+      if (!e.relatedTarget) { setModLinkActive(false); }
+    });
+    document.addEventListener('pointerleave', function() {
+      setModLinkActive(false);
+    });
     window.addEventListener('blur', function() {
-      document.body.classList.remove('mod-link-active');
+      setModLinkActive(false);
     });
 
     // Button handlers
