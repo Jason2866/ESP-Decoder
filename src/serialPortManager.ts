@@ -51,7 +51,7 @@ export class SerialPortManager extends vscode.Disposable {
     return this._isConnected;
   }
 
-  private filterPorts<T extends { path: string; manufacturer?: string }>(
+  public filterPorts<T extends { path: string; manufacturer?: string }>(
     ports: T[]
   ): T[] {
     if (process.platform === 'darwin') {
