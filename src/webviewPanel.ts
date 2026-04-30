@@ -656,7 +656,11 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         if (found.length > 0) {
           const exact = found.find((u) => u.fsPath.replace(/\\/g, '/').endsWith(normalised));
           if (exact) { return exact.fsPath; }
-          if (found.length === 1) { return found[0].fsPath; }
+          // No exact suffix match — fall back to the first hit so that
+          // openTextDocument has something to try (and surfaces a clear
+          // error if it really is the wrong file) instead of guaranteeing
+          // failure by returning the raw, likely-relative input.
+          return found[0].fsPath;
         }
       } catch { /* ignore */ }
     }
