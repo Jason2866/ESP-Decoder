@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0] - 2026-04-30
+
+### Added
+- **Clickable file:line in Serial Monitor** — log lines containing source-file references (e.g. `src/main.cpp:42`, `/path/to/MyLib.cpp:15:7`, or Windows paths like `C:\Users\me\My Project\main.cpp:42`) are now detected and rendered as Ctrl/Cmd+click links that jump straight to the matching file/line in the editor, mirroring the legacy PlatformIO monitor behavior (#41).
+  - Supports absolute, drive-letter, and workspace-relative paths; relative paths are resolved against the active workspace folders, with a `findFiles` fallback by basename when the path can't be located directly.
+  - Plain mouse clicks still select text normally; the pointer/underline only appear while the modifier key is held (synced from both keyboard and pointer events so it works even when the modifier was pressed before the webview gained focus).
+
 ## [0.23.2] - 2026-04-28
 
 ### Fixed
