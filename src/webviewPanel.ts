@@ -5,7 +5,6 @@ import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
 import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
-import { buildAnsiWebviewJs } from './ansiParser';
 
 export interface SessionConfig {
   elfPath?: string;
@@ -1859,11 +1858,191 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     var CRLF = CR + LF;
     const LINE_SPLIT_RE = new RegExp('(' + CRLF + '|' + CR + '|' + LF + ')');
 
-    ${buildAnsiWebviewJs()}
+    // Standard 256-color palette (indices 0-255)
+    // NOTE: This JavaScript logic should be kept in sync with src/ansiParser.ts
+    // to ensure consistency between the webview (browser) and test implementations.
+    var ANSI_256 = (function () {
+      var t = [];
+      // 0-7: standard colors
+      t[0]='rgb(0,0,0)';      t[1]='rgb(128,0,0)';    t[2]='rgb(0,128,0)';
+      t[3]='rgb(128,128,0)';  t[4]='rgb(0,0,128)';    t[5]='rgb(128,0,128)';
+      t[6]='rgb(0,128,128)';  t[7]='rgb(192,192,192)';
+      // 8-15: bright colors
+      t[8]='rgb(128,128,128)'; t[9]='rgb(255,0,0)';   t[10]='rgb(0,255,0)';
+      t[11]='rgb(255,255,0)';  t[12]='rgb(99,153,255)'; t[13]='rgb(255,0,255)';
+      t[14]='rgb(0,255,255)';  t[15]='rgb(255,255,255)';
+      // 16-231: 6x6x6 color cube
+      for (var i = 0; i < 216; i++) {
+        var r = Math.floor(i / 36), g = Math.floor((i % 36) / 6), b = i % 6;
+        t[16 + i] = 'rgb(' + (r ? r * 40 + 55 : 0) + ',' +
+                              (g ? g * 40 + 55 : 0) + ',' +
+                              (b ? b * 40 + 55 : 0) + ')';
+      }
+      // 232-255: grayscale ramp
+      for (var i = 0; i < 24; i++) {
+        var v = i * 10 + 8;
+        t[232 + i] = 'rgb(' + v + ',' + v + ',' + v + ')';
+      }
+      return t;
+    })();
+
+    function resetAnsiState() {
+      ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
+      ansiState.strikethrough=false; ansiState.blink=false; ansiState.fastBlink=false;
+      ansiState.hidden=false; ansiState.dim=false; ansiState.reverse=false;
+      ansiState.fg=null; ansiState.bg=null;
+      ansiState.fgRgb=null; ansiState.bgRgb=null;
+    }
+
+    // Serialize the current ansiState back into an SGR escape sequence so
+    // we can restore it after temporarily injecting our own SGR codes
+    // (e.g. a dim timestamp prefix at the start of each line).
+    function ansiStateToSgr() {
+      var codes = [];
+      if (ansiState.bold)          { codes.push(1); }
+      if (ansiState.dim)           { codes.push(2); }
+      if (ansiState.italic)        { codes.push(3); }
+      if (ansiState.underline)     { codes.push(4); }
+      if (ansiState.blink)         { codes.push(5); }
+      if (ansiState.fastBlink)     { codes.push(6); }
+      if (ansiState.reverse)       { codes.push(7); }
+      if (ansiState.hidden)        { codes.push(8); }
+      if (ansiState.strikethrough) { codes.push(9); }
+      var fgMap = { black:30, red:31, green:32, yellow:33, blue:34, magenta:35, cyan:36, white:37 };
+      var bgMap = { black:40, red:41, green:42, yellow:43, blue:44, magenta:45, cyan:46, white:47 };
+      if (ansiState.fgRgb) {
+        var mfg = /rgb\\((\\d+),(\\d+),(\\d+)\\)/.exec(ansiState.fgRgb);
+        if (mfg) { codes.push(38, 2, +mfg[1], +mfg[2], +mfg[3]); }
+      } else if (ansiState.fg && fgMap[ansiState.fg] !== undefined) {
+        codes.push(fgMap[ansiState.fg]);
+      }
+      if (ansiState.bgRgb) {
+        var mbg = /rgb\\((\\d+),(\\d+),(\\d+)\\)/.exec(ansiState.bgRgb);
+        if (mbg) { codes.push(48, 2, +mbg[1], +mbg[2], +mbg[3]); }
+      } else if (ansiState.bg && bgMap[ansiState.bg] !== undefined) {
+        codes.push(bgMap[ansiState.bg]);
+      }
+      if (codes.length === 0) { return ''; }
+      return ESC + '[' + codes.join(';') + 'm';
+    }
+
+    // Process an array of SGR codes, handling extended color sequences (38;5;n, 38;2;r;g;b, etc.)
+    function ansiApplyCodes(codes) {
+      for (var ci = 0; ci < codes.length; ci++) {
+        var code = codes[ci];
+        // Extended foreground: 38;5;n or 38;2;r;g;b
+        if (code === 38 && ci + 1 < codes.length) {
+          if (codes[ci + 1] === 5) {
+            if (ci + 2 < codes.length) {
+              var idx = codes[ci + 2];
+              if (idx >= 0 && idx <= 255 && ANSI_256[idx]) {
+                ansiState.fg = null; ansiState.fgRgb = ANSI_256[idx];
+              }
+              ci += 2;
+            } else { ci += 1; }
+            continue;
+          }
+          if (codes[ci + 1] === 2) {
+            if (ci + 4 < codes.length) {
+              ansiState.fg = null;
+              var r = Math.max(0, Math.min(255, codes[ci+2]));
+              var g = Math.max(0, Math.min(255, codes[ci+3]));
+              var b = Math.max(0, Math.min(255, codes[ci+4]));
+              ansiState.fgRgb = 'rgb(' + r + ',' + g + ',' + b + ')';
+              ci += 4;
+            } else {
+              ci = codes.length - 1;
+            }
+            continue;
+          }
+        }
+        // Extended background: 48;5;n or 48;2;r;g;b
+        if (code === 48 && ci + 1 < codes.length) {
+          if (codes[ci + 1] === 5) {
+            if (ci + 2 < codes.length) {
+              var idx = codes[ci + 2];
+              if (idx >= 0 && idx <= 255 && ANSI_256[idx]) {
+                ansiState.bg = null; ansiState.bgRgb = ANSI_256[idx];
+              }
+              ci += 2;
+            } else { ci += 1; }
+            continue;
+          }
+          if (codes[ci + 1] === 2) {
+            if (ci + 4 < codes.length) {
+              ansiState.bg = null;
+              var r = Math.max(0, Math.min(255, codes[ci+2]));
+              var g = Math.max(0, Math.min(255, codes[ci+3]));
+              var b = Math.max(0, Math.min(255, codes[ci+4]));
+              ansiState.bgRgb = 'rgb(' + r + ',' + g + ',' + b + ')';
+              ci += 4;
+            } else {
+              ci = codes.length - 1;
+            }
+            continue;
+          }
+        }
+        switch (code) {
+          case  0: resetAnsiState(); break;
+          case  1: ansiState.bold=true; break;
+          case  2: ansiState.dim=true; break;
+          case  3: ansiState.italic=true; break;
+          case  4: ansiState.underline=true; break;
+          case  5: ansiState.blink=true; ansiState.fastBlink=false; break;
+          case  6: ansiState.fastBlink=true; ansiState.blink=false; break;
+          case  7: ansiState.reverse=true; break;
+          case  8: ansiState.hidden=true; break;
+          case  9: ansiState.strikethrough=true; break;
+          case 22: ansiState.bold=false; ansiState.dim=false; break;
+          case 23: ansiState.italic=false; break;
+          case 24: ansiState.underline=false; break;
+          case 25: ansiState.blink=false; ansiState.fastBlink=false; break;
+          case 27: ansiState.reverse=false; break;
+          case 28: ansiState.hidden=false; break;
+          case 29: ansiState.strikethrough=false; break;
+          case 30: ansiState.fg='black';   ansiState.fgRgb=null; break;
+          case 31: ansiState.fg='red';     ansiState.fgRgb=null; break;
+          case 32: ansiState.fg='green';   ansiState.fgRgb=null; break;
+          case 33: ansiState.fg='yellow';  ansiState.fgRgb=null; break;
+          case 34: ansiState.fg='blue';    ansiState.fgRgb=null; break;
+          case 35: ansiState.fg='magenta'; ansiState.fgRgb=null; break;
+          case 36: ansiState.fg='cyan';    ansiState.fgRgb=null; break;
+          case 37: ansiState.fg='white';   ansiState.fgRgb=null; break;
+          case 39: ansiState.fg=null; ansiState.fgRgb=null; break;
+          case 40: ansiState.bg='black';   ansiState.bgRgb=null; break;
+          case 41: ansiState.bg='red';     ansiState.bgRgb=null; break;
+          case 42: ansiState.bg='green';   ansiState.bgRgb=null; break;
+          case 43: ansiState.bg='yellow';  ansiState.bgRgb=null; break;
+          case 44: ansiState.bg='blue';    ansiState.bgRgb=null; break;
+          case 45: ansiState.bg='magenta'; ansiState.bgRgb=null; break;
+          case 46: ansiState.bg='cyan';    ansiState.bgRgb=null; break;
+          case 47: ansiState.bg='white';   ansiState.bgRgb=null; break;
+          case 49: ansiState.bg=null; ansiState.bgRgb=null; break;
+          // Bright foreground colors (90-97)
+          case 90: ansiState.fg=null; ansiState.fgRgb=ANSI_256[8];  break;
+          case 91: ansiState.fg=null; ansiState.fgRgb=ANSI_256[9];  break;
+          case 92: ansiState.fg=null; ansiState.fgRgb=ANSI_256[10]; break;
+          case 93: ansiState.fg=null; ansiState.fgRgb=ANSI_256[11]; break;
+          case 94: ansiState.fg=null; ansiState.fgRgb=ANSI_256[12]; break;
+          case 95: ansiState.fg=null; ansiState.fgRgb=ANSI_256[13]; break;
+          case 96: ansiState.fg=null; ansiState.fgRgb=ANSI_256[14]; break;
+          case 97: ansiState.fg=null; ansiState.fgRgb=ANSI_256[15]; break;
+          // Bright background colors (100-107)
+          case 100: ansiState.bg=null; ansiState.bgRgb=ANSI_256[8];  break;
+          case 101: ansiState.bg=null; ansiState.bgRgb=ANSI_256[9];  break;
+          case 102: ansiState.bg=null; ansiState.bgRgb=ANSI_256[10]; break;
+          case 103: ansiState.bg=null; ansiState.bgRgb=ANSI_256[11]; break;
+          case 104: ansiState.bg=null; ansiState.bgRgb=ANSI_256[12]; break;
+          case 105: ansiState.bg=null; ansiState.bgRgb=ANSI_256[13]; break;
+          case 106: ansiState.bg=null; ansiState.bgRgb=ANSI_256[14]; break;
+          case 107: ansiState.bg=null; ansiState.bgRgb=ANSI_256[15]; break;
+        }
+      }
+    }
 
     // Match file:line[:col] references in serial output. The path must end in
     // a recognised source-file extension (case-insensitive) so we don't mis-fire
-
+    // on numeric tokens like timestamps. Captures: 1=path, 2=line, 3=col?.
     //
     // Two path forms are accepted:
     //   * Anchored (drive letter "C:\", leading "/" / "\", or "./" / "../"):
