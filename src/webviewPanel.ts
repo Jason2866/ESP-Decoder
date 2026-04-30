@@ -500,12 +500,14 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       }
       case 'openFile': {
         if (message.file && message.line) {
-          const uri = vscode.Uri.file(message.file);
+          const filePath = await this.resolveSourcePath(String(message.file));
           const line = parseInt(message.line, 10) - 1;
+          const col = message.column ? parseInt(message.column, 10) - 1 : 0;
           try {
+            const uri = vscode.Uri.file(filePath);
             const doc = await vscode.workspace.openTextDocument(uri);
             await vscode.window.showTextDocument(doc, {
-              selection: new vscode.Range(line, 0, line, 0),
+              selection: new vscode.Range(line, col, line, col),
               preview: true,
             });
           } catch {
@@ -618,6 +620,47 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       vscode.window.showErrorMessage(`Failed to start logging: ${msg}`);
       this.postMessage({ type: 'logFailed' });
     });
+  }
+
+  /**
+   * Resolve a file path emitted by the serial monitor (or crash output) to an
+   * absolute path that can be opened. Tries, in order:
+   *   1. Use the path as-is when it is already absolute and exists.
+   *   2. Resolve it against each open workspace folder.
+   *   3. Search the workspace for a file whose suffix matches the input.
+   *   4. Fall back to a basename search.
+   * Returns the original path when no match is found so the existing error
+   * handling can show a user-visible message.
+   */
+  private async resolveSourcePath(input: string): Promise<string> {
+    const normalised = input.replace(/\\/g, '/');
+    if (path.isAbsolute(normalised)) {
+      try {
+        await fs.promises.access(normalised);
+        return normalised;
+      } catch { /* fall through to search */ }
+    }
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    for (const folder of folders) {
+      const candidate = path.join(folder.uri.fsPath, normalised);
+      try {
+        await fs.promises.access(candidate);
+        return candidate;
+      } catch { /* try next */ }
+    }
+    // Search workspace for a file ending with the relative path or basename.
+    if (folders.length > 0) {
+      const basename = path.basename(normalised);
+      try {
+        const found = await vscode.workspace.findFiles(`**/${basename}`, '**/node_modules/**', 50);
+        if (found.length > 0) {
+          const exact = found.find((u) => u.fsPath.replace(/\\/g, '/').endsWith(normalised));
+          if (exact) { return exact.fsPath; }
+          if (found.length === 1) { return found[0].fsPath; }
+        }
+      } catch { /* ignore */ }
+    }
+    return input;
   }
 
   private async resolveLogDirectory(): Promise<string | null> {
@@ -1372,6 +1415,20 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       opacity: 0.8;
     }
 
+    /* Inline file:line links inside serial output. Underlined only when
+       hovered while Ctrl/Cmd is held (mod-link-active). */
+    .serial-file-link {
+      text-decoration: none;
+      cursor: text;
+    }
+    body.mod-link-active .serial-file-link {
+      cursor: pointer;
+    }
+    body.mod-link-active .serial-file-link:hover {
+      text-decoration: underline;
+      text-decoration-color: var(--link-fg);
+    }
+
     /* Register grid */
     .registers-grid {
       display: grid;
@@ -1977,13 +2034,55 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       }
     }
 
+    // Match file:line[:col] references in serial output. The path must end in
+    // a recognised source-file extension (case-insensitive) so we don't mis-fire
+    // on numeric tokens like timestamps. Captures: 1=path, 2=line, 3=col?.
+    var SERIAL_LINK_RE = /((?:[A-Za-z]:)?[\\w./\\\\-]+\\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|ino|s|asm|tcc|ipp)):(\\d+)(?::(\\d+))?/gi;
+
+    function makeSerialFileLink(file, line, col) {
+      var span = document.createElement('span');
+      span.className = 'serial-file-link';
+      span.setAttribute('data-file', file);
+      span.setAttribute('data-line', line);
+      if (col) { span.setAttribute('data-column', col); }
+      span.title = 'Ctrl/Cmd+click to open ' + file + ':' + line;
+      return span;
+    }
+
+    // Build a fragment from text, wrapping any file:line matches in
+    // clickable serial-file-link spans. Returns null when text is empty.
+    function buildLinkifiedFragment(text) {
+      if (text === '') return null;
+      SERIAL_LINK_RE.lastIndex = 0;
+      var hasMatch = SERIAL_LINK_RE.test(text);
+      if (!hasMatch) { return document.createTextNode(text); }
+      var frag = document.createDocumentFragment();
+      var lastIndex = 0;
+      var match;
+      SERIAL_LINK_RE.lastIndex = 0;
+      while ((match = SERIAL_LINK_RE.exec(text)) !== null) {
+        if (match.index > lastIndex) {
+          frag.appendChild(document.createTextNode(text.substring(lastIndex, match.index)));
+        }
+        var link = makeSerialFileLink(match[1], match[2], match[3]);
+        link.appendChild(document.createTextNode(match[0]));
+        frag.appendChild(link);
+        lastIndex = match.index + match[0].length;
+      }
+      if (lastIndex < text.length) {
+        frag.appendChild(document.createTextNode(text.substring(lastIndex)));
+      }
+      return frag;
+    }
+
     function ansiMakeNode(text) {
       if (text === '') return null;
       const needsSpan = ansiState.bold || ansiState.italic || ansiState.underline ||
                         ansiState.strikethrough || ansiState.blink || ansiState.fastBlink ||
                         ansiState.hidden || ansiState.dim || ansiState.reverse ||
                         ansiState.fg || ansiState.bg || ansiState.fgRgb || ansiState.bgRgb;
-      if (!needsSpan) return document.createTextNode(text);
+      var content = buildLinkifiedFragment(text);
+      if (!needsSpan) return content;
       const s = document.createElement('span');
       if (ansiState.bold)          s.classList.add('ansi-bold');
       if (ansiState.dim)           s.classList.add('ansi-dim');
@@ -2006,7 +2105,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       else if (localFg)       s.classList.add('ansi-fg-' + localFg);
       if (localBgRgb)         s.style.backgroundColor = localBgRgb;
       else if (localBg)       s.classList.add('ansi-bg-' + localBg);
-      s.appendChild(document.createTextNode(text));
+      s.appendChild(content);
       return s;
     }
 
@@ -2043,6 +2142,35 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         if (file && line) { openFile(file, line); }
         return;
       }
+      // Serial file:line link - require Ctrl/Cmd+click (matches PIO monitor UX
+      // and avoids stealing plain clicks used for text selection).
+      var serialLink = target.closest('.serial-file-link');
+      if (serialLink && (e.ctrlKey || e.metaKey)) {
+        var sFile = serialLink.getAttribute('data-file');
+        var sLine = serialLink.getAttribute('data-line');
+        var sCol = serialLink.getAttribute('data-column');
+        if (sFile && sLine) {
+          e.preventDefault();
+          vscode.postMessage({ type: 'openFile', file: sFile, line: sLine, column: sCol || undefined });
+        }
+        return;
+      }
+    });
+
+    // Show pointer cursor on serial-file-link only while Ctrl/Cmd is held so
+    // plain mouse interaction (text selection) feels normal.
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Control' || e.key === 'Meta') {
+        document.body.classList.add('mod-link-active');
+      }
+    });
+    document.addEventListener('keyup', function(e) {
+      if (e.key === 'Control' || e.key === 'Meta') {
+        document.body.classList.remove('mod-link-active');
+      }
+    });
+    window.addEventListener('blur', function() {
+      document.body.classList.remove('mod-link-active');
     });
 
     // Button handlers
