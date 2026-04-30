@@ -1523,7 +1523,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     .ansi-fg-blue    { color: rgb( 99,153,255); }
     .ansi-fg-magenta { color: rgb(255,  0,255); }
     .ansi-fg-cyan    { color: rgb(  0,255,255); }
-    .ansi-fg-white   { color: rgb(187,187,187); }
+    .ansi-fg-white   { color: rgb(192,192,192); }
     .ansi-bg-black   { background-color: rgb(  0,  0,  0); }
     .ansi-bg-red     { background-color: rgb(255,  0,  0); }
     .ansi-bg-green   { background-color: rgb(  0,255,  0); }
@@ -1859,6 +1859,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     const LINE_SPLIT_RE = new RegExp('(' + CRLF + '|' + CR + '|' + LF + ')');
 
     // Standard 256-color palette (indices 0-255)
+    // NOTE: This JavaScript logic should be kept in sync with src/ansiParser.ts
+    // to ensure consistency between the webview (browser) and test implementations.
     var ANSI_256 = (function () {
       var t = [];
       // 0-7: standard colors
