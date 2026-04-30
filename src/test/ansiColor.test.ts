@@ -32,15 +32,29 @@ describe('ANSI Color Support', () => {
 
   describe('Text Styles', () => {
     it('should apply bold style (code 1)', () => {
+      // Set preconditions: bold off, dim on - verify bold applies independently
+      state.bold = false;
+      state.dim = true;
+      expect(state.bold).toBe(false);
+      expect(state.dim).toBe(true);
+
       ansiApplyCodes(state, [1]);
       expect(state.bold).toBe(true);
-      expect(state.dim).toBe(false);
+      // dim remains true (only code 22 clears both bold and dim)
+      expect(state.dim).toBe(true);
     });
 
     it('should apply dim style (code 2)', () => {
+      // Set preconditions: dim off, bold on - verify dim applies independently
+      state.dim = false;
+      state.bold = true;
+      expect(state.dim).toBe(false);
+      expect(state.bold).toBe(true);
+
       ansiApplyCodes(state, [2]);
       expect(state.dim).toBe(true);
-      expect(state.bold).toBe(false);
+      // bold remains true (only code 22 clears both bold and dim)
+      expect(state.bold).toBe(true);
     });
 
     it('should apply italic style (code 3)', () => {
@@ -770,6 +784,84 @@ describe('ANSI Color Support', () => {
       expect(state.bold).toBe(true);
       expect(state.italic).toBe(true);
       expect(state.fgRgb).toBe('rgb(255,128,0)');
+    });
+
+    it('should handle split escape-sequence continuity across chunks (ansiTail pattern)', () => {
+      // Simulate chunk processing with ansiTail pattern
+      // First chunk ends mid-ANSI escape (e.g., "\x1b[38;2;255;")
+      const chunk1 = '\x1b[38;2;255;';
+      // Second chunk supplies the remainder (e.g., "128;0m")
+      const chunk2 = '128;0m';
+
+      // Process chunk1 - this simulates what the webview does with ansiTail
+      // In the webview, incomplete escapes at the end are saved to ansiTail
+      // and prepended to the next chunk
+
+      // For this test, we simulate the combined result:
+      // ansiTail + chunk2 forms the complete escape sequence
+      let ansiTail = '';
+
+      // Check if chunk1 ends with incomplete escape
+      const lastEscape1 = chunk1.lastIndexOf('\x1b');
+      if (lastEscape1 >= 0) {
+        const candidate1 = chunk1.substring(lastEscape1);
+        const completeEscape1 = /^\x1b(?:\[[0-9;?]*[\x20-\x2f]*[\x40-\x7e]|[^\[][^\x00-\x1f]?)/.test(candidate1);
+        if (!completeEscape1) {
+          ansiTail = candidate1;
+        }
+      }
+
+      // Verify ansiTail captured the incomplete escape
+      expect(ansiTail).toBe('\x1b[38;2;255;');
+
+      // Process combined: ansiTail + chunk2
+      const combinedText = ansiTail + chunk2;
+      const escapeMatch = combinedText.match(/\x1b\[([0-9;]*)m/);
+      expect(escapeMatch).not.toBeNull();
+
+      if (escapeMatch) {
+        const codes = escapeMatch[1].split(';').map((c) => parseInt(c, 10) || 0);
+        ansiApplyCodes(state, codes);
+      }
+
+      // Verify state reflects the full escape (orange color: rgb(255,128,0))
+      expect(state.fgRgb).toBe('rgb(255,128,0)');
+
+      // Simulate font attributes also being set in the same sequence
+      // Reset and test with bold/italic prefix
+      ansiTail = '';
+      const chunk1WithAttrs = '\x1b[1;3;38;2;255;';
+      const chunk2WithAttrs = '128;0m';
+
+      const lastEscape2 = chunk1WithAttrs.lastIndexOf('\x1b');
+      if (lastEscape2 >= 0) {
+        const candidate2 = chunk1WithAttrs.substring(lastEscape2);
+        const completeEscape2 = /^\x1b(?:\[[0-9;?]*[\x20-\x2f]*[\x40-\x7e]|[^\[][^\x00-\x1f]?)/.test(candidate2);
+        if (!completeEscape2) {
+          ansiTail = candidate2;
+        }
+      }
+
+      expect(ansiTail).toBe('\x1b[1;3;38;2;255;');
+
+      const combinedWithAttrs = ansiTail + chunk2WithAttrs;
+      const escapeMatch2 = combinedWithAttrs.match(/\x1b\[([0-9;]*)m/);
+      expect(escapeMatch2).not.toBeNull();
+
+      if (escapeMatch2) {
+        const codes2 = escapeMatch2[1].split(';').map((c) => parseInt(c, 10) || 0);
+        ansiApplyCodes(state, [0]); // reset first
+        ansiApplyCodes(state, codes2);
+      }
+
+      // Verify both color and font attributes restored correctly
+      expect(state.bold).toBe(true);
+      expect(state.italic).toBe(true);
+      expect(state.fgRgb).toBe('rgb(255,128,0)');
+
+      // Clear ansiTail after successful processing
+      ansiTail = '';
+      expect(ansiTail).toBe('');
     });
   });
 });
