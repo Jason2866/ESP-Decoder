@@ -281,25 +281,30 @@ export class SerialPortManager extends vscode.Disposable {
           this._onData.fire(data);
         });
         this._isConnected = true;
-        // Capture device identity for VID/PID/serialNumber-matching reconnect.
-        this.captureDeviceIdentity().catch(() => {
-          /* best effort — identity is only used for auto-reconnect matching */
-        });
-        // If this open happened inside a reconnect window, arm the stability
-        // timer. The window only ends if the port stays open for STABILITY_MS.
-        if (this._isReconnecting) {
-          this.clearStabilityTimer();
-          this._stabilityTimer = setTimeout(() => {
-            this._stabilityTimer = null;
-            if (this._isConnected) {
-              this._isReconnecting = false;
-              this._reconnectDeadline = 0;
-              this.log.appendLine('[ESP Decoder] auto-reconnect: connection stable');
+        // Capture device identity BEFORE firing connection-change / resolving,
+        // so that an immediate reset (within a few hundred ms of connect)
+        // still finds VID/PID/SN populated when startAutoReconnect runs.
+        // This is awaited but typically completes in <100 ms.
+        void this.captureDeviceIdentity()
+          .catch(() => { /* best effort — identity used only for reconnect matching */ })
+          .then(() => {
+            // If this open happened inside a reconnect window, arm the
+            // stability timer. The window only ends if the port stays open
+            // for STABILITY_MS without a close.
+            if (this._isReconnecting) {
+              this.clearStabilityTimer();
+              this._stabilityTimer = setTimeout(() => {
+                this._stabilityTimer = null;
+                if (this._isConnected) {
+                  this._isReconnecting = false;
+                  this._reconnectDeadline = 0;
+                  this.log.appendLine('[ESP Decoder] auto-reconnect: connection stable');
+                }
+              }, SerialPortManager.STABILITY_MS);
             }
-          }, SerialPortManager.STABILITY_MS);
-        }
-        this._onConnectionChange.fire(true);
-        resolve(true);
+            this._onConnectionChange.fire(true);
+            resolve(true);
+          });
       });
     });
   }
@@ -509,6 +514,11 @@ export class SerialPortManager extends vscode.Disposable {
         this.log.appendLine('[ESP Decoder] auto-reconnect: timed out waiting for device');
         this._isReconnecting = false;
         this._reconnectDeadline = 0;
+        // Surface the failure so the user knows reconnection gave up rather
+        // than silently never coming back.
+        vscode.window.showWarningMessage(
+          `ESP Decoder: auto-reconnect timed out — device with VID=${targetVid ?? '?'} PID=${targetPid ?? '?'} did not reappear.`
+        );
         return;
       }
       let ports: SerialPortInfo[] = [];
@@ -590,17 +600,22 @@ export class SerialPortManager extends vscode.Disposable {
  * they're swallowed so the monitor stays quiet until either a stable
  * connection forms or the reconnect deadline expires.
  */
-function isTransientReconnectError(err: Error): boolean {
+export function isTransientReconnectError(err: Error): boolean {
   const msg = err.message.toLowerCase();
   // POSIX: ENXIO (no such device), EIO (input/output error), ENOENT,
   // EBADF (bad file descriptor), ENODEV (no such device), EAGAIN.
   // macOS: "device not configured".
-  // Windows: "access denied", "operation aborted", "the device does not
-  // recognize the command", "the i/o operation has been aborted".
+  // Windows: "operation aborted", "the device does not recognize the command",
+  // "the i/o operation has been aborted", "cannot find the file specified".
+  //
+  // NOTE: "access denied" is intentionally NOT suppressed. On Windows it
+  // typically means another process is holding the port (bootloader tool,
+  // Zadig, another serial monitor) — that is actionable for the user, and
+  // silently swallowing it during a reconnect window would hide the real
+  // reason reconnection never succeeds.
   return /\b(enxio|eio|enoent|ebadf|enodev|eagain|eacces)\b/.test(msg)
     || msg.includes('no such device')
     || msg.includes('device not configured')
-    || msg.includes('access denied')
     || msg.includes('operation aborted')
     || msg.includes('i/o operation has been aborted')
     || msg.includes('does not recognize the command')

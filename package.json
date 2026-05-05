@@ -161,11 +161,6 @@
           "default": 15000,
           "description": "Maximum time (in milliseconds) to keep polling for the device to reappear before giving up auto-reconnect."
         },
-        "esp-decoder.debugLogging": {
-          "type": "boolean",
-          "default": false,
-          "description": "Emit verbose diagnostic messages (e.g. internal state of the serial-port manager, auto-reconnect classification) to the ESP Decoder output channel. Enable when troubleshooting; leave off for normal use."
-        },
         "esp-decoder.logDirectory": {
           "type": "string",
           "default": "logs",
@@ -209,6 +204,11 @@
           "minimum": 1,
           "default": 3,
           "description": "Number of regex matches to show before collapsing repeated characters (dedupPattern)"
+        },
+        "esp-decoder.debugLogging": {
+          "type": "boolean",
+          "default": false,
+          "description": "Emit verbose diagnostic messages (e.g. internal state of the serial-port manager, auto-reconnect classification) to the ESP Decoder output channel. Enable when troubleshooting; leave off for normal use."
         }
       }
     }
