@@ -219,8 +219,8 @@ export class SerialPortManager extends vscode.Disposable {
       }
 
       this.port.on('error', (err: Error) => {
-        if (this._isReconnecting && isTransientReconnectError(err)) {
-          this.log.appendLine(`[ESP Decoder] suppressed transient error during reconnect: ${err.message}`);
+        if (this.shouldSuppressTransient(err)) {
+          this.log.appendLine(`[ESP Decoder] suppressed transient error (auto-reconnect): ${err.message}`);
           return;
         }
         this._onError.fire(err);
@@ -230,8 +230,8 @@ export class SerialPortManager extends vscode.Disposable {
         // Cancel any pending stability check — connection didn't last.
         this.clearStabilityTimer();
         if (disconnectError) {
-          if (this._isReconnecting && isTransientReconnectError(disconnectError)) {
-            this.log.appendLine(`[ESP Decoder] suppressed transient close error during reconnect: ${disconnectError.message}`);
+          if (this.shouldSuppressTransient(disconnectError)) {
+            this.log.appendLine(`[ESP Decoder] suppressed transient close error (auto-reconnect): ${disconnectError.message}`);
           } else {
             this._onError.fire(disconnectError);
           }
@@ -307,6 +307,30 @@ export class SerialPortManager extends vscode.Disposable {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
+  }
+
+  /**
+   * True if a transient I/O error (ENXIO/EIO/etc.) should be swallowed instead
+   * of surfaced to the user. Suppression applies whenever the auto-reconnect
+   * setting is enabled, even for the very first error of a reset cycle —
+   * before {@link startAutoReconnect} has been called — so the user never sees
+   * a stray "ENXIO: no such device" toast for a reset they expect to recover.
+   */
+  private shouldSuppressTransient(err: Error): boolean {
+    if (!isTransientReconnectError(err)) {
+      return false;
+    }
+    if (this._isReconnecting) {
+      return true;
+    }
+    return this.isAutoReconnectEnabled();
+  }
+
+  /** Read the current auto-reconnect setting from the workspace config. */
+  private isAutoReconnectEnabled(): boolean {
+    return vscode.workspace
+      .getConfiguration('esp-decoder')
+      .get<boolean>('serialMonitor.autoReconnect', false);
   }
 
   /** Look up and cache VID/PID/serialNumber for the currently connected port. */
