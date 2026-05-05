@@ -101,6 +101,9 @@ vi.mock('../serialPortManager.js', () => {
       onData = vi.fn(() => ({ dispose: vi.fn() }));
       onError = vi.fn(() => ({ dispose: vi.fn() }));
       onConnectionChange = vi.fn(() => ({ dispose: vi.fn() }));
+      onDisconnect = vi.fn(() => ({ dispose: vi.fn() }));
+      startAutoReconnect = vi.fn();
+      cancelReconnect = vi.fn();
       isConnected = false;
       selectedPath = undefined;
       baudRate = 115200;

@@ -113,6 +113,23 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       })
     );
 
+    // Auto-reconnect on unexpected disconnects (e.g. native USB-CDC reset)
+    this.disposables.push(
+      this.serialManager.onDisconnect((info) => {
+        if (info.userInitiated || info.suspended) {
+          return;
+        }
+        const cfg = vscode.workspace.getConfiguration('esp-decoder');
+        const enabled = cfg.get<boolean>('serialMonitor.autoReconnect', false);
+        if (!enabled) {
+          return;
+        }
+        const timeoutMs = cfg.get<number>('serialMonitor.autoReconnectTimeoutMs', 15000);
+        this.log.appendLine(`[ESP Decoder] Unexpected disconnect — starting auto-reconnect (timeout ${timeoutMs}ms)`);
+        this.serialManager.startAutoReconnect(timeoutMs);
+      })
+    );
+
     // Listen to crash events from trbr's capturer
     this.disposables.push(
       this.crashCapturer.onCrashDetected(async (event) => {

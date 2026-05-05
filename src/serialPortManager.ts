@@ -10,6 +10,13 @@ export interface SerialPortInfo {
   friendlyName?: string;
 }
 
+export interface DisconnectInfo {
+  /** True when the user explicitly requested the disconnect (UI button / command). */
+  userInitiated: boolean;
+  /** True when the disconnect was triggered by releasePort() for an upload. */
+  suspended: boolean;
+}
+
 export class SerialPortManager extends vscode.Disposable {
   private port: SerialPort | null = null;
   private _selectedPath: string | undefined;
@@ -17,6 +24,21 @@ export class SerialPortManager extends vscode.Disposable {
   private _isConnected = false;
   private readonly log: vscode.OutputChannel;
   private readonly ownsLog: boolean;
+
+  // Identity of the currently/last connected device — used to match the same
+  // physical board when it re-enumerates (e.g. native USB-CDC after reset).
+  private _connectedVendorId: string | undefined;
+  private _connectedProductId: string | undefined;
+  private _connectedSerialNumber: string | undefined;
+
+  // Disconnect intent flags — read by listeners on the next 'connectionChange'
+  // event to decide whether an unexpected close should trigger auto-reconnect.
+  private _userInitiatedDisconnect = false;
+  private _suppressErrorToasts = false;
+
+  // Auto-reconnect polling state
+  private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _reconnectDeadline = 0;
 
   private readonly _onData = new vscode.EventEmitter<Buffer>();
   readonly onData = this._onData.event;
@@ -26,6 +48,10 @@ export class SerialPortManager extends vscode.Disposable {
 
   private readonly _onConnectionChange = new vscode.EventEmitter<boolean>();
   readonly onConnectionChange = this._onConnectionChange.event;
+
+  private readonly _onDisconnect = new vscode.EventEmitter<DisconnectInfo>();
+  /** Fired immediately after a transition to disconnected, with intent info. */
+  readonly onDisconnect = this._onDisconnect.event;
 
   // State for temporary port release (e.g., during pioarduino upload)
   private _suspendedPath: string | undefined;
@@ -143,6 +169,10 @@ export class SerialPortManager extends vscode.Disposable {
       }
     }
 
+    // A successful or attempted connect cancels any in-flight auto-reconnect
+    // loop; we are intentionally taking control of the port now.
+    this.cancelReconnect();
+
     return new Promise<boolean>((resolve) => {
       this.log.appendLine(`[ESP Decoder] Creating SerialPort instance for ${this._selectedPath} @ ${this._baudRate}`);
       try {
@@ -156,9 +186,11 @@ export class SerialPortManager extends vscode.Disposable {
         );
       } catch (err) {
         this.log.appendLine(`[ESP Decoder] Failed to create SerialPort: ${err instanceof Error ? err.message : err}`);
-        vscode.window.showErrorMessage(
-          `Failed to create serial port: ${err instanceof Error ? err.message : err}`
-        );
+        if (!this._suppressErrorToasts) {
+          vscode.window.showErrorMessage(
+            `Failed to create serial port: ${err instanceof Error ? err.message : err}`
+          );
+        }
         this.port = null;
         resolve(false);
         return;
@@ -175,15 +207,25 @@ export class SerialPortManager extends vscode.Disposable {
         this.port = null;
         if (this._isConnected) {
           this._isConnected = false;
+          const info: DisconnectInfo = {
+            userInitiated: this._userInitiatedDisconnect,
+            suspended: this._suspendedPath !== undefined,
+          };
+          // Reset the intent flag so the next close (e.g. unexpected USB drop)
+          // is correctly classified as not user-initiated.
+          this._userInitiatedDisconnect = false;
           this._onConnectionChange.fire(false);
+          this._onDisconnect.fire(info);
         }
       });
 
       this.port.open((err) => {
         if (err) {
-          vscode.window.showErrorMessage(
-            `Failed to open ${this._selectedPath}: ${err.message}`
-          );
+          if (!this._suppressErrorToasts) {
+            vscode.window.showErrorMessage(
+              `Failed to open ${this._selectedPath}: ${err.message}`
+            );
+          }
           this.port = null;
           resolve(false);
           return;
@@ -194,26 +236,58 @@ export class SerialPortManager extends vscode.Disposable {
           this._onData.fire(data);
         });
         this._isConnected = true;
+        // Capture device identity for VID/PID/serialNumber-matching reconnect.
+        this.captureDeviceIdentity().catch(() => {
+          /* best effort — identity is only used for auto-reconnect matching */
+        });
         this._onConnectionChange.fire(true);
         resolve(true);
       });
     });
   }
 
+  /** Look up and cache VID/PID/serialNumber for the currently connected port. */
+  private async captureDeviceIdentity(): Promise<void> {
+    if (!this._selectedPath) {
+      return;
+    }
+    try {
+      const ports = await SerialPort.list();
+      const match = ports.find((p) => p.path === this._selectedPath);
+      if (match) {
+        this._connectedVendorId = match.vendorId;
+        this._connectedProductId = match.productId;
+        this._connectedSerialNumber = match.serialNumber;
+        this.log.appendLine(
+          `[ESP Decoder] Connected device identity: VID=${match.vendorId ?? '?'} PID=${match.productId ?? '?'} SN=${match.serialNumber ?? '?'}`
+        );
+      }
+    } catch {
+      /* ignore — identity capture is best-effort */
+    }
+  }
+
   async disconnect(): Promise<void> {
+    // Cancel any pending auto-reconnect — an explicit disconnect always wins.
+    this.cancelReconnect();
+    this._userInitiatedDisconnect = true;
     return new Promise<void>((resolve, reject) => {
       if (!this.port || !this._isConnected) {
         this._isConnected = false;
+        this._userInitiatedDisconnect = false;
         this._onConnectionChange.fire(false);
+        this._onDisconnect.fire({ userInitiated: true, suspended: false });
         resolve();
         return;
       }
 
       this.port.close((err) => {
         if (err) {
+          // Reset the intent flag on failure so we don't lie about the next close.
+          this._userInitiatedDisconnect = false;
           reject(err);
         } else {
-          // The 'close' event handler will set _isConnected and fire the event
+          // The 'close' event handler will set _isConnected and fire the events
           resolve();
         }
       });
@@ -282,15 +356,135 @@ export class SerialPortManager extends vscode.Disposable {
     this._suspendedBaudRate = undefined;
   }
 
+  /**
+   * Begin polling for the previously connected device to reappear, then
+   * reconnect to it. The poll only matches a port whose VID/PID/serialNumber
+   * exactly equal the values captured at the most recent successful connect,
+   * so a different device plugged in afterwards is never auto-attached.
+   *
+   * Safe to call repeatedly — only one polling loop runs at a time.
+   * Cancelled automatically by {@link connect}, {@link disconnect}, and
+   * {@link dispose}.
+   *
+   * @param timeoutMs Total wall-clock budget for polling.
+   * @param pollIntervalMs Delay between port-list polls.
+   */
+  startAutoReconnect(timeoutMs: number, pollIntervalMs = 500): void {
+    if (this._reconnectTimer) {
+      // Already running — don't stack timers.
+      return;
+    }
+    if (this._isConnected) {
+      return;
+    }
+    if (!this._connectedVendorId && !this._connectedProductId && !this._connectedSerialNumber) {
+      this.log.appendLine('[ESP Decoder] auto-reconnect skipped: no device identity captured');
+      return;
+    }
+    const targetVid = this._connectedVendorId;
+    const targetPid = this._connectedProductId;
+    const targetSn = this._connectedSerialNumber;
+    const previousPath = this._selectedPath;
+    this._reconnectDeadline = Date.now() + timeoutMs;
+    this.log.appendLine(
+      `[ESP Decoder] auto-reconnect armed: VID=${targetVid ?? '?'} PID=${targetPid ?? '?'} SN=${targetSn ?? '?'} timeout=${timeoutMs}ms`
+    );
+
+    const poll = async (): Promise<void> => {
+      this._reconnectTimer = null;
+      if (this._isConnected) {
+        return;
+      }
+      if (Date.now() > this._reconnectDeadline) {
+        this.log.appendLine('[ESP Decoder] auto-reconnect: timed out waiting for device');
+        return;
+      }
+      let ports: SerialPortInfo[] = [];
+      try {
+        ports = await this.listPorts();
+      } catch {
+        ports = [];
+      }
+      const match = ports.find((p) =>
+        portIdentityMatches(p, targetVid, targetPid, targetSn)
+      );
+      if (match) {
+        this.log.appendLine(
+          `[ESP Decoder] auto-reconnect: matched device at ${match.path} (was ${previousPath ?? '?'})`
+        );
+        this._selectedPath = match.path;
+        this._suppressErrorToasts = true;
+        try {
+          const ok = await this.connect();
+          if (!ok) {
+            // Open failed (device may not be fully ready) — try again.
+            this._reconnectTimer = setTimeout(() => { void poll(); }, pollIntervalMs);
+          }
+        } finally {
+          this._suppressErrorToasts = false;
+        }
+        return;
+      }
+      this._reconnectTimer = setTimeout(() => { void poll(); }, pollIntervalMs);
+    };
+
+    // First poll runs after a short delay to give the OS time to enumerate.
+    this._reconnectTimer = setTimeout(() => { void poll(); }, pollIntervalMs);
+  }
+
+  /** Cancel any in-flight auto-reconnect polling loop. */
+  cancelReconnect(): void {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    this._reconnectDeadline = 0;
+  }
+
   dispose(): void {
+    this.cancelReconnect();
     if (this.port && this._isConnected) {
       this.port.close();
     }
     this._onData.dispose();
     this._onError.dispose();
     this._onConnectionChange.dispose();
+    this._onDisconnect.dispose();
     if (this.ownsLog) {
       this.log.dispose();
     }
   }
+}
+
+/**
+ * Returns true when `port` has the same VID, PID, and serialNumber as the
+ * given target identity. At least one of the three target fields must be
+ * defined, and every defined target field must match exactly. This avoids
+ * matching a different device that happens to enumerate at the same path.
+ */
+function portIdentityMatches(
+  port: SerialPortInfo,
+  vendorId: string | undefined,
+  productId: string | undefined,
+  serialNumber: string | undefined
+): boolean {
+  const targets: Array<[string | undefined, string | undefined]> = [
+    [vendorId, port.vendorId],
+    [productId, port.productId],
+    [serialNumber, port.serialNumber],
+  ];
+  let anyDefined = false;
+  for (const [target, actual] of targets) {
+    if (target === undefined) {
+      continue;
+    }
+    anyDefined = true;
+    if (actual === undefined) {
+      return false;
+    }
+    if (target.toLowerCase() !== actual.toLowerCase()) {
+      return false;
+    }
+  }
+  return anyDefined;
 }
