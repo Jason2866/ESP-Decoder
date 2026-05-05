@@ -426,13 +426,13 @@ describe('decodeCrash – ESP8266 raw decode', () => {
     };
   }
 
-  it('extracts Exception 28 as LoadProhibited fault message', async () => {
+  it('extracts Exception 28 as "Access to invalid address: LOAD" fault message', async () => {
     const event = makeEsp8266CrashEvent();
     const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', '/nonexistent/gdb', 'xtensa');
 
     expect(decoded.toolsMissing).toBe(true);
     expect(decoded.faultInfo).toBeDefined();
-    expect(decoded.faultInfo?.faultMessage).toContain('LoadProhibited');
+    expect(decoded.faultInfo?.faultMessage).toContain('Access to invalid address: LOAD (wild pointer?)');
     expect(decoded.faultInfo?.faultCode).toBe(28);
   });
 
@@ -566,7 +566,7 @@ done
 
     expect(decoded.faultInfo).toBeDefined();
     expect(decoded.faultInfo?.faultCode).toBe(28);
-    expect(decoded.faultInfo?.faultMessage).toContain('LoadProhibited');
+    expect(decoded.faultInfo?.faultMessage).toContain('Access to invalid address: LOAD (wild pointer?)');
   });
 });
 

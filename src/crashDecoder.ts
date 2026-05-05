@@ -1437,34 +1437,40 @@ const RISCV_EXCEPTIONS: Record<number, string> = {
 /**
  * Xtensa exception cause descriptions.
  */
+// ESP8266 / Xtensa exception code descriptions
+// ESP8266_EXCEPTION_CODES table based on: 
+// https://github.com/me-no-dev/EspExceptionDecoder
 const XTENSA_EXCEPTIONS: (string | null)[] = [
-  'IllegalInstruction',         // 0
-  'Syscall',                    // 1
-  'InstructionFetchError',      // 2
-  'LoadStoreError',             // 3
-  'Level1Interrupt',            // 4
-  'Alloca',                     // 5
-  'IntegerDivideByZero',        // 6
-  null,                         // 7 reserved
-  'Privileged',                 // 8
-  'LoadStoreAlignment',         // 9
-  null, null,                   // 10-11 reserved
-  'InstrPIFDataError',          // 12
-  'LoadStorePIFDataError',      // 13
-  'InstrPIFAddrError',          // 14
-  'LoadStorePIFAddrError',      // 15
-  'InstTLBMiss',                // 16
-  'InstTLBMultiHit',            // 17
-  'InstFetchPrivilege',         // 18
-  null,                         // 19 reserved
-  'InstFetchProhibited',        // 20
-  null, null, null,             // 21-23 reserved
-  'LoadStoreTLBMiss',           // 24
-  'LoadStoreTLBMultiHit',       // 25
-  'LoadStorePrivilege',         // 26
-  null,                         // 27 reserved
-  'LoadProhibited',             // 28
-  'StoreProhibited',            // 29
+  'Illegal instruction (Is the flash damaged?)',                                                                        // 0
+  'SYSCALL instruction',                                                                                                // 1
+  'InstructionFetchError: Processor internal physical address or data error during instruction fetch',                  // 2
+  'LoadStoreError: Processor internal physical address or data error during load or store',                             // 3
+  'Level1Interrupt: Level-1 interrupt as indicated by set level-1 bits in the INTERRUPT register',                      // 4
+  "Alloca: MOVSP instruction, if caller's registers are not in the register file",                                      // 5
+  'Integer Divide By Zero',                                                                                             // 6
+  'reserved',                                                                                                           // 7
+  'Privileged: Attempt to execute a privileged operation when CRING ? 0',                                               // 8
+  'LoadStoreAlignmentCause: Load or store to an unaligned address',                                                     // 9
+  'reserved',                                                                                                           // 10
+  'reserved',                                                                                                           // 11
+  'InstrPIFDataError: PIF data error during instruction fetch',                                                         // 12
+  'LoadStorePIFDataError: Synchronous PIF data error during LoadStore access',                                          // 13
+  'InstrPIFAddrError: PIF address error during instruction fetch',                                                      // 14
+  'LoadStorePIFAddrError: Synchronous PIF address error during LoadStore access',                                       // 15
+  'InstTLBMiss: Error during Instruction TLB refill',                                                                   // 16
+  'InstTLBMultiHit: Multiple instruction TLB entries matched',                                                          // 17
+  'InstFetchPrivilege: An instruction fetch referenced a virtual address at a ring level less than CRING',              // 18
+  'reserved',                                                                                                           // 19
+  'InstFetchProhibited: An instruction fetch referenced a page mapped with an attribute that does not permit instruction fetch', // 20
+  'reserved',                                                                                                           // 21
+  'reserved',                                                                                                           // 22
+  'reserved',                                                                                                           // 23
+  'LoadStoreTLBMiss: Error during TLB refill for a load or store',                                                      // 24
+  'LoadStoreTLBMultiHit: Multiple TLB entries matched for a load or store',                                             // 25
+  'LoadStorePrivilege: A load or store referenced a virtual address at a ring level less than ',                        // 26
+  'reserved',                                                                                                           // 27
+  'Access to invalid address: LOAD (wild pointer?)',                                                                    // 28
+  'Access to invalid address: STORE (wild pointer?)',                                                                   // 29
 ];
 
 /**
@@ -1692,9 +1698,9 @@ function parseXtensaFaultInfo(text: string): DecodedCrash['faultInfo'] | undefin
   if (faultCode !== undefined && faultCode < XTENSA_EXCEPTIONS.length) {
     const desc = XTENSA_EXCEPTIONS[faultCode];
     if (desc && !faultMessage) {
-      faultMessage = desc;
+      faultMessage = `Exception ${faultCode}: ${desc}`;
     } else if (desc && faultMessage) {
-      faultMessage = `${faultMessage} (${desc})`;
+      faultMessage = `${faultMessage} (Exception ${faultCode}: ${desc})`;
     }
   }
 
