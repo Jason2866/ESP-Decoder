@@ -111,7 +111,7 @@ export class SerialPortManager extends vscode.Disposable {
     return ports;
   }
 
-  async listPorts(): Promise<SerialPortInfo[]> {
+  async listPorts(suppressToasts = false): Promise<SerialPortInfo[]> {
     try {
       const ports = await SerialPort.list();
       const mappedPorts = ports.map((p) => ({
@@ -124,9 +124,18 @@ export class SerialPortManager extends vscode.Disposable {
       }));
       return this.filterPorts(mappedPorts);
     } catch (err) {
-      vscode.window.showErrorMessage(
-        `Failed to list serial ports: ${err instanceof Error ? err.message : err}`
-      );
+      // Background callers (auto-reconnect poll, identity capture) pass
+      // suppressToasts=true so a transient enumeration failure does not flood
+      // the user with modal error messages mid-reset cycle.
+      if (!suppressToasts) {
+        vscode.window.showErrorMessage(
+          `Failed to list serial ports: ${err instanceof Error ? err.message : err}`
+        );
+      } else {
+        this.log.appendLine(
+          `[ESP Decoder] listPorts failed (suppressed): ${err instanceof Error ? err.message : err}`
+        );
+      }
       return [];
     }
   }
@@ -339,7 +348,8 @@ export class SerialPortManager extends vscode.Disposable {
       return;
     }
     try {
-      const ports = await SerialPort.list();
+      // Background lookup — never raise toasts on enumeration failure.
+      const ports = await this.listPorts(/* suppressToasts */ true);
       const match = ports.find((p) => p.path === this._selectedPath);
       if (match) {
         this._connectedVendorId = match.vendorId;
@@ -503,9 +513,16 @@ export class SerialPortManager extends vscode.Disposable {
       }
       let ports: SerialPortInfo[] = [];
       try {
-        ports = await this.listPorts();
+        ports = await this.listPorts(/* suppressToasts */ true);
       } catch {
         ports = [];
+      }
+      // Re-check the reconnect guard after the await: cancelReconnect() or
+      // disconnect() may have run while we were enumerating ports, in which
+      // case we must not mutate _selectedPath / _suppressErrorToasts or call
+      // connect() — that would silently undo the user's cancel.
+      if (!this._isReconnecting || this._isConnected) {
+        return;
       }
       const match = ports.find((p) =>
         portIdentityMatches(p, targetVid, targetPid, targetSn)
