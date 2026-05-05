@@ -1449,7 +1449,7 @@ const XTENSA_EXCEPTIONS: (string | null)[] = [
   "Alloca: MOVSP instruction, if caller's registers are not in the register file",                                      // 5
   'Integer Divide By Zero',                                                                                             // 6
   'reserved',                                                                                                           // 7
-  'Privileged: Attempt to execute a privileged operation when CRING ? 0',                                               // 8
+  'Privileged: Attempt to execute a privileged operation when CRING != 0',                                              // 8
   'LoadStoreAlignmentCause: Load or store to an unaligned address',                                                     // 9
   'reserved',                                                                                                           // 10
   'reserved',                                                                                                           // 11
@@ -1467,7 +1467,7 @@ const XTENSA_EXCEPTIONS: (string | null)[] = [
   'reserved',                                                                                                           // 23
   'LoadStoreTLBMiss: Error during TLB refill for a load or store',                                                      // 24
   'LoadStoreTLBMultiHit: Multiple TLB entries matched for a load or store',                                             // 25
-  'LoadStorePrivilege: A load or store referenced a virtual address at a ring level less than ',                        // 26
+  'LoadStorePrivilege: A load or store referenced a virtual address at a ring level less than CRING',                   // 26
   'reserved',                                                                                                           // 27
   'Access to invalid address: LOAD (wild pointer?)',                                                                    // 28
   'Access to invalid address: STORE (wild pointer?)',                                                                   // 29
