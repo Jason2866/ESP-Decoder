@@ -87,6 +87,11 @@ export function activate(context: vscode.ExtensionContext) {
         // already-selected serial port (and optionally baud rate) and request
         // an immediate connect, so the user does not have to pick the port
         // again inside ESP Decoder.
+        // Capture the live values BEFORE applying any overrides, so we can
+        // detect port- or baud-rate-only changes and force a reconnect.
+        const prevPort = serialManager.selectedPath;
+        const prevBaud = serialManager.baudRate;
+
         if (opts?.port) {
           serialManager.setPort(opts.port);
         }
@@ -112,11 +117,11 @@ export function activate(context: vscode.ExtensionContext) {
           opts?.autoConnect ?? Boolean(opts?.port);
         if (shouldAutoConnect) {
           try {
-            if (
-              serialManager.isConnected &&
-              opts?.port &&
-              serialManager.selectedPath !== opts.port
-            ) {
+            const portChanged =
+              !!opts?.port && opts.port !== prevPort;
+            const baudChanged =
+              typeof opts?.baudRate === 'number' && opts.baudRate !== prevBaud;
+            if (serialManager.isConnected && (portChanged || baudChanged)) {
               await serialManager.disconnect();
             }
             if (!serialManager.isConnected) {
