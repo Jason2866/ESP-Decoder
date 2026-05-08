@@ -80,18 +80,61 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Register commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('esp-decoder.openMonitor', () => {
-      if (viewProvider) {
-        const config = vscode.workspace.getConfiguration('esp-decoder');
-        const monitorLocation = config.get<string>('monitorLocation', 'panel');
-        
-        if (monitorLocation === 'editor') {
-          viewProvider.showAsEditor();
-        } else {
-          viewProvider.show();
+    vscode.commands.registerCommand(
+      'esp-decoder.openMonitor',
+      async (opts?: { port?: string; baudRate?: number; autoConnect?: boolean }) => {
+        // Allow callers (e.g. pioarduino's "Monitor" task) to hand over the
+        // already-selected serial port (and optionally baud rate) and request
+        // an immediate connect, so the user does not have to pick the port
+        // again inside ESP Decoder.
+        if (opts?.port) {
+          serialManager.setPort(opts.port);
+        }
+        if (typeof opts?.baudRate === 'number') {
+          serialManager.setBaudRate(opts.baudRate);
+        }
+
+        if (viewProvider) {
+          const config = vscode.workspace.getConfiguration('esp-decoder');
+          const monitorLocation = config.get<string>('monitorLocation', 'panel');
+
+          if (monitorLocation === 'editor') {
+            viewProvider.showAsEditor();
+          } else {
+            viewProvider.show();
+          }
+        }
+
+        // Auto-connect when requested. Defaults to true if a port was passed
+        // in, false otherwise (preserves the previous "just open the panel"
+        // behaviour when called without arguments, e.g. from the status bar).
+        const shouldAutoConnect =
+          opts?.autoConnect ?? Boolean(opts?.port);
+        if (shouldAutoConnect) {
+          try {
+            if (
+              serialManager.isConnected &&
+              opts?.port &&
+              serialManager.selectedPath !== opts.port
+            ) {
+              await serialManager.disconnect();
+            }
+            if (!serialManager.isConnected) {
+              const ok = await serialManager.connect();
+              if (ok) {
+                vscode.window.showInformationMessage(
+                  `ESP Decoder connected to ${serialManager.selectedPath} @ ${serialManager.baudRate}`
+                );
+              }
+            }
+          } catch (err) {
+            vscode.window.showErrorMessage(
+              `ESP Decoder auto-connect failed: ${err instanceof Error ? err.message : String(err)}`
+            );
+          }
         }
       }
-    })
+    )
   );
 
   context.subscriptions.push(

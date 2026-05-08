@@ -91,6 +91,22 @@ export class SerialPortManager extends vscode.Disposable {
     return this._isConnected;
   }
 
+  /**
+   * Programmatically set the serial port path (used by external integrations,
+   * e.g. pioarduino's "Monitor" task that hands the configured upload/monitor
+   * port over to ESP Decoder so the user does not have to pick it again).
+   */
+  setPort(path: string): void {
+    this._selectedPath = path;
+  }
+
+  /** Programmatically set the baud rate. */
+  setBaudRate(rate: number): void {
+    if (Number.isFinite(rate) && rate > 0) {
+      this._baudRate = rate;
+    }
+  }
+
   /** True while an auto-reconnect window is active. */
   get isReconnecting(): boolean {
     return this._isReconnecting;
