@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.25.0] - 2026-05-08
+
+### Added
+- **Programmatic API for pioarduino integration** — the monitor command now accepts optional `port` and `baudRate` parameters, enabling callers (e.g. pioarduino) to open the serial terminal with a pre-selected port and baud rate (#51).
+  - Automatic connection is triggered when the monitor is opened with port parameters.
+  - New `setPort(port)` and `setBaudRate(rate)` APIs allow dynamically configuring the serial port from an external caller.
+  - `setPort` trims input and rejects empty/whitespace-only strings to prevent invalid connections.
+  - `setBaudRate` enforces integer-only baud rates (decimal values such as `115200.5` are rejected).
+  - Auto-connect reconnect guard correctly handles baud-rate-only changes (`portChanged || baudChanged`) by capturing `prevPort` and `prevBaud` before applying new options.
+
 ## [0.24.2] - 2026-05-05
 
 ### Added
