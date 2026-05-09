@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.26.0] - 2026-05-09
+
+### Added
+- **"Upload and Monitor" task interception** — when pioarduino runs its combined "Upload and Monitor" task, ESP Decoder now intercepts it before the CLI monitor can open (#52).
+  - The combined task is terminated immediately; a synthetic upload-only task (with `--target monitor` stripped) runs in its place.
+  - On successful upload (exit code `0`), `esp-decoder.openMonitor` is called with `autoConnect: true`, replacing the CLI terminal with the ESP Decoder serial monitor.
+  - Baud rate is resolved automatically from `monitor_speed` in `platformio.ini` via a new `getMonitorBaudRate()` helper in `pioIntegration.ts`.
+  - Spurious `onDidUpload` events fired when the combined task is killed are suppressed via `suppressingCombinedTask` + `syntheticUploadExecutions` guards to prevent unwanted port reacquisition.
+  - A 10 s safety timeout ensures the synthetic upload starts even if the original task is slow to terminate.
+  - Retry-based port reacquisition (5 attempts, linear back-off from 300 ms) handles OS-level USB device hold after flashing.
+
 ## [0.25.0] - 2026-05-08
 
 ### Added
