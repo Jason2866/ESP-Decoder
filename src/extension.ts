@@ -436,12 +436,21 @@ const PIO_TASK_TYPE = 'PlatformIO';
 const INTERCEPTED_TASK_MARKER = '__espDecoderInterceptedUpload__';
 
 /**
- * True while we are in the middle of replacing pioarduino's combined
- * "Upload and Monitor" task with our own upload-only task.  Used to
- * suppress the spurious `onDidUpload(exitCode != 0)` event that pioarduino
- * fires when we terminate the original combined task.
+ * Tracks synthetic upload-only TaskExecutions created by ESP-Decoder when
+ * intercepting a pioarduino "Upload and Monitor" task.  An execution is
+ * present from the moment executeTask() resolves until after openMonitor /
+ * reacquireWithRetry completes, ensuring pioarduino's onDidUpload is
+ * suppressed for the entire handover window.
  */
-let interceptionInProgress = false;
+const syntheticUploadExecutions = new Set<vscode.TaskExecution>();
+
+/**
+ * True during the brief gap between terminate() of the combined task and
+ * the synthetic task execution being added to syntheticUploadExecutions.
+ * Prevents pioarduino's spurious onDidUpload(exitCode != 0) from slipping
+ * through during that window.
+ */
+let suppressingCombinedTask = false;
 
 /**
  * Detect whether a VSCode task is pioarduino's "Upload and Monitor" task.
@@ -572,21 +581,41 @@ function subscribeToPioarduinoEvents(
         `[ESP Decoder] Intercepting "${task.name}" — running upload only, then opening ESP Decoder monitor`,
       );
 
+      // Register the end listener BEFORE calling terminate() to avoid a race
+      // where onDidEndTask fires before we start listening.
+      const origExecution = event.execution;
+      const originalTaskEnded = new Promise<void>((resolve) => {
+        const sub = vscode.tasks.onDidEndTask((endEvent) => {
+          if (endEvent.execution === origExecution) {
+            sub.dispose();
+            resolve();
+          }
+        });
+        // Safety: resolve after 5 s if onDidEndTask never fires (e.g. window reload).
+        setTimeout(() => { sub.dispose(); resolve(); }, 5_000);
+      });
+
       // Suppress the bogus onDidUpload(exitCode != 0) that pioarduino will
       // fire when we terminate the combined task below.
-      interceptionInProgress = true;
+      suppressingCombinedTask = true;
 
       try {
-        event.execution.terminate();
+        origExecution.terminate();
       } catch (err) {
         log.appendLine(`[ESP Decoder] Failed to terminate combined task: ${err}`);
       }
 
+      // Wait for the original task to fully exit so two pio run processes
+      // never contend for the serial port simultaneously.
+      await originalTaskEnded;
+
       try {
-        await vscode.tasks.executeTask(uploadOnly);
+        const execution = await vscode.tasks.executeTask(uploadOnly);
+        syntheticUploadExecutions.add(execution);
+        suppressingCombinedTask = false;
       } catch (err) {
         log.appendLine(`[ESP Decoder] Failed to launch upload-only replacement task: ${err}`);
-        interceptionInProgress = false;
+        suppressingCombinedTask = false;
       }
     }),
   );
@@ -603,7 +632,6 @@ function subscribeToPioarduinoEvents(
       log.appendLine(
         `[ESP Decoder] Intercepted upload-only task ended (exitCode=${event.exitCode})`,
       );
-      interceptionInProgress = false;
 
       if (event.exitCode === 0) {
         try {
@@ -620,6 +648,21 @@ function subscribeToPioarduinoEvents(
         // Upload failed (or was cancelled): try to reacquire the port so any
         // already-open monitor keeps working.
         await reacquireWithRetry(serial, log);
+      }
+
+      // Clear suppression only after handover operations complete, so any
+      // pioarduino onDidUpload for the synthetic task is still suppressed.
+      syntheticUploadExecutions.delete(event.execution);
+    }),
+  );
+
+  // Fallback cleanup: remove synthetic executions that ended without
+  // onDidEndTaskProcess firing (e.g., task was cancelled before the process
+  // started).  Set.delete is a no-op for executions already removed above.
+  context.subscriptions.push(
+    vscode.tasks.onDidEndTask((event) => {
+      if (event.execution.task.definition?.[INTERCEPTED_TASK_MARKER]) {
+        syntheticUploadExecutions.delete(event.execution);
       }
     }),
   );
@@ -671,9 +714,9 @@ function subscribeToPioarduinoEvents(
         // terminate the combined "Upload and Monitor" task as part of the
         // early-intercept flow above.  The synthetic upload-only task
         // handles its own lifecycle via onDidEndTaskProcess.
-        if (interceptionInProgress) {
+        if (suppressingCombinedTask || syntheticUploadExecutions.size > 0) {
           log.appendLine(
-            `[ESP Decoder] Ignoring onDidUpload (exitCode=${exitCode}) from intercepted combined task`,
+            `[ESP Decoder] Ignoring onDidUpload (exitCode=${exitCode}) — intercepted upload in progress`,
           );
           return;
         }
