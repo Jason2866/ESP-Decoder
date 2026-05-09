@@ -603,9 +603,6 @@ function subscribeToPioarduinoEvents(
         // Safety: resolve after 10 s if onDidEndTask never fires (e.g. window reload).
         setTimeout(() => {
           sub.dispose();
-          log.appendLine(
-            '[ESP Decoder] Original combined task did not end within 10 s — proceeding anyway',
-          );
           resolve();
         }, 10_000);
       });
