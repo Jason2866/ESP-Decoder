@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SerialPortManager } from './serialPortManager';
 import { EspDecoderWebviewPanel, SessionConfig } from './webviewPanel';
-import { findPioEnvironments, selectElfFile } from './pioIntegration';
+import { findPioEnvironments, selectElfFile, getMonitorBaudRate } from './pioIntegration';
 import { findEspIdfBuilds } from './espIdfIntegration';
 
 /** Shape of the public API exported by the pioarduino IDE extension. */
@@ -635,8 +635,16 @@ function subscribeToPioarduinoEvents(
 
       if (event.exitCode === 0) {
         try {
+          const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          const baudRate = workspaceFolder
+            ? await getMonitorBaudRate(workspaceFolder)
+            : undefined;
+          if (baudRate !== undefined) {
+            log.appendLine(`[ESP Decoder] Using monitor_speed=${baudRate} from pioarduino config`);
+          }
           await vscode.commands.executeCommand('esp-decoder.openMonitor', {
             port: serial.selectedPath,
+            ...(baudRate !== undefined ? { baudRate } : {}),
             autoConnect: true,
           });
         } catch (err) {

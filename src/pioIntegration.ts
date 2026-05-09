@@ -571,6 +571,24 @@ function resolveBuildDir(workspaceFolder: string, sections: Sections): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Read the `monitor_speed` value for the given PlatformIO environment using
+ * the ProjectConfig API from pioarduino-node-helpers.
+ * Returns `undefined` when PIO Core is unavailable, the key is absent, or
+ * the env is not found in the project config.
+ */
+export async function getMonitorBaudRate(projectPath: string): Promise<number | undefined> {
+  try {
+    const { ProjectConfig } = (await import('pioarduino-node-helpers')).project;
+    const config = new ProjectConfig(projectPath);
+    await config.read();
+    return config.getEnvMonitorSpeed(config.defaultEnv());
+  } catch {
+    // PIO Core not available or project not configured — ignore
+  }
+  return undefined;
+}
+
+/**
  * Find PlatformIO build environments in the workspace.
  * Uses the full INI parser with extra_configs, extends, and variable
  * interpolation support. Searches for all .elf files in build directories,

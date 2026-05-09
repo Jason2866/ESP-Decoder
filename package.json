@@ -234,7 +234,7 @@
     "@typescript-eslint/parser": "^8.58.2",
     "esbuild": "^0.28.0",
     "eslint": "^10.2.0",
-    "pioarduino-node-helpers": "^12.4.4",
+    "pioarduino-node-helpers": "^12.6.0",
     "typescript": "6.0.2",
     "vitest": "^4.1.4"
   }
