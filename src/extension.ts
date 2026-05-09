@@ -424,6 +424,47 @@ function findEspIdfProjectRoot(elfPath: string, workspaceFolder: string): string
   }
 }
 
+/** PlatformIO task provider type used by pioarduino IDE. */
+const PIO_TASK_TYPE = 'PlatformIO';
+
+/**
+ * Tracks currently running PlatformIO "Upload and Monitor" task executions.
+ * Keyed by the task definition `task` id so we can cancel them after a
+ * successful upload and open the ESP-Decoder monitor instead of letting
+ * pioarduino spawn its built-in CLI monitor in the terminal.
+ */
+const activeUploadAndMonitorTasks = new Map<string, vscode.TaskExecution>();
+
+/**
+ * Detect whether a VSCode task is pioarduino's "Upload and Monitor" task.
+ *
+ * pioarduino exposes two surface markers:
+ *  - definition.type === 'PlatformIO'
+ *  - the task name (e.g. `Upload and Monitor`) and/or task args contain both
+ *    `--target upload` and `--target monitor`.
+ *
+ * The task name is localizable in newer pioarduino versions, so we look at
+ * both the name and (when available) the underlying ProcessExecution args.
+ */
+function isPioUploadAndMonitorTask(task: vscode.Task): boolean {
+  if (task.definition?.type !== PIO_TASK_TYPE) {
+    return false;
+  }
+  if (/upload\s*and\s*monitor/i.test(task.name)) {
+    return true;
+  }
+  const execution = task.execution;
+  if (execution instanceof vscode.ProcessExecution) {
+    const args = execution.args ?? [];
+    const hasUploadTarget = args.some((arg, i) => arg === '--target' && args[i + 1] === 'upload');
+    const hasMonitorTarget = args.some((arg, i) => arg === '--target' && args[i + 1] === 'monitor');
+    if (hasUploadTarget && hasMonitorTarget) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Subscribe to pioarduino IDE upload lifecycle events.
  *
@@ -439,12 +480,48 @@ function findEspIdfProjectRoot(elfPath: string, workspaceFolder: string): string
  *  - Retry-based reacquire: instead of a fixed delay we try to reconnect
  *    immediately and retry with short back-off if the OS hasn't released the
  *    device yet.
+ *
+ * Additionally, we hook VSCode's task lifecycle to intercept pioarduino's
+ * "Upload and Monitor" task: pioarduino runs upload+monitor as a single
+ * `pio run --target upload --target monitor` invocation, so its built-in
+ * CLI monitor would normally start in the integrated terminal once the
+ * upload finishes.  When ESP-Decoder is installed users expect the same
+ * decoder-aware monitor as for the standalone "Monitor" task.  We therefore
+ * remember the active upload-and-monitor execution, and on a successful
+ * upload (`onDidUpload` with exitCode 0) terminate that task and open
+ * `esp-decoder.openMonitor` with auto-connect — mirroring what pioarduino
+ * already does internally for the plain "Monitor" task.
  */
 function subscribeToPioarduinoEvents(
   context: vscode.ExtensionContext,
   serial: SerialPortManager,
   log: vscode.OutputChannel,
 ): void {
+  // Track running PlatformIO "Upload and Monitor" task executions so we can
+  // intercept them once the upload phase completes successfully.
+  context.subscriptions.push(
+    vscode.tasks.onDidStartTask((event) => {
+      const task = event.execution.task;
+      if (!isPioUploadAndMonitorTask(task)) {
+        return;
+      }
+      const taskId = String(task.definition?.task ?? task.name);
+      activeUploadAndMonitorTasks.set(taskId, event.execution);
+      log.appendLine(`[ESP Decoder] Tracking "Upload and Monitor" task: ${task.name} (${taskId})`);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.tasks.onDidEndTask((event) => {
+      const task = event.execution.task;
+      if (task.definition?.type !== PIO_TASK_TYPE) {
+        return;
+      }
+      const taskId = String(task.definition?.task ?? task.name);
+      activeUploadAndMonitorTasks.delete(taskId);
+    }),
+  );
+
   const pioExt = vscode.extensions.getExtension<PioarduinoApi>('pioarduino.pioarduino-ide');
   if (!pioExt) {
     log.appendLine('[ESP Decoder] pioarduino IDE extension not found — upload events unavailable');
@@ -489,8 +566,41 @@ function subscribeToPioarduinoEvents(
     context.subscriptions.push(
       api.onDidUpload(async ({ port, exitCode }) => {
         log.appendLine(
-          `[ESP Decoder] onDidUpload (port=${port ?? 'auto'}, exitCode=${exitCode}) — reacquiring serial port`,
+          `[ESP Decoder] onDidUpload (port=${port ?? 'auto'}, exitCode=${exitCode})`,
         );
+
+        // If this upload was part of an "Upload and Monitor" task and the
+        // upload phase succeeded, terminate the task before pioarduino's
+        // built-in CLI monitor takes over the serial port, then open the
+        // ESP-Decoder monitor (same handover semantics that pioarduino
+        // already implements for the plain "Monitor" task).
+        if (exitCode === 0 && activeUploadAndMonitorTasks.size > 0) {
+          const handoverPort = port || serial.selectedPath;
+          for (const [taskId, execution] of [...activeUploadAndMonitorTasks]) {
+            log.appendLine(
+              `[ESP Decoder] Intercepting "Upload and Monitor" task (${taskId}) — opening ESP Decoder monitor instead of CLI monitor`,
+            );
+            try {
+              execution.terminate();
+            } catch (err) {
+              log.appendLine(`[ESP Decoder] Failed to terminate task ${taskId}: ${err}`);
+            }
+            activeUploadAndMonitorTasks.delete(taskId);
+          }
+          try {
+            await vscode.commands.executeCommand('esp-decoder.openMonitor', {
+              port: handoverPort,
+              autoConnect: true,
+            });
+          } catch (err) {
+            log.appendLine(`[ESP Decoder] Failed to open monitor after upload: ${err}`);
+          }
+          return;
+        }
+
+        // Plain upload (or upload failed): just reacquire the port for the
+        // already-open monitor.
+        log.appendLine('[ESP Decoder] Reacquiring serial port');
         await reacquireWithRetry(serial, log);
       }),
     );
