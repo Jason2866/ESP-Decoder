@@ -95,8 +95,18 @@ export function activate(context: vscode.ExtensionContext) {
         if (opts?.port) {
           serialManager.setPort(opts.port);
         }
-        if (typeof opts?.baudRate === 'number') {
-          serialManager.setBaudRate(opts.baudRate);
+        // If the caller did not supply a baud rate, look it up from
+        // platformio.ini via pioarduino-node-helpers so the project's
+        // monitor_speed is always honoured without the user having to
+        // configure it a second time inside ESP Decoder.
+        const resolvedBaudRate = typeof opts?.baudRate === 'number'
+          ? opts.baudRate
+          : await (async () => {
+              const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+              return folder ? await getMonitorBaudRate(folder) : undefined;
+            })();
+        if (typeof resolvedBaudRate === 'number') {
+          serialManager.setBaudRate(resolvedBaudRate);
         }
 
         if (viewProvider) {
@@ -120,7 +130,7 @@ export function activate(context: vscode.ExtensionContext) {
             const portChanged =
               !!opts?.port && opts.port !== prevPort;
             const baudChanged =
-              typeof opts?.baudRate === 'number' && opts.baudRate !== prevBaud;
+              typeof resolvedBaudRate === 'number' && resolvedBaudRate !== prevBaud;
             if (serialManager.isConnected && (portChanged || baudChanged)) {
               await serialManager.disconnect();
             }
@@ -635,16 +645,8 @@ function subscribeToPioarduinoEvents(
 
       if (event.exitCode === 0) {
         try {
-          const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-          const baudRate = workspaceFolder
-            ? await getMonitorBaudRate(workspaceFolder)
-            : undefined;
-          if (baudRate !== undefined) {
-            log.appendLine(`[ESP Decoder] Using monitor_speed=${baudRate} from pioarduino config`);
-          }
           await vscode.commands.executeCommand('esp-decoder.openMonitor', {
             port: serial.selectedPath,
-            ...(baudRate !== undefined ? { baudRate } : {}),
             autoConnect: true,
           });
         } catch (err) {
