@@ -99,12 +99,11 @@ export function activate(context: vscode.ExtensionContext) {
         // platformio.ini via pioarduino-node-helpers so the project's
         // monitor_speed is always honoured without the user having to
         // configure it a second time inside ESP Decoder.
-        const resolvedBaudRate = typeof opts?.baudRate === 'number'
-          ? opts.baudRate
-          : await (async () => {
-              const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-              return folder ? await getMonitorBaudRate(folder) : undefined;
-            })();
+        let resolvedBaudRate: number | undefined = opts?.baudRate;
+        if (typeof resolvedBaudRate !== 'number') {
+          const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          resolvedBaudRate = folder ? await getMonitorBaudRate(folder) : undefined;
+        }
         if (typeof resolvedBaudRate === 'number') {
           serialManager.setBaudRate(resolvedBaudRate);
         }
@@ -601,8 +600,14 @@ function subscribeToPioarduinoEvents(
             resolve();
           }
         });
-        // Safety: resolve after 5 s if onDidEndTask never fires (e.g. window reload).
-        setTimeout(() => { sub.dispose(); resolve(); }, 5_000);
+        // Safety: resolve after 10 s if onDidEndTask never fires (e.g. window reload).
+        setTimeout(() => {
+          sub.dispose();
+          log.appendLine(
+            '[ESP Decoder] Original combined task did not end within 10 s — proceeding anyway',
+          );
+          resolve();
+        }, 10_000);
       });
 
       // Suppress the bogus onDidUpload(exitCode != 0) that pioarduino will

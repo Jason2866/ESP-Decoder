@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { findEspIdfBuilds } from './espIdfIntegration';
-import { core as pioCore } from 'pioarduino-node-helpers';
+import { core as pioCore, project as pioProject } from 'pioarduino-node-helpers';
 import { CHIP_TARGET_MAP, RISCV_TARGETS } from './chipTargets';
 
 /**
@@ -578,8 +578,7 @@ function resolveBuildDir(workspaceFolder: string, sections: Sections): string {
  */
 export async function getMonitorBaudRate(projectPath: string): Promise<number | undefined> {
   try {
-    const { ProjectConfig } = (await import('pioarduino-node-helpers')).project;
-    const config = new ProjectConfig(projectPath);
+    const config = new pioProject.ProjectConfig(projectPath);
     await config.read();
     return config.getEnvMonitorSpeed(config.defaultEnv());
   } catch {
