@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.26.1] - 2026-05-17
 
 ### Fixed
 - **Serial Monitor — bare CR (`\r`) is now visible** — output such as `printf(" wait %is \r ", i)` used to be invisible because a bare CR cleared the current line in-place, and the post-CR text overwrote it within the same synchronous render batch. Bare CR is now treated as a line terminator (like LF / CRLF), so each iteration of the user's loop appears on its own line (#54).
