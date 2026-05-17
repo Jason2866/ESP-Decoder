@@ -1215,6 +1215,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     /* Serial Monitor */
     #serial-output {
       flex: 1;
+      min-width: 0;
       overflow-y: auto;
       overflow-x: hidden;
       padding: 4px 8px;
@@ -1223,6 +1224,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       line-height: 1.4;
       white-space: pre-wrap;
       word-break: break-all;
+      overflow-wrap: break-word;
       background: var(--bg);
     }
     /* Each serial line is rendered as a <div>; ensure empty lines (e.g. blank
@@ -1230,6 +1232,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
        instead of collapsing to zero. */
     #serial-output > div {
       min-height: 1.4em;
+      overflow-wrap: break-word;
     }
 
     .serial-input-row {
