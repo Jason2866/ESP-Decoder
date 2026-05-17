@@ -927,3 +927,267 @@ describe('Modifier key tracking event listeners', () => {
     expect(mockBody.classList.toggle).toHaveBeenCalledWith('mod-link-active', false);
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Regression tests for issues #35 and #54 — serial monitor newline / CR
+// handling.
+//
+// These tests exercise the *actual* `appendSerialData` function (and its
+// supporting helpers) by extracting their source from the rendered webview
+// HTML and evaluating them in a sandbox with a minimal fake DOM. This way
+// regressions in the production code are caught directly.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Minimal DOM node used to verify line/text structure produced by
+ *  appendSerialData. Only implements the methods the function relies on. */
+class FakeNode {
+  tag: string;
+  children: FakeNode[] = [];
+  parentNode: FakeNode | null = null;
+  textContent = '';
+  className = '';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  attributes: Record<string, string> = {};
+  constructor(tag: string) { this.tag = tag; }
+  appendChild(c: FakeNode): FakeNode {
+    if (c.parentNode) c.parentNode.removeChild(c);
+    c.parentNode = this;
+    this.children.push(c);
+    return c;
+  }
+  removeChild(c: FakeNode): FakeNode {
+    const i = this.children.indexOf(c);
+    if (i >= 0) this.children.splice(i, 1);
+    c.parentNode = null;
+    return c;
+  }
+  replaceChild(n: FakeNode, o: FakeNode): FakeNode {
+    const i = this.children.indexOf(o);
+    if (i < 0) throw new Error('replaceChild: oldChild not found');
+    if (n.parentNode) n.parentNode.removeChild(n);
+    n.parentNode = this;
+    this.children[i] = n;
+    o.parentNode = null;
+    return o;
+  }
+  replaceChildren(...nodes: FakeNode[]): void {
+    for (const c of this.children) c.parentNode = null;
+    this.children = [];
+    for (const n of nodes) this.appendChild(n);
+  }
+  contains(n: FakeNode): boolean {
+    if (n === this) return true;
+    for (const c of this.children) if (c.contains(n)) return true;
+    return false;
+  }
+  get childNodes(): FakeNode[] { return this.children; }
+  get lastElementChild(): FakeNode | null {
+    return this.children.length ? this.children[this.children.length - 1] : null;
+  }
+  setAttribute(k: string, v: string): void { this.attributes[k] = v; }
+  // Recursively flatten text content for assertions.
+  get text(): string {
+    if (this.children.length === 0) return this.textContent;
+    return this.children.map((c) => c.text).join('');
+  }
+}
+
+/** Build a callable `appendSerialData(text)` bound to a fresh fake DOM,
+ *  loaded with the production source extracted from the rendered HTML. */
+function buildAppendSerialData(panel: EspDecoderWebviewPanel): {
+  append: (text: string) => void;
+  output: FakeNode;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  state: any;
+} {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const html: string = (panel as any).getHtmlContent();
+
+  // Extract a top-level function definition from the script. We rely on the
+  // fact that each helper is declared at 4-space indentation inside the
+  // <script> block, so the closing brace is also at 4-space indentation.
+  const grab = (name: string): string => {
+    const startRe = new RegExp(`\\n    (function ${name}\\b[\\s\\S]*?\\n    \\})`);
+    const m = startRe.exec(html);
+    if (!m) throw new Error(`Could not extract ${name} from webview HTML`);
+    return m[1];
+  };
+
+  const dedupResetLineSrc = grab('dedupResetLine');
+  const applyChunkFiltersSrc = grab('applyChunkFilters');
+  const applyDedupToChunkSrc = grab('applyDedupToChunk');
+  const applyLineFiltersSrc = grab('applyLineFilters');
+  const appendSerialDataSrc = grab('appendSerialData');
+
+  const document = {
+    createElement: (tag: string) => new FakeNode(tag),
+    createDocumentFragment: () => new FakeNode('#fragment'),
+  };
+  const serialOutput = new FakeNode('div');
+
+  // Stub renderAnsiText so we don't have to drag in the full ANSI parser.
+  // It returns a text node carrying the raw chunk so we can assert on output.
+  const renderAnsiText = (text: string): FakeNode => {
+    const n = new FakeNode('span');
+    n.textContent = text;
+    return n;
+  };
+
+  const sandbox = `
+    'use strict';
+    var ESC = String.fromCharCode(27);
+    var CR = String.fromCharCode(13);
+    var LF = String.fromCharCode(10);
+    var CRLF = CR + LF;
+    var LINE_SPLIT_RE = new RegExp('(' + CRLF + '|' + CR + '|' + LF + ')');
+
+    var ansiTail = '';
+    var carriageReturn = false;
+    var currentLine = null;
+    var currentLineRaw = '';
+    var autoscroll = false;
+    var scrollRAFPending = false;
+    var programmaticScroll = false;
+
+    var filterState = {
+      timestamp: false,
+      _suppressRe: null,
+      _highlightRe: null,
+      dedupThreshold: 3,
+      _dedupRe: null,
+      _dedupCount: 0,
+      _dedupBadge: null,
+      _lineStarted: false,
+    };
+
+    // ANSI parser stubs (we don't exercise SGR in these tests).
+    function ansiStateToSgr() { return ''; }
+
+    ${dedupResetLineSrc}
+    ${applyDedupToChunkSrc}
+    ${applyChunkFiltersSrc}
+    ${applyLineFiltersSrc}
+    ${appendSerialDataSrc}
+
+    return {
+      append: function(text) { appendSerialData(text); },
+      output: serialOutput,
+      state: { get filterState() { return filterState; } },
+    };
+  `;
+
+  const factory = new Function(
+    'document', 'serialOutput', 'renderAnsiText',
+    sandbox
+  );
+  return factory(document, serialOutput, renderAnsiText);
+}
+
+describe('appendSerialData — issue #54 (bare \\r) and issue #35 (blank lines)', () => {
+  let panel: EspDecoderWebviewPanel;
+
+  beforeEach(() => {
+    // getHtmlContent() reads dist/ansiParser.js from the extension dir, so
+    // point extensionUri at the workspace root (where dist/ is built).
+    const testDir = path.dirname(fileURLToPath(import.meta.url));
+    const repoRoot = path.resolve(testDir, '..', '..');
+    const extensionUri = vscode.Uri.file(repoRoot);
+    const serialManager = new SerialPortManager();
+    panel = new EspDecoderWebviewPanel(extensionUri, serialManager);
+  });
+
+  it('issue #54: bare CR is treated as a line break — countdown output is preserved', () => {
+    const { append, output } = buildAppendSerialData(panel);
+
+    // Mirrors the user's reproducer in https://github.com/Jason2866/ESP-Decoder/issues/54
+    //   printf(" \n countdown starts \n ");
+    //   while (i) { printf(" wait %is \r ", i); i--; vTaskDelay(1000); }
+    //   printf(" \n ready \n ");
+    // Each printf arrives as its own batch (1 s apart).
+    append(' \n countdown starts \n ');
+    for (let i = 10; i >= 1; i--) {
+      append(` wait ${i}s \r `);
+    }
+    append(' \n ready \n ');
+
+    const lines = output.children.map((c) => c.text);
+
+    // Every iteration of the countdown must be visible.
+    for (let i = 10; i >= 1; i--) {
+      expect(
+        lines.some((l) => l.includes(`wait ${i}s`)),
+        `expected to see "wait ${i}s" in the rendered lines, got: ${JSON.stringify(lines)}`
+      ).toBe(true);
+    }
+
+    // The framing messages must also be present.
+    expect(lines.some((l) => l.includes('countdown starts'))).toBe(true);
+    expect(lines.some((l) => l.includes('ready'))).toBe(true);
+  });
+
+  it('issue #54: a CR in the middle of a single batch splits content into separate lines', () => {
+    const { append, output } = buildAppendSerialData(panel);
+
+    // Both halves of a CR-separated batch should be visible — regression
+    // guard against the previous behaviour where the post-CR text overwrote
+    // (and erased) the pre-CR text within the same synchronous render.
+    append('before\rafter');
+    const lines = output.children.map((c) => c.text);
+    expect(lines.some((l) => l.includes('before'))).toBe(true);
+    expect(lines.some((l) => l.includes('after'))).toBe(true);
+  });
+
+  it('issue #54: a trailing bare CR opens a fresh line for the next batch', () => {
+    const { append, output } = buildAppendSerialData(panel);
+
+    append('first\r');
+    append('second\n');
+
+    const lines = output.children.map((c) => c.text);
+    expect(lines.some((l) => l === 'first')).toBe(true);
+    expect(lines.some((l) => l === 'second')).toBe(true);
+  });
+
+  it('issue #54: CRLF is still treated as a single line break (no double newline)', () => {
+    const { append, output } = buildAppendSerialData(panel);
+
+    append('alpha\r\nbeta\r\ngamma');
+
+    // CRLF must be captured as a single separator — three pieces of content
+    // should yield three logical lines, not five.
+    const nonEmpty = output.children.map((c) => c.text).filter((t) => t.length > 0);
+    expect(nonEmpty).toEqual(['alpha', 'beta', 'gamma']);
+  });
+
+  it('issue #35 (part 1): consecutive newlines produce empty line nodes (visible blank rows)', () => {
+    const { append, output } = buildAppendSerialData(panel);
+
+    // "hello\n\nworld" must yield a blank line between "hello" and "world".
+    append('hello\n\nworld');
+
+    const texts = output.children.map((c) => c.text);
+    // Expected sequence: 'hello', '' (blank line from \n\n), 'world'
+    expect(texts[0]).toBe('hello');
+    expect(texts[1]).toBe('');
+    expect(texts[2]).toBe('world');
+  });
+
+  it('issue #35 (part 1): the CSS rule that makes empty lines visible is still present', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const html: string = (panel as any).getHtmlContent();
+    // The fix for #35 added a min-height rule on #serial-output > div so that
+    // empty <div> elements (blank lines) still occupy one row of height.
+    expect(html).toMatch(/#serial-output\s*>\s*div\s*\{[^}]*min-height\s*:\s*[^;]+;/);
+  });
+
+  it('issue #35 (part 2): ANSI SGR state is preserved across the timestamp prefix', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const html: string = (panel as any).getHtmlContent();
+    // The fix for #35 saves the active SGR state with ansiStateToSgr() and
+    // re-emits it after the timestamp's [0m, so multi-line coloured output
+    // keeps its colour on every line.
+    expect(html).toContain('var restore = ansiStateToSgr();');
+    // The timestamp injection must include the saved restore sequence.
+    expect(html).toMatch(/\[0m'\s*\+\s*restore/);
+  });
+});
