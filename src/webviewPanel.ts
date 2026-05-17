@@ -2434,26 +2434,28 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         var part = parts[p];
 
         // Odd indices are the captured separators (CRLF, CR, or LF).
+        // Treat all three as line terminators: finalize the current line and
+        // start a new one. (Issue #54: a bare CR followed by content in the
+        // same batch used to clear the line in-place, which made each iteration
+        // of e.g. printf(" wait %is \\r ", i) invisible because the whole
+        // batch was rendered synchronously and only the post-CR text survived.
+        // Treating CR like LF keeps every iteration visible on its own line.)
         if (p % 2 === 1) {
-          if (part === CR) {
-            carriageReturn = true;
-          } else {
-            // LF or CRLF — run suppress filter; timestamp/highlight are already
-            // applied per-chunk during rendering so the DOM is up to date.
-            var filtered = applyLineFilters(currentLineRaw);
-            if (filtered === null) {
-              // Suppress filter matched — remove the line from DOM.
-              if (currentLine && currentLine.parentNode === serialOutput) {
-                serialOutput.removeChild(currentLine);
-              }
+          // Run suppress filter; timestamp/highlight are already applied
+          // per-chunk during rendering so the DOM is up to date.
+          var filtered = applyLineFilters(currentLineRaw);
+          if (filtered === null) {
+            // Suppress filter matched — remove the line from DOM.
+            if (currentLine && currentLine.parentNode === serialOutput) {
+              serialOutput.removeChild(currentLine);
             }
-            // Otherwise leave currentLine DOM intact (dedup badge preserved).
-            currentLineRaw = '';
-            carriageReturn = false;
-            dedupResetLine();
-            currentLine = document.createElement('div');
-            serialOutput.appendChild(currentLine);
           }
+          // Otherwise leave currentLine DOM intact (dedup badge preserved).
+          currentLineRaw = '';
+          carriageReturn = false;
+          dedupResetLine();
+          currentLine = document.createElement('div');
+          serialOutput.appendChild(currentLine);
           continue;
         }
 
@@ -2475,14 +2477,6 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           }
         }
 
-        if (carriageReturn && currentLine) {
-          var newLine = document.createElement('div');
-          serialOutput.replaceChild(newLine, currentLine);
-          currentLine = newLine;
-          currentLineRaw = '';
-          dedupResetLine();
-          carriageReturn = false;
-        }
         var dedupedText = applyChunkFilters(renderText);
         currentLineRaw += renderText;
         if (dedupedText) { currentLine.appendChild(renderAnsiText(dedupedText)); }
