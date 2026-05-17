@@ -991,25 +991,39 @@ class FakeNode {
   }
 }
 
+/** Read webviewPanel.ts source once. The webview JS lives inside a TS
+ *  template literal at 4-space indentation, so we can locate each helper
+ *  function by name. We read the source file directly rather than calling
+ *  `getHtmlContent()` because CI deletes `dist/ansiParser.js` (a dependency
+ *  of getHtmlContent) before running tests. */
+function loadWebviewPanelSource(): string {
+  const testDir = path.dirname(fileURLToPath(import.meta.url));
+  const srcPath = path.resolve(testDir, '..', 'webviewPanel.ts');
+  return fs.readFileSync(srcPath, 'utf8');
+}
+
 /** Build a callable `appendSerialData(text)` bound to a fresh fake DOM,
- *  loaded with the production source extracted from the rendered HTML. */
-function buildAppendSerialData(panel: EspDecoderWebviewPanel): {
+ *  loaded with the production source extracted from src/webviewPanel.ts. */
+function buildAppendSerialData(): {
   append: (text: string) => void;
   output: FakeNode;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   state: any;
 } {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const html: string = (panel as any).getHtmlContent();
+  const src = loadWebviewPanelSource();
 
-  // Extract a top-level function definition from the script. We rely on the
-  // fact that each helper is declared at 4-space indentation inside the
-  // <script> block, so the closing brace is also at 4-space indentation.
+  // Extract a top-level function definition from the script. Helpers are
+  // declared at 4-space indentation inside the <script> template, so the
+  // closing brace is also at 4-space indentation.
+  //
+  // We then undo one level of TS template-literal backslash escaping
+  // (`\\` → `\`) so that escapes like `'\\x1b'` become `'\x1b'` — i.e.,
+  // the same string that the browser would see in the rendered HTML.
   const grab = (name: string): string => {
     const startRe = new RegExp(`\\n    (function ${name}\\b[\\s\\S]*?\\n    \\})`);
-    const m = startRe.exec(html);
-    if (!m) throw new Error(`Could not extract ${name} from webview HTML`);
-    return m[1];
+    const m = startRe.exec(src);
+    if (!m) throw new Error(`Could not extract ${name} from webviewPanel.ts`);
+    return m[1].replace(/\\\\/g, '\\');
   };
 
   const dedupResetLineSrc = grab('dedupResetLine');
@@ -1083,20 +1097,8 @@ function buildAppendSerialData(panel: EspDecoderWebviewPanel): {
 }
 
 describe('appendSerialData — issue #54 (bare \\r) and issue #35 (blank lines)', () => {
-  let panel: EspDecoderWebviewPanel;
-
-  beforeEach(() => {
-    // getHtmlContent() reads dist/ansiParser.js from the extension dir, so
-    // point extensionUri at the workspace root (where dist/ is built).
-    const testDir = path.dirname(fileURLToPath(import.meta.url));
-    const repoRoot = path.resolve(testDir, '..', '..');
-    const extensionUri = vscode.Uri.file(repoRoot);
-    const serialManager = new SerialPortManager();
-    panel = new EspDecoderWebviewPanel(extensionUri, serialManager);
-  });
-
   it('issue #54: bare CR is treated as a line break — countdown output is preserved', () => {
-    const { append, output } = buildAppendSerialData(panel);
+    const { append, output } = buildAppendSerialData();
 
     // Mirrors the user's reproducer in https://github.com/Jason2866/ESP-Decoder/issues/54
     //   printf(" \n countdown starts \n ");
@@ -1125,7 +1127,7 @@ describe('appendSerialData — issue #54 (bare \\r) and issue #35 (blank lines)'
   });
 
   it('issue #54: a CR in the middle of a single batch splits content into separate lines', () => {
-    const { append, output } = buildAppendSerialData(panel);
+    const { append, output } = buildAppendSerialData();
 
     // Both halves of a CR-separated batch should be visible — regression
     // guard against the previous behaviour where the post-CR text overwrote
@@ -1137,7 +1139,7 @@ describe('appendSerialData — issue #54 (bare \\r) and issue #35 (blank lines)'
   });
 
   it('issue #54: a trailing bare CR opens a fresh line for the next batch', () => {
-    const { append, output } = buildAppendSerialData(panel);
+    const { append, output } = buildAppendSerialData();
 
     append('first\r');
     append('second\n');
@@ -1148,7 +1150,7 @@ describe('appendSerialData — issue #54 (bare \\r) and issue #35 (blank lines)'
   });
 
   it('issue #54: CRLF is still treated as a single line break (no double newline)', () => {
-    const { append, output } = buildAppendSerialData(panel);
+    const { append, output } = buildAppendSerialData();
 
     append('alpha\r\nbeta\r\ngamma');
 
@@ -1159,7 +1161,7 @@ describe('appendSerialData — issue #54 (bare \\r) and issue #35 (blank lines)'
   });
 
   it('issue #35 (part 1): consecutive newlines produce empty line nodes (visible blank rows)', () => {
-    const { append, output } = buildAppendSerialData(panel);
+    const { append, output } = buildAppendSerialData();
 
     // "hello\n\nworld" must yield a blank line between "hello" and "world".
     append('hello\n\nworld');
@@ -1172,21 +1174,19 @@ describe('appendSerialData — issue #54 (bare \\r) and issue #35 (blank lines)'
   });
 
   it('issue #35 (part 1): the CSS rule that makes empty lines visible is still present', () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const html: string = (panel as any).getHtmlContent();
+    const src = loadWebviewPanelSource();
     // The fix for #35 added a min-height rule on #serial-output > div so that
     // empty <div> elements (blank lines) still occupy one row of height.
-    expect(html).toMatch(/#serial-output\s*>\s*div\s*\{[^}]*min-height\s*:\s*[^;]+;/);
+    expect(src).toMatch(/#serial-output\s*>\s*div\s*\{[^}]*min-height\s*:\s*[^;]+;/);
   });
 
   it('issue #35 (part 2): ANSI SGR state is preserved across the timestamp prefix', () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const html: string = (panel as any).getHtmlContent();
+    const src = loadWebviewPanelSource();
     // The fix for #35 saves the active SGR state with ansiStateToSgr() and
     // re-emits it after the timestamp's [0m, so multi-line coloured output
     // keeps its colour on every line.
-    expect(html).toContain('var restore = ansiStateToSgr();');
+    expect(src).toContain('var restore = ansiStateToSgr();');
     // The timestamp injection must include the saved restore sequence.
-    expect(html).toMatch(/\[0m'\s*\+\s*restore/);
+    expect(src).toMatch(/\[0m'\s*\+\s*restore/);
   });
 });
