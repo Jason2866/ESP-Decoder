@@ -946,7 +946,6 @@ class FakeNode {
   parentNode: FakeNode | null = null;
   textContent = '';
   className = '';
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   attributes: Record<string, string> = {};
   constructor(tag: string) { this.tag = tag; }
   appendChild(c: FakeNode): FakeNode {
