@@ -423,8 +423,11 @@ export class SerialPortManager extends vscode.Disposable {
     if (!this.port || !this._isConnected) {
       throw new Error('Serial port not connected');
     }
+    // Use latin1 encoding so every character is transmitted as its 8-bit
+    // code-point value. The default UTF-8 encoding expands chars > 0x7F into
+    // two-byte sequences, causing high-ASCII bytes to arrive garbled on the device.
     return new Promise((resolve, reject) => {
-      this.port!.write(data, (err) => {
+      this.port!.write(Buffer.from(data, 'latin1'), (err) => {
         if (err) {
           reject(err);
         } else {
