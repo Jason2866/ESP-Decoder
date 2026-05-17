@@ -1066,6 +1066,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      padding: 0;
+      margin: 0;
     }
 
     /* Toolbar */
@@ -1214,6 +1216,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     #serial-output {
       flex: 1;
       overflow-y: auto;
+      overflow-x: hidden;
       padding: 4px 8px;
       font-family: var(--vscode-editor-font-family, 'Courier New', monospace);
       font-size: var(--vscode-editor-font-size, 13px);
