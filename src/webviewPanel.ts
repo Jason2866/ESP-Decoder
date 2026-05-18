@@ -1320,12 +1320,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     .filter-toolbar .filter-label { opacity: 0.6; }
     button.feedback-saved {
       background: var(--vscode-testing-iconPassed, #28a745) !important;
-      color: #ffffff !important;
+      color: var(--vscode-button-foreground);
       transition: background 0.2s ease;
     }
     button.feedback-error {
       background: var(--error-fg, #d73a49) !important;
-      color: #ffffff !important;
+      color: var(--vscode-button-foreground);
       transition: background 0.2s ease;
     }
     .filter-toolbar button.log-active {
@@ -2155,7 +2155,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     var filterSaveBtn = document.getElementById('filter-save');
     var filterSaveOriginalLabel = filterSaveBtn.textContent;
     var filterSaveFeedbackTimer = null;
+    var filterSaveTimeout = null;
     function showFilterSaveFeedback(ok, errorText) {
+      if (filterSaveTimeout) {
+        clearTimeout(filterSaveTimeout);
+        filterSaveTimeout = null;
+      }
       if (filterSaveFeedbackTimer) {
         clearTimeout(filterSaveFeedbackTimer);
         filterSaveFeedbackTimer = null;
@@ -2179,6 +2184,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     }
     filterSaveBtn.addEventListener('click', () => {
       filterSaveBtn.disabled = true;
+      if (filterSaveTimeout) {
+        clearTimeout(filterSaveTimeout);
+      }
+      filterSaveTimeout = setTimeout(function() {
+        filterSaveTimeout = null;
+        showFilterSaveFeedback(false, 'No response from extension');
+      }, 5000);
       vscode.postMessage({
         type: 'saveFilters',
         timestamp: filterState.timestamp,
