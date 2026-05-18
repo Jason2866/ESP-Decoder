@@ -471,12 +471,21 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         this.crashCapturer.reset();
         break;
       case 'saveFilters': {
-        const cfg = vscode.workspace.getConfiguration('esp-decoder');
-        await cfg.update('serialFilters.timestamp', message.timestamp, vscode.ConfigurationTarget.Global);
-        await cfg.update('serialFilters.suppressPattern', message.suppressPattern, vscode.ConfigurationTarget.Global);
-        await cfg.update('serialFilters.highlightPattern', message.highlightPattern, vscode.ConfigurationTarget.Global);
-        await cfg.update('serialFilters.dedupPattern', message.dedupPattern, vscode.ConfigurationTarget.Global);
-        await cfg.update('serialFilters.dedupThreshold', message.dedupThreshold, vscode.ConfigurationTarget.Global);
+        try {
+          const cfg = vscode.workspace.getConfiguration('esp-decoder');
+          await cfg.update('serialFilters.timestamp', message.timestamp, vscode.ConfigurationTarget.Global);
+          await cfg.update('serialFilters.suppressPattern', message.suppressPattern, vscode.ConfigurationTarget.Global);
+          await cfg.update('serialFilters.highlightPattern', message.highlightPattern, vscode.ConfigurationTarget.Global);
+          await cfg.update('serialFilters.dedupPattern', message.dedupPattern, vscode.ConfigurationTarget.Global);
+          await cfg.update('serialFilters.dedupThreshold', message.dedupThreshold, vscode.ConfigurationTarget.Global);
+          this.postMessage({ type: 'filtersSaved', ok: true });
+        } catch (err) {
+          this.postMessage({
+            type: 'filtersSaved',
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         break;
       }
       case 'decodeCrash': {
@@ -1309,6 +1318,16 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       border-color: var(--error-fg);
     }
     .filter-toolbar .filter-label { opacity: 0.6; }
+    button.feedback-saved {
+      background: var(--vscode-testing-iconPassed, #28a745) !important;
+      color: #ffffff !important;
+      transition: background 0.2s ease;
+    }
+    button.feedback-error {
+      background: var(--error-fg, #d73a49) !important;
+      color: #ffffff !important;
+      transition: background 0.2s ease;
+    }
     .filter-toolbar button.log-active {
       background: var(--success-fg);
       color: #000;
@@ -2133,7 +2152,33 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       filterState.dedupThreshold = (isNaN(v) || v < 1) ? 3 : v;
     });
 
-    document.getElementById('filter-save').addEventListener('click', () => {
+    var filterSaveBtn = document.getElementById('filter-save');
+    var filterSaveOriginalLabel = filterSaveBtn.textContent;
+    var filterSaveFeedbackTimer = null;
+    function showFilterSaveFeedback(ok, errorText) {
+      if (filterSaveFeedbackTimer) {
+        clearTimeout(filterSaveFeedbackTimer);
+        filterSaveFeedbackTimer = null;
+      }
+      filterSaveBtn.classList.remove('feedback-saved', 'feedback-error');
+      if (ok) {
+        filterSaveBtn.classList.add('feedback-saved');
+        filterSaveBtn.textContent = 'Saved \u2713';
+      } else {
+        filterSaveBtn.classList.add('feedback-error');
+        filterSaveBtn.textContent = 'Failed';
+        if (errorText) { filterSaveBtn.title = 'Save failed: ' + errorText; }
+      }
+      filterSaveFeedbackTimer = setTimeout(function() {
+        filterSaveBtn.classList.remove('feedback-saved', 'feedback-error');
+        filterSaveBtn.textContent = filterSaveOriginalLabel;
+        filterSaveBtn.title = 'Save current filter settings to VS Code settings';
+        filterSaveBtn.disabled = false;
+        filterSaveFeedbackTimer = null;
+      }, 1500);
+    }
+    filterSaveBtn.addEventListener('click', () => {
+      filterSaveBtn.disabled = true;
       vscode.postMessage({
         type: 'saveFilters',
         timestamp: filterState.timestamp,
@@ -2381,6 +2426,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           break;
         case 'error':
           appendError(msg.message);
+          break;
+        case 'filtersSaved':
+          showFilterSaveFeedback(msg.ok !== false, msg.error);
           break;
       }
     });
