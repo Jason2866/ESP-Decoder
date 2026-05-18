@@ -477,9 +477,8 @@ export class SerialPortManager extends vscode.Disposable {
    * drop the chip into the ROM bootloader instead of doing a normal boot.
    *
    * Note: on chips that talk via native USB-CDC (ESP32-S2/S3/C3/P4 when no
-   * USB-UART bridge is involved) RTS is not physically wired to EN and this
-   * call is effectively a no-op — esptool falls back to `watchdog_reset` in
-   * that case, which is not implementable from the host alone.
+   * USB-UART bridge is involved) the reset may not work. The port disappears when 
+   * the chip resets, and ESP-Decoder tries to auto-reconnect to the same port before the reset.
    */
   async hardReset(): Promise<void> {
     if (!this.port || !this._isConnected) {
