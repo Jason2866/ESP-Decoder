@@ -459,6 +459,48 @@ export class SerialPortManager extends vscode.Disposable {
     });
   }
 
+  /**
+   * Perform a hard reset of the connected ESP chip by toggling the RTS line
+   * (which is wired to the chip's EN/RESET pin on the standard auto-reset
+   * circuit used by virtually every ESP dev-board).
+   *
+   * Mirrors esptool's `HardReset` strategy
+   * (https://github.com/espressif/esptool/blob/af0787da2cccaf68080d8032cfaf4ce918c3037d/esptool/reset.py)
+   * and is invoked by `esptool reset_chip("hard-reset")`:
+   *   RTS = True  → EN low  (chip held in reset)
+   *   sleep 100 ms
+   *   RTS = False → EN high (chip released, boots normally)
+   *
+   * DTR is explicitly held LOW (false) the whole time so the two-transistor
+   * auto-reset circuit only pulls EN — pulling DTR high (the node-serialport
+   * default for unspecified flags is `dtr: true`) would assert IO0 LOW and
+   * drop the chip into the ROM bootloader instead of doing a normal boot.
+   *
+   * Note: on chips that talk via native USB-CDC (ESP32-S2/S3/C3/P4 when no
+   * USB-UART bridge is involved) RTS is not physically wired to EN and this
+   * call is effectively a no-op — esptool falls back to `watchdog_reset` in
+   * that case, which is not implementable from the host alone.
+   */
+  async hardReset(): Promise<void> {
+    if (!this.port || !this._isConnected) {
+      throw new Error('Serial port not connected');
+    }
+    const port = this.port;
+    // Always pass BOTH dtr and rts: node-serialport's set() resets every
+    // unspecified flag to its default (dtr: true, rts: true). Letting dtr
+    // default to true would assert IO0 LOW via the auto-reset circuit and
+    // send the chip into download mode instead of resetting it.
+    const setSignals = (dtr: boolean, rts: boolean): Promise<void> =>
+      new Promise((resolve, reject) => {
+        port.set({ dtr, rts }, (err) => (err ? reject(err) : resolve()));
+      });
+    this.log.appendLine('[ESP Decoder] hard-reset: RTS=1 DTR=0 (EN low, IO0 high)');
+    await setSignals(false, true);
+    await new Promise<void>((r) => setTimeout(r, 100));
+    this.log.appendLine('[ESP Decoder] hard-reset: RTS=0 DTR=0 (EN high, IO0 high)');
+    await setSignals(false, false);
+  }
+
   async sendData(data: string): Promise<void> {
     if (!this.port || !this._isConnected) {
       throw new Error('Serial port not connected');

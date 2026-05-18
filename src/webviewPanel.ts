@@ -433,6 +433,17 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         this.syncState();
         break;
       }
+      case 'hardReset': {
+        try {
+          await this.serialManager.hardReset();
+        } catch (err) {
+          this.postMessage({
+            type: 'error',
+            message: `Reset error: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+        break;
+      }
       case 'selectPort': {
         const port = await this.serialManager.selectPort();
         this.syncState();
@@ -1669,6 +1680,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     <div class="toolbar-group">
       <button id="btn-connect" title="Connect to serial port">Connect</button>
       <button id="btn-disconnect" title="Disconnect from serial port" disabled>Disconnect</button>
+      <button id="btn-reset" class="secondary" title="Hard-reset the chip (toggles RTS/EN, same as esptool reset_chip hard-reset)" disabled>Reset</button>
     </div>
     <div class="toolbar-separator"></div>
     <div class="toolbar-group">
@@ -2101,6 +2113,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
     document.getElementById('btn-disconnect').addEventListener('click', () => {
       vscode.postMessage({ type: 'disconnect' });
+    });
+
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      vscode.postMessage({ type: 'hardReset' });
     });
 
     document.getElementById('btn-elf').addEventListener('click', () => {
@@ -2584,6 +2600,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       const text = document.getElementById('status-text');
       const btnConnect = document.getElementById('btn-connect');
       const btnDisconnect = document.getElementById('btn-disconnect');
+      const btnReset = document.getElementById('btn-reset');
 
       if (isConnected) {
         dot.className = 'status-indicator connected';
@@ -2591,12 +2608,14 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         btnConnect.textContent = 'Connect';
         btnConnect.disabled = true;
         btnDisconnect.disabled = false;
+        btnReset.disabled = false;
       } else {
         dot.className = 'status-indicator disconnected';
         text.textContent = 'Disconnected';
         btnConnect.textContent = 'Connect';
         btnConnect.disabled = false;
         btnDisconnect.disabled = true;
+        btnReset.disabled = true;
       }
 
       if (port) {
