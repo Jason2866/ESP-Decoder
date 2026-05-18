@@ -2116,7 +2116,15 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     });
 
     document.getElementById('btn-reset').addEventListener('click', () => {
+      const btn = document.getElementById('btn-reset');
       vscode.postMessage({ type: 'hardReset' });
+      const originalText = btn.textContent;
+      btn.classList.add('feedback-saved');
+      btn.textContent = 'Reset \u2713';
+      setTimeout(function() {
+        btn.classList.remove('feedback-saved');
+        btn.textContent = originalText;
+      }, 600);
     });
 
     document.getElementById('btn-elf').addEventListener('click', () => {
