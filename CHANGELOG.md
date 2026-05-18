@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.26.5] - 2026-05-xx
+
+### New Feature**
+  - **Filter save** - operations now provide visual feedback to users, confirming successful saves with "Saved ✓" messages or displaying error details if an issue occurs.
+  - Save button shows a disabled state while processing and displays timed feedback that clearly indicates whether the operation succeeded or failed.
+
 ## [0.26.4] - 2026-05-18
 
 ### Changed
