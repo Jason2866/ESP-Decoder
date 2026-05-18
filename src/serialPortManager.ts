@@ -190,20 +190,60 @@ export class SerialPortManager extends vscode.Disposable {
 
   async selectBaudRate(): Promise<number | undefined> {
     const rates = [9600, 19200, 38400, 57600, 74880, 115200, 230400, 460800, 921600];
-    const items = rates.map((r) => ({
-      label: r.toString(),
-      description: r === this._baudRate ? '(current)' : undefined,
-    }));
+    const CUSTOM_LABEL = 'Custom…';
+    const items: { label: string; description?: string; custom?: boolean }[] =
+      rates.map((r) => ({
+        label: r.toString(),
+        description: r === this._baudRate ? '(current)' : undefined,
+      }));
+    // If the current rate isn't one of the presets, mark it as current in the
+    // custom entry so the user can see at a glance what's active.
+    const currentIsCustom = !rates.includes(this._baudRate);
+    items.push({
+      label: CUSTOM_LABEL,
+      description: currentIsCustom ? `(current: ${this._baudRate})` : 'Enter a custom baud rate',
+      custom: true,
+    });
 
     const picked = await vscode.window.showQuickPick(items, {
       placeHolder: `Current: ${this._baudRate}`,
       title: 'ESP Decoder: Select Baud Rate',
     });
 
-    if (picked) {
-      this._baudRate = parseInt(picked.label, 10);
+    if (!picked) {
+      return undefined;
     }
-    return picked ? parseInt(picked.label, 10) : undefined;
+
+    if (picked.custom) {
+      const entered = await vscode.window.showInputBox({
+        title: 'ESP Decoder: Custom Baud Rate',
+        prompt: 'Enter a custom baud rate (positive integer, e.g. 250000)',
+        value: this._baudRate.toString(),
+        validateInput: (value) => {
+          const trimmed = value.trim();
+          if (!trimmed) {
+            return 'Baud rate is required';
+          }
+          if (!/^\d+$/.test(trimmed)) {
+            return 'Baud rate must be a positive integer';
+          }
+          const n = parseInt(trimmed, 10);
+          if (!Number.isInteger(n) || n <= 0) {
+            return 'Baud rate must be a positive integer';
+          }
+          return undefined;
+        },
+      });
+      if (!entered) {
+        return undefined;
+      }
+      const rate = parseInt(entered.trim(), 10);
+      this._baudRate = rate;
+      return rate;
+    }
+
+    this._baudRate = parseInt(picked.label, 10);
+    return this._baudRate;
   }
 
   async connect(): Promise<boolean> {

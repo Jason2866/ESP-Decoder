@@ -94,10 +94,11 @@
       "title": "ESP Decoder",
       "properties": {
         "esp-decoder.defaultBaudRate": {
-          "type": "number",
+          "type": "integer",
+          "minimum": 1,
           "default": 115200,
-          "description": "Default baud rate for serial connections",
-          "enum": [
+          "description": "Default baud rate for serial connections. Common values: 9600, 19200, 38400, 57600, 74880, 115200, 230400, 460800, 921600. Custom (non-standard) baud rates are also accepted.",
+          "examples": [
             9600,
             19200,
             38400,
