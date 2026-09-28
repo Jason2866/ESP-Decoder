@@ -1794,7 +1794,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         <span id="search-count" class="search-count"></span>
       </div>
     </div>
-    <div id="serial-output"></div>
+    <div id="serial-output" tabindex="0"></div>
     <button id="btn-scroll-bottom" title="Scroll to bottom">&#8595; Scroll to bottom</button>
     <div class="serial-input-row">
       <input type="text" id="serial-input" placeholder="Type command and press Enter to send (or reconnect when disconnected)..."
@@ -2380,29 +2380,33 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     });
 
     // Search functionality
-    const searchInput = document.getElementById('search-input');
-    const searchPrevBtn = document.getElementById('search-prev');
-    const searchNextBtn = document.getElementById('search-next');
-    const searchCountEl = document.getElementById('search-count');
-    let searchMatches = [];
-    let currentSearchIndex = -1;
+    var searchInput = document.getElementById('search-input');
+    var searchPrevBtn = document.getElementById('search-prev');
+    var searchNextBtn = document.getElementById('search-next');
+    var searchCountEl = document.getElementById('search-count');
+    var searchMatches = [];
+    var currentSearchIndex = -1;
+    var lastSearchQuery = '';
 
     function clearSearchHighlights() {
-      const highlights = serialOutput.querySelectorAll('.search-highlight');
-      highlights.forEach(el => {
-        const parent = el.parentNode;
+      var highlights = serialOutput.querySelectorAll('.search-highlight');
+      highlights.forEach(function(el) {
+        var parent = el.parentNode;
         parent.replaceChild(document.createTextNode(el.textContent), el);
         parent.normalize();
       });
       searchMatches = [];
       currentSearchIndex = -1;
       searchCountEl.textContent = '';
+      lastSearchQuery = '';
     }
 
     function performSearch() {
       clearSearchHighlights();
       var query = searchInput.value.trim();
       if (!query) return;
+
+      lastSearchQuery = query;
 
       var walker = document.createTreeWalker(
         serialOutput,
@@ -2433,17 +2437,18 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         return;
       }
 
-      // Create highlights
-      nodes.forEach(function(match, idx) {
+      // Create highlights - process from highest to lowest offset to avoid offset invalidation
+      for (var i = nodes.length - 1; i >= 0; i--) {
+        var match = nodes[i];
         var range = document.createRange();
         range.setStart(match.node, match.start);
         range.setEnd(match.node, match.end);
         var span = document.createElement('span');
         span.className = 'search-highlight';
-        span.dataset.index = idx;
+        span.dataset.index = i;
         range.surroundContents(span);
-        searchMatches.push(span);
-      });
+        searchMatches.unshift(span); // Add to front to maintain original order
+      }
 
       searchCountEl.textContent = '1/' + searchMatches.length;
       currentSearchIndex = 0;
@@ -2478,7 +2483,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     }
 
     searchInput.addEventListener('input', function() {
-      performSearch();
+      var currentQuery = searchInput.value.trim();
+      if (currentQuery !== lastSearchQuery) {
+        performSearch();
+      }
     });
 
     searchInput.addEventListener('keydown', function(e) {
@@ -2498,10 +2506,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // Cmd+F to focus search input
     document.addEventListener('keydown', function(e) {
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault();
         // Only focus search if serial tab is active
         var serialTab = document.querySelector('[data-tab="serial"]');
         if (serialTab && serialTab.classList.contains('active')) {
+          e.preventDefault();
           searchInput.focus();
           searchInput.select();
         }
@@ -2577,15 +2585,17 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     }
 
     // Ctrl+A / Cmd+A to copy only serial output text (not buttons)
-    serialOutput.addEventListener('keydown', (e) => {
+    serialOutput.addEventListener('keydown', function(e) {
       if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
         e.preventDefault();
         // Select all text content in serial output
-        const range = document.createRange();
+        var range = document.createRange();
         range.selectNodeContents(serialOutput);
-        const selection = window.getSelection();
-        selection?.removeAllRanges();
-        selection?.addRange(range);
+        var selection = window.getSelection();
+        if (selection) {
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
       }
     });
 
@@ -2804,6 +2814,11 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
             serialOutput.scrollTop = serialOutput.scrollHeight;
           }
         });
+      }
+
+      // Re-run search if there's an active query (DOM may have changed)
+      if (lastSearchQuery && searchInput.value.trim()) {
+        performSearch();
       }
     }
 
