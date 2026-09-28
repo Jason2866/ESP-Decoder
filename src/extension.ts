@@ -279,6 +279,9 @@ export function activate(context: vscode.ExtensionContext) {
           viewProvider?.syncState();
         }, 50);
       }
+      if (e.affectsConfiguration('terminal.integrated.fontSize') && viewProvider) {
+        viewProvider.updateTerminalFontSize();
+      }
     })
   );
 }

@@ -301,6 +301,14 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     return this.config.elfPath;
   }
 
+  /**
+   * Push the current `terminal.integrated.fontSize` to the webview so the
+   * serial output font updates live without rebuilding the HTML.
+   */
+  public updateTerminalFontSize(): void {
+    this.postMessage({ type: 'fontSizeChanged', fontSize: this.getTerminalFontSize() });
+  }
+
   private handleSerialData(data: Buffer): void {
     // Use StringDecoder to correctly handle multi-byte UTF-8 characters
     // (e.g. ▂▄▆█) that may be split across consecutive data chunks.
@@ -1035,11 +1043,23 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Read the serial-output font size from the user's VS Code settings.
+   * Uses `terminal.integrated.fontSize` (falling back to 13px when unset or
+   * when set to VS Code's "0 = use editor default" sentinel).
+   */
+  private getTerminalFontSize(): number {
+    return vscode.workspace
+      .getConfiguration('terminal')
+      .get<number>('integrated.fontSize') || 13;
+  }
+
   private getHtmlContent(): string {
     const nonce = getNonce();
     const ansiParserJs = fs.readFileSync(
       path.join(this.extensionUri.fsPath, 'dist', 'ansiParser.js'), 'utf8'
     );
+    const terminalFontSize = this.getTerminalFontSize();
 
     return /*html*/ `<!DOCTYPE html>
 <html lang="en">
@@ -1069,6 +1089,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       --warning-fg: var(--vscode-editorWarning-foreground, #fa4);
       --success-fg: var(--vscode-terminal-ansiGreen, #4a4);
       --link-fg: var(--vscode-textLink-foreground, #3794ff);
+      --serial-font-size: ${terminalFontSize}px;
     }
 
     * {
@@ -1240,7 +1261,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       overflow-x: hidden;
       padding: 4px 8px;
       font-family: var(--vscode-editor-font-family, 'Courier New', monospace);
-      font-size: var(--vscode-editor-font-size, 13px);
+      font-size: var(--serial-font-size, 13px);
       line-height: 1.4;
       white-space: pre-wrap;
       word-break: break-all;
@@ -2465,6 +2486,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           break;
         case 'filtersSaved':
           showFilterSaveFeedback(msg.ok !== false, msg.error);
+          break;
+        case 'fontSizeChanged':
+          document.documentElement.style.setProperty('--serial-font-size', msg.fontSize + 'px');
           break;
       }
     });
