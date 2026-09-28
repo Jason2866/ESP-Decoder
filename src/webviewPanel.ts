@@ -1356,6 +1356,49 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       font-family: var(--vscode-editor-font-family, monospace);
     }
 
+    /* Search functionality */
+    .search-container {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .search-input {
+      background: var(--input-bg);
+      color: var(--input-fg);
+      border: 1px solid var(--input-border);
+      padding: 1px 5px;
+      font-size: 11px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      outline: none;
+      width: 120px;
+      border-radius: 2px;
+    }
+    .search-input:focus {
+      border-color: var(--link-fg);
+    }
+    .search-nav {
+      display: flex;
+      gap: 2px;
+    }
+    .search-nav button {
+      padding: 1px 6px;
+      font-size: 10px;
+      min-width: 20px;
+    }
+    .search-count {
+      font-size: 10px;
+      opacity: 0.7;
+      min-width: 40px;
+      text-align: center;
+    }
+    .search-highlight {
+      background-color: rgba(255, 200, 0, 0.3);
+      border-radius: 2px;
+    }
+    .search-highlight.current {
+      background-color: rgba(255, 200, 0, 0.6);
+    }
+
     /* Crash Events Panel */
     .crash-list {
       flex: 1;
@@ -1740,11 +1783,21 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       </label>
       <button id="filter-log2file" class="secondary" title="Start/stop logging serial output to a file" style="font-size:11px;padding:1px 7px">Log2File</button>
       <input type="text" id="filter-log-filename" placeholder="serial-YYYYMMDD_HHMMSS.log" title="Override default log filename" style="width:200px">
+      <div class="filter-sep"></div>
+      <div class="search-container">
+        <span class="filter-label">Search:</span>
+        <input type="text" id="search-input" class="search-input" placeholder="Search text..." title="Search in serial output (Cmd+F)">
+        <div class="search-nav">
+          <button id="search-prev" class="secondary" title="Previous match">&#8593;</button>
+          <button id="search-next" class="secondary" title="Next match">&#8595;</button>
+        </div>
+        <span id="search-count" class="search-count"></span>
+      </div>
     </div>
     <div id="serial-output"></div>
     <button id="btn-scroll-bottom" title="Scroll to bottom">&#8595; Scroll to bottom</button>
     <div class="serial-input-row">
-      <input type="text" id="serial-input" placeholder="Type command and press Enter..."
+      <input type="text" id="serial-input" placeholder="Type command and press Enter to send (or reconnect when disconnected)..."
         autocomplete="off" spellcheck="false" />
       <select id="line-ending" title="Line ending appended when sending">
         <option value="crlf">CRLF (\\r\\n)</option>
@@ -2140,6 +2193,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       currentLine = null;
       currentLineRaw = '';
       dedupResetLine();
+      // Clear search highlights
+      clearSearchHighlights();
+      searchInput.value = '';
       crashList.innerHTML = '';
       crashCount = 0;
       crashCountBadge.style.display = 'none';
@@ -2297,9 +2353,16 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     let currentInput = '';
 
     document.getElementById('btn-send').addEventListener('click', sendInput);
-    serialInput.addEventListener('keydown', (e) => {
+    serialInput.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') {
-        sendInput();
+        // If disconnected, pressing Enter should reconnect (like original monitor)
+        if (!connected) {
+          document.getElementById('btn-connect').textContent = 'Connecting...';
+          document.getElementById('btn-connect').disabled = true;
+          vscode.postMessage({ type: 'connect' });
+        } else if (serialInput.value.trim()) {
+          sendInput();
+        }
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         navigateHistory('up');
@@ -2310,22 +2373,151 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     });
 
     // Exit history navigation only when user actually edits input text
-    serialInput.addEventListener('input', () => {
+    serialInput.addEventListener('input', function() {
       if (historyIndex !== -1) {
         historyIndex = -1;
       }
     });
 
+    // Search functionality
+    const searchInput = document.getElementById('search-input');
+    const searchPrevBtn = document.getElementById('search-prev');
+    const searchNextBtn = document.getElementById('search-next');
+    const searchCountEl = document.getElementById('search-count');
+    let searchMatches = [];
+    let currentSearchIndex = -1;
+
+    function clearSearchHighlights() {
+      const highlights = serialOutput.querySelectorAll('.search-highlight');
+      highlights.forEach(el => {
+        const parent = el.parentNode;
+        parent.replaceChild(document.createTextNode(el.textContent), el);
+        parent.normalize();
+      });
+      searchMatches = [];
+      currentSearchIndex = -1;
+      searchCountEl.textContent = '';
+    }
+
+    function performSearch() {
+      clearSearchHighlights();
+      var query = searchInput.value.trim();
+      if (!query) return;
+
+      var walker = document.createTreeWalker(
+        serialOutput,
+        NodeFilter.SHOW_TEXT,
+        null
+      );
+
+      var nodes = [];
+      var node;
+      while (node = walker.nextNode()) {
+        var text = node.textContent;
+        var lowerText = text.toLowerCase();
+        var lowerQuery = query.toLowerCase();
+        var start = lowerText.indexOf(lowerQuery);
+        while (start !== -1) {
+          nodes.push({
+            node: node,
+            start: start,
+            end: start + query.length,
+            text: query
+          });
+          start = lowerText.indexOf(lowerQuery, start + 1);
+        }
+      }
+
+      if (nodes.length === 0) {
+        searchCountEl.textContent = '0/0';
+        return;
+      }
+
+      // Create highlights
+      nodes.forEach(function(match, idx) {
+        var range = document.createRange();
+        range.setStart(match.node, match.start);
+        range.setEnd(match.node, match.end);
+        var span = document.createElement('span');
+        span.className = 'search-highlight';
+        span.dataset.index = idx;
+        range.surroundContents(span);
+        searchMatches.push(span);
+      });
+
+      searchCountEl.textContent = '1/' + searchMatches.length;
+      currentSearchIndex = 0;
+      searchMatches[0].classList.add('current');
+      scrollToSearchMatch(0);
+    }
+
+    function scrollToSearchMatch(index) {
+      if (index < 0 || index >= searchMatches.length) return;
+      var match = searchMatches[index];
+      match.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+
+    function navigateSearch(direction) {
+      if (searchMatches.length === 0) return;
+
+      // Remove current highlight
+      if (currentSearchIndex >= 0 && currentSearchIndex < searchMatches.length) {
+        searchMatches[currentSearchIndex].classList.remove('current');
+      }
+
+      if (direction === 'next') {
+        currentSearchIndex = (currentSearchIndex + 1) % searchMatches.length;
+      } else {
+        currentSearchIndex = (currentSearchIndex - 1 + searchMatches.length) % searchMatches.length;
+      }
+
+      // Add current highlight
+      searchMatches[currentSearchIndex].classList.add('current');
+      searchCountEl.textContent = (currentSearchIndex + 1) + '/' + searchMatches.length;
+      scrollToSearchMatch(currentSearchIndex);
+    }
+
+    searchInput.addEventListener('input', function() {
+      performSearch();
+    });
+
+    searchInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        navigateSearch(e.shiftKey ? 'prev' : 'next');
+      } else if (e.key === 'Escape') {
+        searchInput.value = '';
+        clearSearchHighlights();
+        searchInput.blur();
+      }
+    });
+
+    searchNextBtn.addEventListener('click', function() { navigateSearch('next'); });
+    searchPrevBtn.addEventListener('click', function() { navigateSearch('prev'); });
+
+    // Cmd+F to focus search input
+    document.addEventListener('keydown', function(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault();
+        // Only focus search if serial tab is active
+        var serialTab = document.querySelector('[data-tab="serial"]');
+        if (serialTab && serialTab.classList.contains('active')) {
+          searchInput.focus();
+          searchInput.select();
+        }
+      }
+    });
+
     // Line-ending selector: remember choice across reloads
-    const lineEndingSelect = document.getElementById('line-ending');
-    const LINE_ENDINGS = { crlf: '\\r\\n', lf: '\\n', cr: '\\r', none: '' };
+    var lineEndingSelect = document.getElementById('line-ending');
+    var LINE_ENDINGS = { crlf: '\\r\\n', lf: '\\n', cr: '\\r', none: '' };
     try {
-      const saved = localStorage.getItem('esp-decoder.lineEnding');
+      var saved = localStorage.getItem('esp-decoder.lineEnding');
       if (saved && Object.prototype.hasOwnProperty.call(LINE_ENDINGS, saved)) {
         lineEndingSelect.value = saved;
       }
     } catch (_) { /* localStorage may be unavailable */ }
-    lineEndingSelect.addEventListener('change', () => {
+    lineEndingSelect.addEventListener('change', function() {
       try { localStorage.setItem('esp-decoder.lineEnding', lineEndingSelect.value); } catch (_) {}
     });
 
@@ -2383,6 +2575,19 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       // Move cursor to end of input
       serialInput.setSelectionRange(serialInput.value.length, serialInput.value.length);
     }
+
+    // Ctrl+A / Cmd+A to copy only serial output text (not buttons)
+    serialOutput.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault();
+        // Select all text content in serial output
+        const range = document.createRange();
+        range.selectNodeContents(serialOutput);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      }
+    });
 
     // Auto-scroll detection
     serialOutput.addEventListener('scroll', () => {
