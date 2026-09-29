@@ -275,7 +275,10 @@ export class SerialPortManager extends vscode.Disposable {
 
     // Run the actual connection logic; any concurrent caller that arrives
     // after the assignment above will simply await connectionPromise.
-    void this.connectInternal(connectionPromise, finishAttempt);
+    void this.connectInternal(connectionPromise, finishAttempt).catch((err) => {
+      this.log.appendLine(`[ESP Decoder] connectInternal rejected unexpectedly: ${err instanceof Error ? err.message : err}`);
+      finishAttempt(false);
+    });
     return connectionPromise;
   }
 
@@ -284,14 +287,30 @@ export class SerialPortManager extends vscode.Disposable {
     finishAttempt: (result: boolean) => void,
   ): Promise<void> {
     this.log.appendLine(`[ESP Decoder] connect() called, isConnected: ${this._isConnected}, path: ${this._selectedPath}`);
+
+    // Snapshot the generation at the start of this attempt so we can detect
+    // if a newer attempt (or a user-initiated disconnect) has superseded us
+    // across the awaits below.
+    const startGeneration = this._connectGeneration;
+
     if (this._isConnected) {
       await this.disconnect();
+      if (this._connectGeneration !== startGeneration) {
+        this.log.appendLine('[ESP Decoder] connectInternal: superseded after disconnect, aborting');
+        finishAttempt(false);
+        return;
+      }
     }
 
     if (!this._selectedPath) {
       const selected = await this.selectPort();
       if (!selected) {
         this.log.appendLine('[ESP Decoder] No port selected, aborting connect');
+        finishAttempt(false);
+        return;
+      }
+      if (this._connectGeneration !== startGeneration) {
+        this.log.appendLine('[ESP Decoder] connectInternal: superseded after selectPort, aborting');
         finishAttempt(false);
         return;
       }
@@ -517,11 +536,12 @@ export class SerialPortManager extends vscode.Disposable {
     // Cancel any pending auto-reconnect — an explicit disconnect always wins.
     this.cancelReconnect();
     this._userInitiatedDisconnect = true;
-    
-    // Clear any pending connection promise
-    this._connectPromise = null;
+
+    // Bump the generation so connectInternal detects it has been superseded.
+    // Do NOT null _connectPromise here — concurrent connect() callers must
+    // still be able to join or observe the in-flight attempt settling.
     this._connectGeneration++;
-    
+
     return new Promise<void>((resolve, reject) => {
       if (!this.port || !this._isConnected) {
         this._isConnected = false;

@@ -2358,9 +2358,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         if (e.isComposing) { return; }
         // If disconnected, pressing Enter should reconnect (like original monitor)
         if (!connected) {
-          document.getElementById('btn-connect').textContent = 'Connecting...';
-          document.getElementById('btn-connect').disabled = true;
-          vscode.postMessage({ type: 'connect' });
+          const btnConnect = document.getElementById('btn-connect');
+          if (!btnConnect.disabled) {
+            btnConnect.textContent = 'Connecting...';
+            btnConnect.disabled = true;
+            vscode.postMessage({ type: 'connect' });
+          }
         } else if (serialInput.value.trim()) {
           sendInput();
         }
@@ -2426,7 +2429,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     function performSearch(preserveSelection) {
       var previousIndex = currentSearchIndex;
       clearSearchHighlights();
-      var query = searchInput.value.trim();
+      var query = searchInput.value;
       if (!query) return;
 
       lastSearchQuery = query;
@@ -2453,7 +2456,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         var start = lowerText.indexOf(lowerQuery);
         while (start !== -1) {
           pending.push({ pieces: pieces, start: start, end: start + query.length });
-          start = lowerText.indexOf(lowerQuery, start + 1);
+          start = lowerText.indexOf(lowerQuery, start + lowerQuery.length);
         }
       }
 
@@ -2518,7 +2521,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     }
 
     searchInput.addEventListener('input', function() {
-      var currentQuery = searchInput.value.trim();
+      var currentQuery = searchInput.value;
       if (currentQuery !== lastSearchQuery) {
         performSearch();
       }
@@ -2735,7 +2738,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           }
         });
       }
-      if (lastSearchQuery && searchInput.value.trim()) {
+      if (lastSearchQuery && searchInput.value) {
         performSearch(true);
       }
     }
@@ -2856,7 +2859,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       }
 
       // Re-run search if there's an active query (DOM may have changed)
-      if (lastSearchQuery && searchInput.value.trim()) {
+      if (lastSearchQuery && searchInput.value) {
         performSearch(true);
       }
     }
