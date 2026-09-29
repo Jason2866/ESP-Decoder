@@ -1356,49 +1356,6 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       font-family: var(--vscode-editor-font-family, monospace);
     }
 
-    /* Search functionality */
-    .search-container {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-    }
-    .search-input {
-      background: var(--input-bg);
-      color: var(--input-fg);
-      border: 1px solid var(--input-border);
-      padding: 1px 5px;
-      font-size: 11px;
-      font-family: var(--vscode-editor-font-family, monospace);
-      outline: none;
-      width: 120px;
-      border-radius: 2px;
-    }
-    .search-input:focus {
-      border-color: var(--link-fg);
-    }
-    .search-nav {
-      display: flex;
-      gap: 2px;
-    }
-    .search-nav button {
-      padding: 1px 6px;
-      font-size: 10px;
-      min-width: 20px;
-    }
-    .search-count {
-      font-size: 10px;
-      opacity: 0.7;
-      min-width: 40px;
-      text-align: center;
-    }
-    .search-highlight {
-      background-color: rgba(255, 200, 0, 0.3);
-      border-radius: 2px;
-    }
-    .search-highlight.current {
-      background-color: rgba(255, 200, 0, 0.6);
-    }
-
     /* Crash Events Panel */
     .crash-list {
       flex: 1;
@@ -1783,16 +1740,6 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       </label>
       <button id="filter-log2file" class="secondary" title="Start/stop logging serial output to a file" style="font-size:11px;padding:1px 7px">Log2File</button>
       <input type="text" id="filter-log-filename" placeholder="serial-YYYYMMDD_HHMMSS.log" title="Override default log filename" style="width:200px">
-      <div class="filter-sep"></div>
-      <div class="search-container">
-        <span class="filter-label">Search:</span>
-        <input type="text" id="search-input" class="search-input" placeholder="Search text..." title="Search in serial output (Cmd+F)">
-        <div class="search-nav">
-          <button id="search-prev" class="secondary" title="Previous match">&#8593;</button>
-          <button id="search-next" class="secondary" title="Next match">&#8595;</button>
-        </div>
-        <span id="search-count" class="search-count"></span>
-      </div>
     </div>
     <div id="serial-output" tabindex="0"></div>
     <button id="btn-scroll-bottom" title="Scroll to bottom">&#8595; Scroll to bottom</button>
@@ -2193,9 +2140,6 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       currentLine = null;
       currentLineRaw = '';
       dedupResetLine();
-      // Clear search highlights
-      clearSearchHighlights();
-      searchInput.value = '';
       crashList.innerHTML = '';
       crashCount = 0;
       crashCountBadge.style.display = 'none';
@@ -2383,177 +2327,6 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       }
     });
 
-    // Search functionality
-    var searchInput = document.getElementById('search-input');
-    var searchPrevBtn = document.getElementById('search-prev');
-    var searchNextBtn = document.getElementById('search-next');
-    var searchCountEl = document.getElementById('search-count');
-    var searchMatches = [];
-    var currentSearchIndex = -1;
-    var lastSearchQuery = '';
-
-    function clearSearchHighlights() {
-      var highlights = serialOutput.querySelectorAll('.search-highlight');
-      highlights.forEach(function(el) {
-        var parent = el.parentNode;
-        parent.replaceChild(document.createTextNode(el.textContent), el);
-        parent.normalize();
-      });
-      searchMatches = [];
-      currentSearchIndex = -1;
-      searchCountEl.textContent = '';
-      lastSearchQuery = '';
-    }
-
-    function collectTextNodes(root) {
-      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-      var nodes = [];
-      var node;
-      while (node = walker.nextNode()) {
-        nodes.push(node);
-      }
-      return nodes;
-    }
-
-    function markCurrentSearchMatch(index) {
-      var highlights = serialOutput.querySelectorAll('.search-highlight');
-      highlights.forEach(function(el) {
-        if (el.dataset.index === String(index)) {
-          el.classList.add('current');
-        } else {
-          el.classList.remove('current');
-        }
-      });
-    }
-
-    function performSearch(preserveSelection) {
-      var previousIndex = currentSearchIndex;
-      clearSearchHighlights();
-      var query = searchInput.value;
-      if (!query) return;
-
-      lastSearchQuery = query;
-      var lowerQuery = query.toLowerCase();
-      var pending = [];
-
-      var lineRoots = serialOutput.childNodes;
-      for (var lineIdx = 0; lineIdx < lineRoots.length; lineIdx++) {
-        var lineRoot = lineRoots[lineIdx];
-        if (lineRoot.nodeType !== 1 && lineRoot.nodeType !== 3) continue;
-        var textNodes = lineRoot.nodeType === 3 ? [lineRoot] : collectTextNodes(lineRoot);
-        var pieces = [];
-        var combined = '';
-        for (var n = 0; n < textNodes.length; n++) {
-          var nodeText = textNodes[n].textContent || '';
-          pieces.push({
-            node: textNodes[n],
-            start: combined.length,
-            end: combined.length + nodeText.length
-          });
-          combined += nodeText;
-        }
-        var lowerText = combined.toLowerCase();
-        var start = lowerText.indexOf(lowerQuery);
-        while (start !== -1) {
-          pending.push({ pieces: pieces, start: start, end: start + query.length });
-          start = lowerText.indexOf(lowerQuery, start + lowerQuery.length);
-        }
-      }
-
-      if (pending.length === 0) {
-        searchCountEl.textContent = '0/0';
-        return;
-      }
-
-      searchMatches = new Array(pending.length);
-      for (var i = pending.length - 1; i >= 0; i--) {
-        var match = pending[i];
-        var firstSpan = null;
-        for (var p = match.pieces.length - 1; p >= 0; p--) {
-          var piece = match.pieces[p];
-          if (piece.end <= match.start || piece.start >= match.end) continue;
-          var localStart = Math.max(0, match.start - piece.start);
-          var localEnd = Math.min(piece.node.length, match.end - piece.start);
-          if (localStart >= localEnd) continue;
-          var range = document.createRange();
-          range.setStart(piece.node, localStart);
-          range.setEnd(piece.node, localEnd);
-          var span = document.createElement('span');
-          span.className = 'search-highlight';
-          span.dataset.index = String(i);
-          range.surroundContents(span);
-          firstSpan = span;
-        }
-        searchMatches[i] = firstSpan;
-      }
-
-      var nextIndex = 0;
-      if (preserveSelection && previousIndex >= 0 && previousIndex < searchMatches.length && searchMatches[previousIndex]) {
-        nextIndex = previousIndex;
-      }
-      currentSearchIndex = nextIndex;
-      searchCountEl.textContent = (currentSearchIndex + 1) + '/' + searchMatches.length;
-      markCurrentSearchMatch(currentSearchIndex);
-      if (!preserveSelection) {
-        scrollToSearchMatch(currentSearchIndex);
-      }
-    }
-
-    function scrollToSearchMatch(index) {
-      if (index < 0 || index >= searchMatches.length) return;
-      var match = searchMatches[index];
-      if (!match) return;
-      match.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    }
-
-    function navigateSearch(direction) {
-      if (searchMatches.length === 0) return;
-
-      if (direction === 'next') {
-        currentSearchIndex = (currentSearchIndex + 1) % searchMatches.length;
-      } else {
-        currentSearchIndex = (currentSearchIndex - 1 + searchMatches.length) % searchMatches.length;
-      }
-
-      searchCountEl.textContent = (currentSearchIndex + 1) + '/' + searchMatches.length;
-      markCurrentSearchMatch(currentSearchIndex);
-      scrollToSearchMatch(currentSearchIndex);
-    }
-
-    searchInput.addEventListener('input', function() {
-      var currentQuery = searchInput.value;
-      if (currentQuery !== lastSearchQuery) {
-        performSearch();
-      }
-    });
-
-    searchInput.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') {
-        if (e.isComposing) { return; }
-        e.preventDefault();
-        navigateSearch(e.shiftKey ? 'prev' : 'next');
-      } else if (e.key === 'Escape') {
-        searchInput.value = '';
-        clearSearchHighlights();
-        searchInput.blur();
-      }
-    });
-
-    searchNextBtn.addEventListener('click', function() { navigateSearch('next'); });
-    searchPrevBtn.addEventListener('click', function() { navigateSearch('prev'); });
-
-    // Cmd+F to focus search input
-    document.addEventListener('keydown', function(e) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        // Only focus search if serial tab is active
-        var serialTab = document.querySelector('[data-tab="serial"]');
-        if (serialTab && serialTab.classList.contains('active')) {
-          e.preventDefault();
-          searchInput.focus();
-          searchInput.select();
-        }
-      }
-    });
 
     // Line-ending selector: remember choice across reloads
     var lineEndingSelect = document.getElementById('line-ending');
@@ -2762,9 +2535,6 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           }
         });
       }
-      if (lastSearchQuery && searchInput.value) {
-        performSearch(true);
-      }
     }
 
     function renderAnsiText(text) {
@@ -2882,10 +2652,6 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         });
       }
 
-      // Re-run search if there's an active query (DOM may have changed)
-      if (lastSearchQuery && searchInput.value) {
-        performSearch(true);
-      }
     }
 
     function updateConnectionState(isConnected, port, baudRate) {
