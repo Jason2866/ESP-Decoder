@@ -291,10 +291,13 @@ export class SerialPortManager extends vscode.Disposable {
     // Snapshot the generation at the start of this attempt so we can detect
     // if a newer attempt (or a user-initiated disconnect) has superseded us
     // across the awaits below.
-    const startGeneration = this._connectGeneration;
+    var startGeneration = this._connectGeneration;
 
     if (this._isConnected) {
-      await this.disconnect();
+      const disconnecting = this.disconnect();
+      // disconnect() bumps the generation synchronously; absorb our own bump.
+      startGeneration = this._connectGeneration;
+      await disconnecting;
       if (this._connectGeneration !== startGeneration) {
         this.log.appendLine('[ESP Decoder] connectInternal: superseded after disconnect, aborting');
         finishAttempt(false);

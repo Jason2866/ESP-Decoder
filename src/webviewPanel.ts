@@ -2402,7 +2402,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // (quick-picks, command palette) runs above the webview iframe and takes
     // keyboard focus away from it entirely, so this handler never fires there.
     document.addEventListener('keydown', function(e) {
-      if (!((e.ctrlKey || e.metaKey) && e.key === 'a')) { return; }
+      if (!((e.ctrlKey || e.metaKey) && !e.altKey &&
+            (e.key.toLowerCase() === 'a' || e.code === 'KeyA'))) { return; }
       var serialTab = document.querySelector('[data-tab="serial"]');
       if (!serialTab || !serialTab.classList.contains('active')) { return; }
       var focused = document.activeElement;
