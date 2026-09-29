@@ -281,6 +281,10 @@ export class SerialPortManager extends vscode.Disposable {
     this._connectGeneration++;
 
     const connectionPromise = new Promise<boolean>((resolve) => {
+      // Store a reference to this specific promise for callback validation
+      const promiseRef = connectionPromise;
+      // Capture the generation for this specific attempt
+      const attemptGeneration = this._connectGeneration;
       this.log.appendLine(`[ESP Decoder] Creating SerialPort instance for ${this._selectedPath} @ ${this._baudRate}`);
       try {
         this.port = new SerialPort(
@@ -299,7 +303,10 @@ export class SerialPortManager extends vscode.Disposable {
           );
         }
         this.port = null;
-        this._connectPromise = null;
+        // Clear the promise since this attempt failed synchronously
+        if (this._connectPromise === promiseRef) {
+          this._connectPromise = null;
+        }
         resolve(false);
         return;
       }
@@ -351,10 +358,17 @@ export class SerialPortManager extends vscode.Disposable {
       });
 
       portInstance.open((err) => {
-        // Only process callbacks from the current port instance
-        if (this.port !== portInstance) {
-          this.log.appendLine('[ESP Decoder] Ignoring open callback from stale port instance');
-          this._connectPromise = null;
+        // Validate both port instance and generation
+        if (this.port !== portInstance || this._connectGeneration !== attemptGeneration) {
+          this.log.appendLine('[ESP Decoder] Ignoring open callback from stale connection attempt');
+          // Only clear the promise if it's still the one we created
+          if (this._connectPromise === promiseRef) {
+            this._connectPromise = null;
+          }
+          // Don't clear this.port if it belongs to a newer attempt
+          if (this.port === portInstance) {
+            this.port = null;
+          }
           resolve(false);
           return;
         }
@@ -369,7 +383,10 @@ export class SerialPortManager extends vscode.Disposable {
             );
           }
           this.port = null;
-          this._connectPromise = null;
+          // Only clear the promise if it's still the one we created
+          if (this._connectPromise === promiseRef) {
+            this._connectPromise = null;
+          }
           resolve(false);
           return;
         }
@@ -390,10 +407,17 @@ export class SerialPortManager extends vscode.Disposable {
         void this.captureDeviceIdentity()
           .catch(() => { /* best effort — identity used only for reconnect matching */ })
           .then(() => {
-            // Only process callbacks from the current port instance
-            if (this.port !== portInstance) {
-              this.log.appendLine('[ESP Decoder] Ignoring delayed callback from stale port instance');
-              this._connectPromise = null;
+            // Validate both port instance and generation
+            if (this.port !== portInstance || this._connectGeneration !== attemptGeneration) {
+              this.log.appendLine('[ESP Decoder] Ignoring delayed callback from stale connection attempt');
+              // Only clear the promise if it's still the one we created
+              if (this._connectPromise === promiseRef) {
+                this._connectPromise = null;
+              }
+              // Don't clear this.port if it belongs to a newer attempt
+              if (this.port === portInstance) {
+                this.port = null;
+              }
               resolve(false);
               return;
             }
@@ -412,7 +436,10 @@ export class SerialPortManager extends vscode.Disposable {
               }, SerialPortManager.STABILITY_MS);
             }
             this._onConnectionChange.fire(true);
-            this._connectPromise = null;
+            // Only clear the promise if it's still the one we created
+            if (this._connectPromise === promiseRef) {
+              this._connectPromise = null;
+            }
             resolve(true);
           });
       });
