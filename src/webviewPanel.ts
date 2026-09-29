@@ -1762,10 +1762,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       <button id="filter-log2file" class="secondary" title="Start/stop logging serial output to a file" style="font-size:11px;padding:1px 7px">Log2File</button>
       <input type="text" id="filter-log-filename" placeholder="serial-YYYYMMDD_HHMMSS.log" title="Override default log filename" style="width:200px">
     </div>
-    <div id="serial-output"></div>
+    <div id="serial-output" tabindex="0"></div>
     <button id="btn-scroll-bottom" title="Scroll to bottom">&#8595; Scroll to bottom</button>
     <div class="serial-input-row">
-      <input type="text" id="serial-input" placeholder="Type command and press Enter..."
+      <input type="text" id="serial-input" placeholder="Type command and press Enter to send (or reconnect when disconnected)..."
         autocomplete="off" spellcheck="false" />
       <select id="line-ending" title="Line ending appended when sending">
         <option value="crlf">CRLF (\\r\\n)</option>
@@ -2318,9 +2318,20 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     let currentInput = '';
 
     document.getElementById('btn-send').addEventListener('click', sendInput);
-    serialInput.addEventListener('keydown', (e) => {
+    serialInput.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') {
-        sendInput();
+        if (e.isComposing) { return; }
+        // If disconnected, pressing Enter should reconnect (like original monitor)
+        if (!connected) {
+          const btnConnect = document.getElementById('btn-connect');
+          if (!btnConnect.disabled) {
+            btnConnect.textContent = 'Connecting...';
+            btnConnect.disabled = true;
+            vscode.postMessage({ type: 'connect' });
+          }
+        } else if (serialInput.value.trim()) {
+          sendInput();
+        }
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         navigateHistory('up');
@@ -2331,22 +2342,23 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     });
 
     // Exit history navigation only when user actually edits input text
-    serialInput.addEventListener('input', () => {
+    serialInput.addEventListener('input', function() {
       if (historyIndex !== -1) {
         historyIndex = -1;
       }
     });
 
+
     // Line-ending selector: remember choice across reloads
-    const lineEndingSelect = document.getElementById('line-ending');
-    const LINE_ENDINGS = { crlf: '\\r\\n', lf: '\\n', cr: '\\r', none: '' };
+    var lineEndingSelect = document.getElementById('line-ending');
+    var LINE_ENDINGS = { crlf: '\\r\\n', lf: '\\n', cr: '\\r', none: '' };
     try {
-      const saved = localStorage.getItem('esp-decoder.lineEnding');
+      var saved = localStorage.getItem('esp-decoder.lineEnding');
       if (saved && Object.prototype.hasOwnProperty.call(LINE_ENDINGS, saved)) {
         lineEndingSelect.value = saved;
       }
     } catch (_) { /* localStorage may be unavailable */ }
-    lineEndingSelect.addEventListener('change', () => {
+    lineEndingSelect.addEventListener('change', function() {
       try { localStorage.setItem('esp-decoder.lineEnding', lineEndingSelect.value); } catch (_) {}
     });
 
@@ -2404,6 +2416,46 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       // Move cursor to end of input
       serialInput.setSelectionRange(serialInput.value.length, serialInput.value.length);
     }
+
+    // Ctrl+A / Cmd+A: scope selection to serialOutput whenever the serial tab is
+    // active. Exempt editable fields (inputs, textareas, contenteditable) so
+    // that Cmd+A inside those still selects their own text. VS Code native UI
+    // (quick-picks, command palette) runs above the webview iframe and takes
+    // keyboard focus away from it entirely, so this handler never fires there.
+    document.addEventListener('keydown', function(e) {
+      if (!((e.ctrlKey || e.metaKey) && !e.altKey &&
+            (e.key.toLowerCase() === 'a' || e.code === 'KeyA'))) { return; }
+      var serialTab = document.querySelector('[data-tab="serial"]');
+      if (!serialTab || !serialTab.classList.contains('active')) { return; }
+      var focused = document.activeElement;
+      if (focused &&
+          (focused.tagName === 'INPUT' ||
+           focused.tagName === 'TEXTAREA' ||
+           focused.isContentEditable)) { return; }
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      var range = document.createRange();
+      range.selectNodeContents(serialOutput);
+      var selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    }, true);
+
+    // Clear any serialOutput selection when the user clicks outside it so the
+    // active range doesn't interfere with button clicks.
+    document.addEventListener('pointerdown', function(e) {
+      if (!serialOutput.contains(e.target)) {
+        var sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+          var r = sel.getRangeAt(0);
+          if (serialOutput.contains(r.commonAncestorContainer)) {
+            sel.removeAllRanges();
+          }
+        }
+      }
+    });
 
     // Auto-scroll detection
     serialOutput.addEventListener('scroll', () => {
