@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.27.2] - 2026-09-29
+
+### New Feature
+- **Serial Monitor — Cmd+A / Ctrl+A** — select-all now always scopes to the serial log output only, regardless of which element has focus.
+
+## [0.27.1] - 2026-09-28
+
+### New Feature
+- **Terminal output** — The terminal output in the extension now updates its font size automatically when VS Code’s terminal font size setting changes.
+
 ## [0.27.0] - 2026-05-18
 
 ### New Feature

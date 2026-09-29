@@ -2,7 +2,7 @@
   "name": "esp-decoder",
   "displayName": "ESP Crash Decoder",
   "description": "Decode ESP32 / ESP8266 crash dumps from serial port",
-  "version": "0.27.1",
+  "version": "0.27.2",
   "publisher": "Jason2866",
   "license": "GPL-3.0",
   "icon": "assets/icon_large.png",
@@ -238,5 +238,10 @@
     "pioarduino-node-helpers": "^12.6.1",
     "typescript": "6.0.3",
     "vitest": "^4.1.7"
+  },
+  "allowScripts": {
+    "@jason2866/serialport-bindings-cpp@13.0.5": true,
+    "fsevents@2.3.3": true,
+    "esbuild@0.28.2": true
   }
 }
