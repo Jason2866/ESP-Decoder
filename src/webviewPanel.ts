@@ -2652,7 +2652,6 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           }
         });
       }
-
     }
 
     function updateConnectionState(isConnected, port, baudRate) {
