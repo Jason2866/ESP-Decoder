@@ -2401,74 +2401,109 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       lastSearchQuery = '';
     }
 
-    function performSearch() {
+    function collectTextNodes(root) {
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+      var nodes = [];
+      var node;
+      while (node = walker.nextNode()) {
+        nodes.push(node);
+      }
+      return nodes;
+    }
+
+    function markCurrentSearchMatch(index) {
+      var highlights = serialOutput.querySelectorAll('.search-highlight');
+      highlights.forEach(function(el) {
+        if (el.dataset.index === String(index)) {
+          el.classList.add('current');
+        } else {
+          el.classList.remove('current');
+        }
+      });
+    }
+
+    function performSearch(preserveSelection) {
+      var previousIndex = currentSearchIndex;
       clearSearchHighlights();
       var query = searchInput.value.trim();
       if (!query) return;
 
       lastSearchQuery = query;
+      var lowerQuery = query.toLowerCase();
+      var pending = [];
 
-      var walker = document.createTreeWalker(
-        serialOutput,
-        NodeFilter.SHOW_TEXT,
-        null
-      );
-
-      var nodes = [];
-      var node;
-      while (node = walker.nextNode()) {
-        var text = node.textContent;
-        var lowerText = text.toLowerCase();
-        var lowerQuery = query.toLowerCase();
+      var lineRoots = serialOutput.childNodes;
+      for (var lineIdx = 0; lineIdx < lineRoots.length; lineIdx++) {
+        var lineRoot = lineRoots[lineIdx];
+        if (lineRoot.nodeType !== 1 && lineRoot.nodeType !== 3) continue;
+        var textNodes = lineRoot.nodeType === 3 ? [lineRoot] : collectTextNodes(lineRoot);
+        var pieces = [];
+        var combined = '';
+        for (var n = 0; n < textNodes.length; n++) {
+          var nodeText = textNodes[n].textContent || '';
+          pieces.push({
+            node: textNodes[n],
+            start: combined.length,
+            end: combined.length + nodeText.length
+          });
+          combined += nodeText;
+        }
+        var lowerText = combined.toLowerCase();
         var start = lowerText.indexOf(lowerQuery);
         while (start !== -1) {
-          nodes.push({
-            node: node,
-            start: start,
-            end: start + query.length,
-            text: query
-          });
+          pending.push({ pieces: pieces, start: start, end: start + query.length });
           start = lowerText.indexOf(lowerQuery, start + 1);
         }
       }
 
-      if (nodes.length === 0) {
+      if (pending.length === 0) {
         searchCountEl.textContent = '0/0';
         return;
       }
 
-      // Create highlights - process from highest to lowest offset to avoid offset invalidation
-      for (var i = nodes.length - 1; i >= 0; i--) {
-        var match = nodes[i];
-        var range = document.createRange();
-        range.setStart(match.node, match.start);
-        range.setEnd(match.node, match.end);
-        var span = document.createElement('span');
-        span.className = 'search-highlight';
-        span.dataset.index = i;
-        range.surroundContents(span);
-        searchMatches.unshift(span); // Add to front to maintain original order
+      searchMatches = new Array(pending.length);
+      for (var i = pending.length - 1; i >= 0; i--) {
+        var match = pending[i];
+        var firstSpan = null;
+        for (var p = match.pieces.length - 1; p >= 0; p--) {
+          var piece = match.pieces[p];
+          if (piece.end <= match.start || piece.start >= match.end) continue;
+          var localStart = Math.max(0, match.start - piece.start);
+          var localEnd = Math.min(piece.node.length, match.end - piece.start);
+          if (localStart >= localEnd) continue;
+          var range = document.createRange();
+          range.setStart(piece.node, localStart);
+          range.setEnd(piece.node, localEnd);
+          var span = document.createElement('span');
+          span.className = 'search-highlight';
+          span.dataset.index = String(i);
+          range.surroundContents(span);
+          firstSpan = span;
+        }
+        searchMatches[i] = firstSpan;
       }
 
-      searchCountEl.textContent = '1/' + searchMatches.length;
-      currentSearchIndex = 0;
-      searchMatches[0].classList.add('current');
-      scrollToSearchMatch(0);
+      var nextIndex = 0;
+      if (preserveSelection && previousIndex >= 0 && previousIndex < searchMatches.length && searchMatches[previousIndex]) {
+        nextIndex = previousIndex;
+      }
+      currentSearchIndex = nextIndex;
+      searchCountEl.textContent = (currentSearchIndex + 1) + '/' + searchMatches.length;
+      markCurrentSearchMatch(currentSearchIndex);
+      if (!preserveSelection) {
+        scrollToSearchMatch(currentSearchIndex);
+      }
     }
 
     function scrollToSearchMatch(index) {
       if (index < 0 || index >= searchMatches.length) return;
       var match = searchMatches[index];
+      if (!match) return;
       match.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
 
     function navigateSearch(direction) {
       if (searchMatches.length === 0) return;
-
-      // Remove current highlight
-      if (currentSearchIndex >= 0 && currentSearchIndex < searchMatches.length) {
-        searchMatches[currentSearchIndex].classList.remove('current');
-      }
 
       if (direction === 'next') {
         currentSearchIndex = (currentSearchIndex + 1) % searchMatches.length;
@@ -2476,9 +2511,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         currentSearchIndex = (currentSearchIndex - 1 + searchMatches.length) % searchMatches.length;
       }
 
-      // Add current highlight
-      searchMatches[currentSearchIndex].classList.add('current');
       searchCountEl.textContent = (currentSearchIndex + 1) + '/' + searchMatches.length;
+      markCurrentSearchMatch(currentSearchIndex);
       scrollToSearchMatch(currentSearchIndex);
     }
 
@@ -2818,7 +2852,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
       // Re-run search if there's an active query (DOM may have changed)
       if (lastSearchQuery && searchInput.value.trim()) {
-        performSearch();
+        performSearch(true);
       }
     }
 

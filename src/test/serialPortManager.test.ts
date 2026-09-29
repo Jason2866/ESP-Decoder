@@ -6,9 +6,35 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { SerialPort } from 'serialport';
 import { SerialPortManager } from '../serialPortManager.js';
 
 // Mock vscode before importing SerialPortManager
+vi.mock('serialport', () => {
+  class MockSerialPort {
+    static throwOnConstruct = false;
+    static list = vi.fn(async () => []);
+    isOpen = false;
+    constructor() {
+      if (MockSerialPort.throwOnConstruct) {
+        throw new Error('invalid path');
+      }
+    }
+    on() { return this; }
+    open(cb: (err: Error | null) => void) {
+      this.isOpen = true;
+      cb(null);
+    }
+    close(cb?: (err?: Error | null) => void) {
+      this.isOpen = false;
+      if (cb) {
+        cb(null);
+      }
+    }
+  }
+  return { SerialPort: MockSerialPort };
+});
+
 vi.mock('vscode', () => {
   class EventEmitter<T> {
     private _listeners: ((e: T) => void)[] = [];
@@ -40,6 +66,7 @@ vi.mock('vscode', () => {
         appendLine: () => {},
         dispose: () => {},
       }),
+      showErrorMessage: () => {},
     },
     workspace: {
       getConfiguration: () => ({
@@ -315,6 +342,24 @@ describe('SerialPortManager.filterPorts', () => {
 
       const result = manager.filterPorts(input);
       expect(result).toEqual(input);
+    });
+  });
+
+  describe('connect', () => {
+    afterEach(() => {
+      (SerialPort as unknown as { throwOnConstruct: boolean }).throwOnConstruct = false;
+    });
+
+    it('does not cache a failed synchronous SerialPort construction', async () => {
+      (SerialPort as unknown as { throwOnConstruct: boolean }).throwOnConstruct = true;
+      manager.setPort('/dev/ttyUSB0');
+
+      const first = await manager.connect();
+      expect(first).toBe(false);
+
+      (SerialPort as unknown as { throwOnConstruct: boolean }).throwOnConstruct = false;
+      const second = await manager.connect();
+      expect(second).toBe(true);
     });
   });
 });

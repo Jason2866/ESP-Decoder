@@ -279,173 +279,165 @@ export class SerialPortManager extends vscode.Disposable {
 
     // Increment generation for this connection attempt
     this._connectGeneration++;
+    const attemptGeneration = this._connectGeneration;
 
+    let resolveAttempt!: (value: boolean) => void;
     const connectionPromise = new Promise<boolean>((resolve) => {
-      // Store a reference to this specific promise for callback validation
-      const promiseRef = connectionPromise;
-      // Capture the generation for this specific attempt
-      const attemptGeneration = this._connectGeneration;
-      this.log.appendLine(`[ESP Decoder] Creating SerialPort instance for ${this._selectedPath} @ ${this._baudRate}`);
+      resolveAttempt = resolve;
+    });
+    this._connectPromise = connectionPromise;
+
+    const finishAttempt = (result: boolean) => {
+      if (this._connectPromise === connectionPromise) {
+        this._connectPromise = null;
+      }
+      resolveAttempt(result);
+    };
+
+    const abandonPortIfStale = (portInstance: SerialPort) => {
+      // Don't clear this.port if it belongs to a newer attempt.
+      if (this.port === portInstance) {
+        this.port = null;
+      }
       try {
-        this.port = new SerialPort(
-          {
-            path: this._selectedPath!,
-            baudRate: this._baudRate,
-            autoOpen: false,
-            hupcl: false,
-          },
+        if (portInstance.isOpen) {
+          portInstance.close(() => { /* abandoned attempt */ });
+        }
+      } catch {
+        /* ignore close errors on invalidated ports */
+      }
+    };
+
+    this.log.appendLine(`[ESP Decoder] Creating SerialPort instance for ${this._selectedPath} @ ${this._baudRate}`);
+    try {
+      this.port = new SerialPort(
+        {
+          path: this._selectedPath!,
+          baudRate: this._baudRate,
+          autoOpen: false,
+          hupcl: false,
+        },
+      );
+    } catch (err) {
+      this.log.appendLine(`[ESP Decoder] Failed to create SerialPort: ${err instanceof Error ? err.message : err}`);
+      if (!this._suppressErrorToasts) {
+        vscode.window.showErrorMessage(
+          `Failed to create serial port: ${err instanceof Error ? err.message : err}`
         );
-      } catch (err) {
-        this.log.appendLine(`[ESP Decoder] Failed to create SerialPort: ${err instanceof Error ? err.message : err}`);
-        if (!this._suppressErrorToasts) {
+      }
+      this.port = null;
+      finishAttempt(false);
+      return connectionPromise;
+    }
+
+    const portInstance = this.port;
+
+    portInstance.on('error', (err: Error) => {
+      // Only process callbacks from the current port instance
+      if (this.port !== portInstance) {
+        this.log.appendLine('[ESP Decoder] Ignoring error callback from stale port instance');
+        return;
+      }
+      if (this.shouldSuppressTransient(err)) {
+        this.log.appendLine(`[ESP Decoder] suppressed transient error (auto-reconnect): ${err.message}`);
+        return;
+      }
+      this._onError.fire(err);
+    });
+
+    portInstance.on('close', (disconnectError?: Error | null) => {
+      // Only process callbacks from the current port instance
+      if (this.port !== portInstance) {
+        this.log.appendLine('[ESP Decoder] Ignoring close callback from stale port instance');
+        return;
+      }
+      // Cancel any pending stability check — connection didn't last.
+      this.clearStabilityTimer();
+      if (disconnectError) {
+        if (this.shouldSuppressTransient(disconnectError)) {
+          this.log.appendLine(`[ESP Decoder] suppressed transient close error (auto-reconnect): ${disconnectError.message}`);
+        } else {
+          this._onError.fire(disconnectError);
+        }
+      }
+      this.port = null;
+      if (this._isConnected) {
+        this._isConnected = false;
+        const info: DisconnectInfo = {
+          userInitiated: this._userInitiatedDisconnect,
+          suspended: this._suspendedPath !== undefined,
+        };
+        // Reset the intent flag so the next close (e.g. unexpected USB drop)
+        // is correctly classified as not user-initiated.
+        this._userInitiatedDisconnect = false;
+        this._onConnectionChange.fire(false);
+        this._onDisconnect.fire(info);
+      }
+    });
+
+    portInstance.open((err) => {
+      if (this.port !== portInstance || this._connectGeneration !== attemptGeneration) {
+        this.log.appendLine('[ESP Decoder] Ignoring open callback from stale connection attempt');
+        abandonPortIfStale(portInstance);
+        finishAttempt(false);
+        return;
+      }
+      if (err) {
+        // During an active reconnect window, treat open failures as part of
+        // the polling cycle — don't toast, don't fire the error event.
+        if (this._isReconnecting) {
+          this.log.appendLine(`[ESP Decoder] auto-reconnect: open failed, will retry: ${err.message}`);
+        } else if (!this._suppressErrorToasts) {
           vscode.window.showErrorMessage(
-            `Failed to create serial port: ${err instanceof Error ? err.message : err}`
+            `Failed to open ${this._selectedPath}: ${err.message}`
           );
         }
         this.port = null;
-        // Clear the promise since this attempt failed synchronously
-        if (this._connectPromise === promiseRef) {
-          this._connectPromise = null;
-        }
-        resolve(false);
+        finishAttempt(false);
         return;
       }
-
-      // Store the port instance for callback validation
-      const portInstance = this.port;
-
-      portInstance.on('error', (err: Error) => {
+      // Register the data listener only after the port is open so the
+      // stream's first _read() runs with a fully initialised handle.
+      portInstance.on('data', (data: Buffer) => {
         // Only process callbacks from the current port instance
         if (this.port !== portInstance) {
-          this.log.appendLine('[ESP Decoder] Ignoring error callback from stale port instance');
           return;
         }
-        if (this.shouldSuppressTransient(err)) {
-          this.log.appendLine(`[ESP Decoder] suppressed transient error (auto-reconnect): ${err.message}`);
-          return;
-        }
-        this._onError.fire(err);
+        this._onData.fire(data);
       });
-
-      portInstance.on('close', (disconnectError?: Error | null) => {
-        // Only process callbacks from the current port instance
-        if (this.port !== portInstance) {
-          this.log.appendLine('[ESP Decoder] Ignoring close callback from stale port instance');
-          return;
-        }
-        // Cancel any pending stability check — connection didn't last.
-        this.clearStabilityTimer();
-        if (disconnectError) {
-          if (this.shouldSuppressTransient(disconnectError)) {
-            this.log.appendLine(`[ESP Decoder] suppressed transient close error (auto-reconnect): ${disconnectError.message}`);
-          } else {
-            this._onError.fire(disconnectError);
-          }
-        }
-        this.port = null;
-        if (this._isConnected) {
-          this._isConnected = false;
-          const info: DisconnectInfo = {
-            userInitiated: this._userInitiatedDisconnect,
-            suspended: this._suspendedPath !== undefined,
-          };
-          // Reset the intent flag so the next close (e.g. unexpected USB drop)
-          // is correctly classified as not user-initiated.
-          this._userInitiatedDisconnect = false;
-          this._onConnectionChange.fire(false);
-          this._onDisconnect.fire(info);
-        }
-      });
-
-      portInstance.open((err) => {
-        // Validate both port instance and generation
-        if (this.port !== portInstance || this._connectGeneration !== attemptGeneration) {
-          this.log.appendLine('[ESP Decoder] Ignoring open callback from stale connection attempt');
-          // Only clear the promise if it's still the one we created
-          if (this._connectPromise === promiseRef) {
-            this._connectPromise = null;
-          }
-          // Don't clear this.port if it belongs to a newer attempt
-          if (this.port === portInstance) {
-            this.port = null;
-          }
-          resolve(false);
-          return;
-        }
-        if (err) {
-          // During an active reconnect window, treat open failures as part of
-          // the polling cycle — don't toast, don't fire the error event.
-          if (this._isReconnecting) {
-            this.log.appendLine(`[ESP Decoder] auto-reconnect: open failed, will retry: ${err.message}`);
-          } else if (!this._suppressErrorToasts) {
-            vscode.window.showErrorMessage(
-              `Failed to open ${this._selectedPath}: ${err.message}`
-            );
-          }
-          this.port = null;
-          // Only clear the promise if it's still the one we created
-          if (this._connectPromise === promiseRef) {
-            this._connectPromise = null;
-          }
-          resolve(false);
-          return;
-        }
-        // Register the data listener only after the port is open so the
-        // stream's first _read() runs with a fully initialised handle.
-        portInstance.on('data', (data: Buffer) => {
-          // Only process callbacks from the current port instance
-          if (this.port !== portInstance) {
+      // Capture device identity BEFORE firing connection-change / resolving,
+      // so that an immediate reset (within a few hundred ms of connect)
+      // still finds VID/PID/SN populated when startAutoReconnect runs.
+      // This is awaited but typically completes in <100 ms.
+      void this.captureDeviceIdentity()
+        .catch(() => { /* best effort — identity used only for reconnect matching */ })
+        .then(() => {
+          if (this.port !== portInstance || this._connectGeneration !== attemptGeneration) {
+            this.log.appendLine('[ESP Decoder] Ignoring delayed callback from stale connection attempt');
+            abandonPortIfStale(portInstance);
+            finishAttempt(false);
             return;
           }
-          this._onData.fire(data);
+          this._isConnected = true;
+          // If this open happened inside a reconnect window, arm the
+          // stability timer. The window only ends if the port stays open
+          // for STABILITY_MS without a close.
+          if (this._isReconnecting) {
+            this.clearStabilityTimer();
+            this._stabilityTimer = setTimeout(() => {
+              this._stabilityTimer = null;
+              if (this._isConnected) {
+                this._isReconnecting = false;
+                this._reconnectDeadline = 0;
+                this.log.appendLine('[ESP Decoder] auto-reconnect: connection stable');
+              }
+            }, SerialPortManager.STABILITY_MS);
+          }
+          this._onConnectionChange.fire(true);
+          finishAttempt(true);
         });
-        this._isConnected = true;
-        // Capture device identity BEFORE firing connection-change / resolving,
-        // so that an immediate reset (within a few hundred ms of connect)
-        // still finds VID/PID/SN populated when startAutoReconnect runs.
-        // This is awaited but typically completes in <100 ms.
-        void this.captureDeviceIdentity()
-          .catch(() => { /* best effort — identity used only for reconnect matching */ })
-          .then(() => {
-            // Validate both port instance and generation
-            if (this.port !== portInstance || this._connectGeneration !== attemptGeneration) {
-              this.log.appendLine('[ESP Decoder] Ignoring delayed callback from stale connection attempt');
-              // Only clear the promise if it's still the one we created
-              if (this._connectPromise === promiseRef) {
-                this._connectPromise = null;
-              }
-              // Don't clear this.port if it belongs to a newer attempt
-              if (this.port === portInstance) {
-                this.port = null;
-              }
-              resolve(false);
-              return;
-            }
-            // If this open happened inside a reconnect window, arm the
-            // stability timer. The window only ends if the port stays open
-            // for STABILITY_MS without a close.
-            if (this._isReconnecting) {
-              this.clearStabilityTimer();
-              this._stabilityTimer = setTimeout(() => {
-                this._stabilityTimer = null;
-                if (this._isConnected) {
-                  this._isReconnecting = false;
-                  this._reconnectDeadline = 0;
-                  this.log.appendLine('[ESP Decoder] auto-reconnect: connection stable');
-                }
-              }, SerialPortManager.STABILITY_MS);
-            }
-            this._onConnectionChange.fire(true);
-            // Only clear the promise if it's still the one we created
-            if (this._connectPromise === promiseRef) {
-              this._connectPromise = null;
-            }
-            resolve(true);
-          });
-      });
     });
 
-    this._connectPromise = connectionPromise;
     return connectionPromise;
   }
 
