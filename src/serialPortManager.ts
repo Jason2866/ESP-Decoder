@@ -25,6 +25,10 @@ export class SerialPortManager extends vscode.Disposable {
   private readonly log: vscode.OutputChannel;
   private readonly ownsLog: boolean;
 
+  // Connection gating to prevent race conditions
+  private _connectPromise: Promise<boolean> | null = null;
+  private _connectGeneration = 0; // Incremented on each connect attempt
+
   // Identity of the currently/last connected device — used to match the same
   // physical board when it re-enumerates (e.g. native USB-CDC after reset).
   private _connectedVendorId: string | undefined;
@@ -247,6 +251,12 @@ export class SerialPortManager extends vscode.Disposable {
   }
 
   async connect(): Promise<boolean> {
+    // Gate connection initiation - if a connection is already in progress, wait for it
+    if (this._connectPromise) {
+      this.log.appendLine('[ESP Decoder] Connection already in progress, waiting for existing connection to complete');
+      return this._connectPromise;
+    }
+
     this.log.appendLine(`[ESP Decoder] connect() called, isConnected: ${this._isConnected}, path: ${this._selectedPath}`);
     if (this._isConnected) {
       await this.disconnect();
@@ -267,7 +277,10 @@ export class SerialPortManager extends vscode.Disposable {
     // the user cancels. cancelReconnect() handles full teardown when needed.
     this.clearReconnectTimer();
 
-    return new Promise<boolean>((resolve) => {
+    // Increment generation for this connection attempt
+    this._connectGeneration++;
+
+    const connectionPromise = new Promise<boolean>((resolve) => {
       this.log.appendLine(`[ESP Decoder] Creating SerialPort instance for ${this._selectedPath} @ ${this._baudRate}`);
       try {
         this.port = new SerialPort(
@@ -286,11 +299,20 @@ export class SerialPortManager extends vscode.Disposable {
           );
         }
         this.port = null;
+        this._connectPromise = null;
         resolve(false);
         return;
       }
 
-      this.port.on('error', (err: Error) => {
+      // Store the port instance for callback validation
+      const portInstance = this.port;
+
+      portInstance.on('error', (err: Error) => {
+        // Only process callbacks from the current port instance
+        if (this.port !== portInstance) {
+          this.log.appendLine('[ESP Decoder] Ignoring error callback from stale port instance');
+          return;
+        }
         if (this.shouldSuppressTransient(err)) {
           this.log.appendLine(`[ESP Decoder] suppressed transient error (auto-reconnect): ${err.message}`);
           return;
@@ -298,7 +320,12 @@ export class SerialPortManager extends vscode.Disposable {
         this._onError.fire(err);
       });
 
-      this.port.on('close', (disconnectError?: Error | null) => {
+      portInstance.on('close', (disconnectError?: Error | null) => {
+        // Only process callbacks from the current port instance
+        if (this.port !== portInstance) {
+          this.log.appendLine('[ESP Decoder] Ignoring close callback from stale port instance');
+          return;
+        }
         // Cancel any pending stability check — connection didn't last.
         this.clearStabilityTimer();
         if (disconnectError) {
@@ -323,7 +350,14 @@ export class SerialPortManager extends vscode.Disposable {
         }
       });
 
-      this.port.open((err) => {
+      portInstance.open((err) => {
+        // Only process callbacks from the current port instance
+        if (this.port !== portInstance) {
+          this.log.appendLine('[ESP Decoder] Ignoring open callback from stale port instance');
+          this._connectPromise = null;
+          resolve(false);
+          return;
+        }
         if (err) {
           // During an active reconnect window, treat open failures as part of
           // the polling cycle — don't toast, don't fire the error event.
@@ -335,12 +369,17 @@ export class SerialPortManager extends vscode.Disposable {
             );
           }
           this.port = null;
+          this._connectPromise = null;
           resolve(false);
           return;
         }
         // Register the data listener only after the port is open so the
         // stream's first _read() runs with a fully initialised handle.
-        this.port!.on('data', (data: Buffer) => {
+        portInstance.on('data', (data: Buffer) => {
+          // Only process callbacks from the current port instance
+          if (this.port !== portInstance) {
+            return;
+          }
           this._onData.fire(data);
         });
         this._isConnected = true;
@@ -351,6 +390,13 @@ export class SerialPortManager extends vscode.Disposable {
         void this.captureDeviceIdentity()
           .catch(() => { /* best effort — identity used only for reconnect matching */ })
           .then(() => {
+            // Only process callbacks from the current port instance
+            if (this.port !== portInstance) {
+              this.log.appendLine('[ESP Decoder] Ignoring delayed callback from stale port instance');
+              this._connectPromise = null;
+              resolve(false);
+              return;
+            }
             // If this open happened inside a reconnect window, arm the
             // stability timer. The window only ends if the port stays open
             // for STABILITY_MS without a close.
@@ -366,10 +412,14 @@ export class SerialPortManager extends vscode.Disposable {
               }, SerialPortManager.STABILITY_MS);
             }
             this._onConnectionChange.fire(true);
+            this._connectPromise = null;
             resolve(true);
           });
       });
     });
+
+    this._connectPromise = connectionPromise;
+    return connectionPromise;
   }
 
   private clearStabilityTimer(): void {
@@ -436,6 +486,11 @@ export class SerialPortManager extends vscode.Disposable {
     // Cancel any pending auto-reconnect — an explicit disconnect always wins.
     this.cancelReconnect();
     this._userInitiatedDisconnect = true;
+    
+    // Clear any pending connection promise
+    this._connectPromise = null;
+    this._connectGeneration++;
+    
     return new Promise<void>((resolve, reject) => {
       if (!this.port || !this._isConnected) {
         this._isConnected = false;
@@ -446,7 +501,8 @@ export class SerialPortManager extends vscode.Disposable {
         return;
       }
 
-      this.port.close((err) => {
+      const portInstance = this.port;
+      portInstance.close((err) => {
         if (err) {
           // Reset the intent flag on failure so we don't lie about the next close.
           this._userInitiatedDisconnect = false;
@@ -537,6 +593,9 @@ export class SerialPortManager extends vscode.Disposable {
     }
     this._suspendedPath = this._selectedPath;
     this._suspendedBaudRate = this._baudRate;
+    // Clear any pending connection before disconnecting
+    this._connectPromise = null;
+    this._connectGeneration++;
     await this.disconnect();
   }
 
@@ -686,6 +745,8 @@ export class SerialPortManager extends vscode.Disposable {
 
   dispose(): void {
     this.cancelReconnect();
+    this._connectPromise = null;
+    this._connectGeneration++;
     if (this.port && this._isConnected) {
       this.port.close();
     }
