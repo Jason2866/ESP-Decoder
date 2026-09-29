@@ -2623,17 +2623,41 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       serialInput.setSelectionRange(serialInput.value.length, serialInput.value.length);
     }
 
-    // Ctrl+A / Cmd+A to copy only serial output text (not buttons)
-    serialOutput.addEventListener('keydown', function(e) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
-        e.preventDefault();
-        // Select all text content in serial output
-        var range = document.createRange();
-        range.selectNodeContents(serialOutput);
-        var selection = window.getSelection();
-        if (selection) {
-          selection.removeAllRanges();
-          selection.addRange(range);
+    // Ctrl+A / Cmd+A: scope selection to serialOutput whenever the serial tab is
+    // active. Exempt editable fields (inputs, textareas, contenteditable) so
+    // that Cmd+A inside those still selects their own text. VS Code native UI
+    // (quick-picks, command palette) runs above the webview iframe and takes
+    // keyboard focus away from it entirely, so this handler never fires there.
+    document.addEventListener('keydown', function(e) {
+      if (!((e.ctrlKey || e.metaKey) && e.key === 'a')) { return; }
+      var serialTab = document.querySelector('[data-tab="serial"]');
+      if (!serialTab || !serialTab.classList.contains('active')) { return; }
+      var focused = document.activeElement;
+      if (focused &&
+          (focused.tagName === 'INPUT' ||
+           focused.tagName === 'TEXTAREA' ||
+           focused.isContentEditable)) { return; }
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      var range = document.createRange();
+      range.selectNodeContents(serialOutput);
+      var selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    }, true);
+
+    // Clear any serialOutput selection when the user clicks outside it so the
+    // active range doesn't interfere with button clicks.
+    document.addEventListener('pointerdown', function(e) {
+      if (!serialOutput.contains(e.target)) {
+        var sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+          var r = sel.getRangeAt(0);
+          if (serialOutput.contains(r.commonAncestorContainer)) {
+            sel.removeAllRanges();
+          }
         }
       }
     });
