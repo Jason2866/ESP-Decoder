@@ -2355,6 +2355,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     document.getElementById('btn-send').addEventListener('click', sendInput);
     serialInput.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') {
+        if (e.isComposing) { return; }
         // If disconnected, pressing Enter should reconnect (like original monitor)
         if (!connected) {
           document.getElementById('btn-connect').textContent = 'Connecting...';
@@ -2525,6 +2526,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
     searchInput.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') {
+        if (e.isComposing) { return; }
         e.preventDefault();
         navigateSearch(e.shiftKey ? 'prev' : 'next');
       } else if (e.key === 'Escape') {
@@ -2732,6 +2734,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
             serialOutput.scrollTop = serialOutput.scrollHeight;
           }
         });
+      }
+      if (lastSearchQuery && searchInput.value.trim()) {
+        performSearch(true);
       }
     }
 

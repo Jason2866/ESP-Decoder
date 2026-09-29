@@ -251,12 +251,38 @@ export class SerialPortManager extends vscode.Disposable {
   }
 
   async connect(): Promise<boolean> {
-    // Gate connection initiation - if a connection is already in progress, wait for it
+    // Gate connection initiation - if a connection is already in progress, wait for it.
+    // The promise is created and stored BEFORE any await so concurrent callers joining
+    // after this point will always find it and share the same attempt.
     if (this._connectPromise) {
       this.log.appendLine('[ESP Decoder] Connection already in progress, waiting for existing connection to complete');
       return this._connectPromise;
     }
 
+    let resolveAttempt!: (value: boolean) => void;
+    const connectionPromise = new Promise<boolean>((resolve) => {
+      resolveAttempt = resolve;
+    });
+    this._connectPromise = connectionPromise;
+
+    const finishAttempt = (result: boolean) => {
+      // Only clear the shared promise if it still belongs to this attempt.
+      if (this._connectPromise === connectionPromise) {
+        this._connectPromise = null;
+      }
+      resolveAttempt(result);
+    };
+
+    // Run the actual connection logic; any concurrent caller that arrives
+    // after the assignment above will simply await connectionPromise.
+    void this.connectInternal(connectionPromise, finishAttempt);
+    return connectionPromise;
+  }
+
+  private async connectInternal(
+    connectionPromise: Promise<boolean>,
+    finishAttempt: (result: boolean) => void,
+  ): Promise<void> {
     this.log.appendLine(`[ESP Decoder] connect() called, isConnected: ${this._isConnected}, path: ${this._selectedPath}`);
     if (this._isConnected) {
       await this.disconnect();
@@ -266,7 +292,8 @@ export class SerialPortManager extends vscode.Disposable {
       const selected = await this.selectPort();
       if (!selected) {
         this.log.appendLine('[ESP Decoder] No port selected, aborting connect');
-        return false;
+        finishAttempt(false);
+        return;
       }
     }
 
@@ -280,19 +307,6 @@ export class SerialPortManager extends vscode.Disposable {
     // Increment generation for this connection attempt
     this._connectGeneration++;
     const attemptGeneration = this._connectGeneration;
-
-    let resolveAttempt!: (value: boolean) => void;
-    const connectionPromise = new Promise<boolean>((resolve) => {
-      resolveAttempt = resolve;
-    });
-    this._connectPromise = connectionPromise;
-
-    const finishAttempt = (result: boolean) => {
-      if (this._connectPromise === connectionPromise) {
-        this._connectPromise = null;
-      }
-      resolveAttempt(result);
-    };
 
     const abandonPortIfStale = (portInstance: SerialPort) => {
       // Don't clear this.port if it belongs to a newer attempt.
@@ -327,7 +341,7 @@ export class SerialPortManager extends vscode.Disposable {
       }
       this.port = null;
       finishAttempt(false);
-      return connectionPromise;
+      return;
     }
 
     const portInstance = this.port;
@@ -437,8 +451,6 @@ export class SerialPortManager extends vscode.Disposable {
           finishAttempt(true);
         });
     });
-
-    return connectionPromise;
   }
 
   private clearStabilityTimer(): void {
