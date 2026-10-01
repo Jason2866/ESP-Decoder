@@ -9,11 +9,11 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 - **Serial Monitor** — Connect to any serial port, view output in real-time
 - **Automatic Crash Detection** — Detects Guru Meditation Errors, backtraces, panics, asserts
 - **Crash Decoding** — Decodes stack traces using `addr2line`/GDB from espressif toolchains
-- **PlatformIO Integration** — Auto-detects `firmware.elf` and toolchain from `.pio/build/`
+- **PIO Integration** — Auto-detects `firmware.elf` and toolchain from `.pio/build/`
 - **ESP-IDF Integration** — Auto-detects app ELF and toolchain from `build/` and ESP-IDF tools
 - **Click-to-Navigate** — Click on decoded file:line references to open source files
 - **Register Display** — Shows CPU register values at the time of crash
-- **Multi-Arch Support** — Xtensa (ESP32/S2/S3) and RISC-V (ESP32-C3/C6/H2/P4/S31)
+- **Multi-Arch Support** — Xtensa (ESP32/S2/S3/ESP8266) and RISC-V (ESP32-C2/C3/C5/C6/H2/P4/S31)
 
 ## Quick Start
 
