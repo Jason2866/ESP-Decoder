@@ -78,10 +78,12 @@ export type DecodeTarget =
   | 'xtensa'
   | 'esp32c2'
   | 'esp32c3'
+  | 'esp32c5'
   | 'esp32c6'
   | 'esp32h2'
   | 'esp32h4'
-  | 'esp32p4';
+  | 'esp32p4'
+  | 'esp32s31';
 
 export interface DecodeParams {
   toolPath: string;

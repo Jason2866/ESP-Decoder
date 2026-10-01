@@ -13,7 +13,7 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 - **ESP-IDF Integration** — Auto-detects app ELF and toolchain from `build/` and ESP-IDF tools
 - **Click-to-Navigate** — Click on decoded file:line references to open source files
 - **Register Display** — Shows CPU register values at the time of crash
-- **Multi-Arch Support** — Xtensa (ESP32/S2/S3) and RISC-V (ESP32-C3/C6/H2)
+- **Multi-Arch Support** — Xtensa (ESP32/S2/S3) and RISC-V (ESP32-C3/C6/H2/P4/S31)
 
 ## Quick Start
 

@@ -808,7 +808,7 @@ function autoDetectPioToolPath(
 /**
  * Valid trbr target architectures.
  */
-const VALID_TRBR_TARGETS = ['xtensa', 'esp32c2', 'esp32c3', 'esp32c6', 'esp32h2', 'esp32h4', 'esp32p4'] as const;
+const VALID_TRBR_TARGETS = ['xtensa', 'esp32c2', 'esp32c3', 'esp32c6', 'esp32h2', 'esp32h4', 'esp32p4', 'esp32s31'] as const;
 type TrbrTarget = (typeof VALID_TRBR_TARGETS)[number];
 
 /** ELF e_machine values for ESP chip families */
