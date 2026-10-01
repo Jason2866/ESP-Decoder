@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.28.0] - 2026-10-01
+
+### New Feature
+- **ESP32-S31 support** — Support added for ESP32-S31 crash decoding.
+
 ## [0.27.2] - 2026-09-29
 
 ### New Feature
