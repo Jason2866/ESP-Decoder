@@ -1,0 +1,20 @@
+Guru Meditation Error: Core 0 panic'ed (Illegal instruction). Exception was unhandled.
+
+Core  0 register dump:
+MEPC    : 0x42004abc  RA      : 0x42004abc  SP      : 0x3fc8f2f0  GP      : 0x3fc8a600
+TP      : 0x3fc8a2ac  T0      : 0x40057fa6  T1      : 0x0000000f  T2      : 0x00000000
+S0/FP   : 0x00000000  S1      : 0x00000000  A0      : 0x00000001  A1      : 0x00000001
+A2      : 0x00000064  A3      : 0x00000004  A4      : 0x00000001  A5      : 0x00000000
+A6      : 0x42001fd6  A7      : 0x00000000  S2      : 0x00000000  S3      : 0x00000000
+S4      : 0x00000000  S5      : 0x00000000  S6      : 0x00000000  S7      : 0x00000000
+S8      : 0x00000000  S9      : 0x00000000  S10     : 0x00000000  S11     : 0x00000000
+T3      : 0x00000000  T4      : 0x00000000  T5      : 0x00000000  T6      : 0x00000000
+MSTATUS : 0x00001881  MTVEC   : 0x40380001  MCAUSE  : 0x00000002  MTVAL   : 0x00000000
+MHARTID : 0x00000000
+
+Stack memory:
+3fc8f2d0: 00000000 00000000 00000000 00000000 42004abc 00000000 00000000 00000000
+
+Backtrace: 0x42004abc:0x3fc8f2f0 0x42004b00:0x3fc8f310
+
+Rebooting...

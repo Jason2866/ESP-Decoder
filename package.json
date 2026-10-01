@@ -137,7 +137,8 @@
             "esp32c6",
             "esp32h2",
             "esp32h4",
-            "esp32p4"
+            "esp32p4",
+            "esp32s31"
           ],
           "description": "Target architecture for decoding (auto will try to detect from ELF/board)"
         },

@@ -14,6 +14,7 @@ const riscTargetArchs = /** @type {const} */ ([
   'esp32h2',
   'esp32h4',
   'esp32p4',
+  'esp32s31',
 ])
 
 export const targetArchs = /** @type {const} */ ([

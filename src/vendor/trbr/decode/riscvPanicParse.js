@@ -94,6 +94,7 @@ const gdbRegsInfo = {
   esp32h2: gdbRegsInfoRiscvIlp32,
   esp32h4: gdbRegsInfoRiscvIlp32,
   esp32p4: gdbRegsInfoRiscvIlp32,
+  esp32s31: gdbRegsInfoRiscvIlp32,
 }
 
 /**
