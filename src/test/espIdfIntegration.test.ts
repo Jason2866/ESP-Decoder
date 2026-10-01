@@ -73,4 +73,22 @@ describe('findEspIdfBuilds', () => {
     expect(builds[0].targetArch).toBe('esp32c6');
     expect(builds[0].toolPath).toBe(path.join(toolBinDir, `riscv32-esp-elf-gdb${exe}`));
   });
+
+  it('resolves esp32s31 sdkconfig target to riscv GDB', async () => {
+    const workspace = makeTempDir('esp-decoder-idf-workspace-');
+    const toolBinDir = makeTempDir('esp-decoder-idf-tools-');
+    tempDirs.push(workspace, toolBinDir);
+
+    touchFile(path.join(workspace, 'build', 'app.elf'));
+    fs.writeFileSync(path.join(workspace, 'sdkconfig'), 'CONFIG_IDF_TARGET="esp32s31"\n');
+    touchFile(path.join(toolBinDir, `riscv32-esp-elf-gdb${exe}`));
+
+    process.env.PATH = toolBinDir;
+    delete process.env.IDF_TOOLS_PATH;
+
+    const builds = await findEspIdfBuilds(workspace);
+    expect(builds.length).toBeGreaterThan(0);
+    expect(builds[0].targetArch).toBe('esp32s31');
+    expect(builds[0].toolPath).toBe(path.join(toolBinDir, `riscv32-esp-elf-gdb${exe}`));
+  });
 });

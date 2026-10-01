@@ -4,7 +4,7 @@ export const CHIP_TARGET_MAP: Record<string, string> = {
   esp32s3: 'xtensa',
   esp32c2: 'esp32c2',
   esp32c3: 'esp32c3',
-  esp32c5: 'esp32c3',
+  esp32c5: 'esp32c5',
   esp32c6: 'esp32c6',
   esp32h2: 'esp32h2',
   esp32h4: 'esp32h4',

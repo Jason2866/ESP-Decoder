@@ -686,6 +686,96 @@ describe('decodeCoredumpBase64', () => {
 });
 
 // ---------------------------------------------------------------------------
+// ESP32-S31 crash detection and raw decode
+// ---------------------------------------------------------------------------
+
+const ESP32S31_CRASH_TEXT_PATH = path.join(FIXTURES_DIR, 'esp32s31_crash.txt');
+const ESP32S31_CRASH_TEXT = fs.readFileSync(ESP32S31_CRASH_TEXT_PATH, 'utf8');
+
+describe('TrbrCrashCapturer – ESP32-S31 RISC-V crash', () => {
+  let capturer: TrbrCrashCapturer;
+
+  beforeEach(() => {
+    capturer = new TrbrCrashCapturer();
+  });
+
+  it('detects the crash', () => {
+    const event = feedCrashText(capturer, ESP32S31_CRASH_TEXT);
+    expect(event).toBeDefined();
+  });
+
+  it('classifies the crash as riscv', () => {
+    const event = feedCrashText(capturer, ESP32S31_CRASH_TEXT);
+    expect(event?.kind).toBe('riscv');
+  });
+
+  it('includes the register dump in the raw text', () => {
+    const event = feedCrashText(capturer, ESP32S31_CRASH_TEXT);
+    expect(event?.rawText).toContain('Core  0 register dump:');
+    expect(event?.rawText).toContain('MEPC');
+  });
+
+  it('includes the stack memory section', () => {
+    const event = feedCrashText(capturer, ESP32S31_CRASH_TEXT);
+    expect(event?.rawText).toContain('Stack memory:');
+  });
+
+  it('includes the backtrace line', () => {
+    const event = feedCrashText(capturer, ESP32S31_CRASH_TEXT);
+    expect(event?.rawText).toContain('Backtrace:');
+  });
+
+  it('captures MEPC value 0x42004abc', () => {
+    const event = feedCrashText(capturer, ESP32S31_CRASH_TEXT);
+    expect(event?.rawText).toContain('0x42004abc');
+  });
+});
+
+describe('decodeCrash – ESP32-S31 raw decode fallback', () => {
+  function makeCrashEvent(): CrashEvent {
+    const lines = ESP32S31_CRASH_TEXT.split('\n').filter((l) => l.trim().length > 0);
+    return {
+      id: 'test-esp32s31-001',
+      kind: 'riscv',
+      lines,
+      rawText: ESP32S31_CRASH_TEXT,
+      timestamp: Date.now(),
+    };
+  }
+
+  it('sets toolsMissing when GDB path does not exist', async () => {
+    const event = makeCrashEvent();
+    const decoded = await decodeCrash(event, ELF_PATH, '/nonexistent/riscv32-esp-elf-gdb', 'esp32s31');
+    expect(decoded.toolsMissing).toBe(true);
+  });
+
+  it('extracts MEPC register (0x42004abc) from raw crash', async () => {
+    const event = makeCrashEvent();
+    const decoded = await decodeCrash(event, ELF_PATH, '/nonexistent/riscv32-esp-elf-gdb', 'esp32s31');
+    expect(decoded.regs).toBeDefined();
+    const mepc = decoded.regs?.['MEPC'] ?? decoded.regs?.['mepc'];
+    expect(mepc).toBe(0x42004abc);
+  });
+
+  it('extracts MCAUSE register (0x00000002 = Illegal instruction)', async () => {
+    const event = makeCrashEvent();
+    const decoded = await decodeCrash(event, ELF_PATH, '/nonexistent/riscv32-esp-elf-gdb', 'esp32s31');
+    expect(decoded.regs).toBeDefined();
+    const mcause = decoded.regs?.['MCAUSE'] ?? decoded.regs?.['mcause'];
+    expect(mcause).toBe(0x00000002);
+  });
+
+  it('extracts backtrace addresses from the crash', async () => {
+    const event = makeCrashEvent();
+    const decoded = await decodeCrash(event, ELF_PATH, '/nonexistent/riscv32-esp-elf-gdb', 'esp32s31');
+    // Should still produce stacktrace entries from the Backtrace: line
+    expect(decoded.stacktrace.length).toBeGreaterThan(0);
+    const addresses = decoded.stacktrace.map((f) => f.address.toLowerCase());
+    expect(addresses).toContain('0x42004abc');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // RISC-V register layout validation
 // ---------------------------------------------------------------------------
 
