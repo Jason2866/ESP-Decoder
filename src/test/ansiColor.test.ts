@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   type AnsiState,
   ANSI_256,
+  ansiShouldClearScreen,
   resetAnsiState,
   ansiStateToSgr,
   ansiApplyCodes,
@@ -28,6 +29,21 @@ describe('ANSI Color Support', () => {
 
   beforeEach(() => {
     state = createAnsiState();
+  });
+
+  describe('ANSI screen clearing', () => {
+    it('recognizes erase-display modes that clear the screen or scrollback', () => {
+      expect(ansiShouldClearScreen('2', 'J')).toBe(true);
+      expect(ansiShouldClearScreen('3', 'J')).toBe(true);
+    });
+
+    it('does not clear for other CSI commands or partial erase-display modes', () => {
+      expect(ansiShouldClearScreen('', 'J')).toBe(false);
+      expect(ansiShouldClearScreen('0', 'J')).toBe(false);
+      expect(ansiShouldClearScreen('1', 'J')).toBe(false);
+      expect(ansiShouldClearScreen('', 'H')).toBe(false);
+      expect(ansiShouldClearScreen('2', 'm')).toBe(false);
+    });
   });
 
   describe('Text Styles', () => {

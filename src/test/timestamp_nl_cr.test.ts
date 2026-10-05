@@ -43,6 +43,15 @@ const WEBVIEW_PANEL_SRC = fs.readFileSync(
   'utf8'
 );
 
+describe('ANSI clear-screen handling', () => {
+  it('clears the serial monitor when CSI erase-display mode 2 or 3 is received', () => {
+    expect(WEBVIEW_PANEL_SRC).toContain(
+      'AnsiParser.ansiShouldClearScreen(match[1], match[2])'
+    );
+    expect(WEBVIEW_PANEL_SRC).toContain('serialOutput.replaceChildren();');
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Fix 1 — blank serial lines must still occupy one row of height.
 // ─────────────────────────────────────────────────────────────────────────────

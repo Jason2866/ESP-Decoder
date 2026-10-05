@@ -10,6 +10,13 @@
 export const ESC = '\x1b';
 
 /**
+ * Check whether a CSI sequence requests clearing the entire display or scrollback.
+ */
+export function ansiShouldClearScreen(parameters: string, finalByte: string): boolean {
+  return finalByte === 'J' && (parameters === '2' || parameters === '3');
+}
+
+/**
  * ANSI color state interface
  */
 export interface AnsiState {

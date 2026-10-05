@@ -1944,6 +1944,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     var LF = String.fromCharCode(10);
     var CRLF = CR + LF;
     const LINE_SPLIT_RE = new RegExp('(' + CRLF + '|' + CR + '|' + LF + ')');
+    var ANSI_CLEAR_RE = new RegExp('\\\\x1b\\\\[(?:2|3)J', 'g');
 
     // ANSI logic is compiled from src/ansiParser.ts (injected above as AnsiParser)
     var ANSI_256 = AnsiParser.ANSI_256;
@@ -2575,6 +2576,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         if (match[2] === 'm') {
           var codes = match[1] === '' ? [0] : match[1].split(';').map(function(c) { return parseInt(c, 10) || 0; });
           ansiApplyCodes(codes);
+        } else if (AnsiParser.ansiShouldClearScreen(match[1], match[2])) {
+          serialOutput.replaceChildren();
+          currentLine = document.createElement('div');
+          serialOutput.appendChild(currentLine);
+          carriageReturn = false;
+          dedupResetLine();
+          fragment = document.createDocumentFragment();
         }
       }
       var tail = ansiMakeNode(text.substring(i));
@@ -2650,7 +2658,15 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           carriageReturn = false;
         }
         var dedupedText = applyChunkFilters(renderText);
-        currentLineRaw += renderText;
+        var clearMatch;
+        var clearEnd = -1;
+        ANSI_CLEAR_RE.lastIndex = 0;
+        while ((clearMatch = ANSI_CLEAR_RE.exec(renderText)) !== null) {
+          clearEnd = clearMatch.index + clearMatch[0].length;
+        }
+        currentLineRaw = clearEnd === -1
+          ? currentLineRaw + renderText
+          : renderText.substring(clearEnd);
         if (dedupedText) { currentLine.appendChild(renderAnsiText(dedupedText)); }
       }
 
