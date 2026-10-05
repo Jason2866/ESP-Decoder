@@ -50,6 +50,23 @@ describe('ANSI clear-screen handling', () => {
     );
     expect(WEBVIEW_PANEL_SRC).toContain('serialOutput.replaceChildren();');
   });
+
+  it('processes raw clear sequences before filtering and uses the raw suffix for line filters', () => {
+    const clearHandling = WEBVIEW_PANEL_SRC.indexOf('if (clearEnd !== -1) {');
+    const rawClearProcessing = WEBVIEW_PANEL_SRC.indexOf(
+      'renderAnsiText(renderText.substring(0, clearEnd));',
+      clearHandling
+    );
+    const filtering = WEBVIEW_PANEL_SRC.indexOf(
+      'var dedupedText = applyChunkFilters(textToFilter);',
+      clearHandling
+    );
+
+    expect(clearHandling).toBeGreaterThan(-1);
+    expect(rawClearProcessing).toBeGreaterThan(clearHandling);
+    expect(filtering).toBeGreaterThan(rawClearProcessing);
+    expect(WEBVIEW_PANEL_SRC).toContain('currentLineRaw = textToFilter;');
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
