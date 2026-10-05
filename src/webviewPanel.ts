@@ -2657,16 +2657,21 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           dedupResetLine();
           carriageReturn = false;
         }
-        var dedupedText = applyChunkFilters(renderText);
+        var textToFilter = renderText;
         var clearMatch;
         var clearEnd = -1;
         ANSI_CLEAR_RE.lastIndex = 0;
         while ((clearMatch = ANSI_CLEAR_RE.exec(renderText)) !== null) {
           clearEnd = clearMatch.index + clearMatch[0].length;
         }
-        currentLineRaw = clearEnd === -1
-          ? currentLineRaw + renderText
-          : renderText.substring(clearEnd);
+        if (clearEnd !== -1) {
+          renderAnsiText(renderText.substring(0, clearEnd));
+          textToFilter = renderText.substring(clearEnd);
+          currentLineRaw = textToFilter;
+        } else {
+          currentLineRaw += renderText;
+        }
+        var dedupedText = applyChunkFilters(textToFilter);
         if (dedupedText) { currentLine.appendChild(renderAnsiText(dedupedText)); }
       }
 
