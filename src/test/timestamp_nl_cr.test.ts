@@ -27,10 +27,12 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { runInNewContext } from 'vm';
 import {
   ESC,
   type AnsiState,
   ansiApplyCodes,
+  ansiShouldClearScreen,
   ansiStateToSgr,
   createAnsiState,
   resetAnsiState,
@@ -43,12 +45,99 @@ const WEBVIEW_PANEL_SRC = fs.readFileSync(
   'utf8'
 );
 
+class RendererNode {
+  childNodes: RendererNode[] = [];
+
+  constructor(
+    readonly type: 'element' | 'text' | 'fragment',
+    private readonly text = ''
+  ) {}
+
+  get textContent(): string {
+    return this.type === 'text' ? this.text : this.childNodes.map((node) => node.textContent).join('');
+  }
+
+  appendChild(node: RendererNode): RendererNode {
+    if (node.type === 'fragment') {
+      this.childNodes.push(...node.childNodes);
+      node.childNodes = [];
+      return node;
+    }
+    this.childNodes.push(node);
+    return node;
+  }
+
+  replaceChildren(...nodes: RendererNode[]): void {
+    this.childNodes = [];
+    nodes.forEach((node) => this.appendChild(node));
+  }
+}
+
 describe('ANSI clear-screen handling', () => {
+  function createRenderer(): { appendSerialData: (text: string) => void; serialOutput: RendererNode } {
+    const document = {
+      createElement: () => new RendererNode('element'),
+      createDocumentFragment: () => new RendererNode('fragment'),
+      createTextNode: (text: string) => new RendererNode('text', text),
+    };
+    const serialOutput = new RendererNode('element');
+    const extractFunction = (name: string): string => {
+      const start = WEBVIEW_PANEL_SRC.indexOf(`    function ${name}(`);
+      const end = WEBVIEW_PANEL_SRC.indexOf('\n    function ', start + 1);
+      if (start === -1 || end === -1) {
+        throw new Error(`Could not find renderer function ${name}`);
+      }
+      return WEBVIEW_PANEL_SRC.slice(start, end).replace(/\\\\/g, '\\');
+    };
+    const source = `
+      var ansiTail = '';
+      var carriageReturn = false;
+      var currentLine = null;
+      var currentLineRaw = '';
+      var CR = '\\r';
+      var LF = '\\n';
+      var LINE_SPLIT_RE = /(\\r\\n|\\r|\\n)/;
+      var ANSI_CLEAR_RE = /\\x1b\\[(?:2|3)J/g;
+      var AnsiParser = { ansiShouldClearScreen: ansiShouldClearScreen };
+      var ansiApplyCodes = function() {};
+      var ansiMakeNode = function(text) {
+        return text ? document.createTextNode(text) : null;
+      };
+      var applyChunkFilters = function(text) { return text; };
+      var applyLineFilters = function(text) { return text; };
+      var dedupResetLine = function() {};
+      var autoscroll = false;
+      var scrollRAFPending = false;
+      var programmaticScroll = false;
+      var requestAnimationFrame = function() {};
+      ${extractFunction('renderAnsiText')}
+      ${extractFunction('appendSerialData')}
+      appendSerialData;
+    `;
+    const appendSerialData = runInNewContext(source, {
+      serialOutput,
+      document,
+      ansiShouldClearScreen,
+    }) as (text: string) => void;
+    return { appendSerialData, serialOutput };
+  }
+
   it('clears the serial monitor when CSI erase-display mode 2 or 3 is received', () => {
     expect(WEBVIEW_PANEL_SRC).toContain(
       'AnsiParser.ansiShouldClearScreen(match[1], match[2])'
     );
     expect(WEBVIEW_PANEL_SRC).toContain('serialOutput.replaceChildren();');
+  });
+
+  it.each(['2', '3'])('removes prior output and renders text after CSI %s J', (mode) => {
+    const { appendSerialData, serialOutput } = createRenderer();
+
+    appendSerialData('old output\n');
+    appendSerialData(`${ESC}[${mode}Jnew output`);
+
+    expect(serialOutput.textContent).not.toContain('old output');
+    expect(serialOutput.childNodes).toHaveLength(1);
+    expect(serialOutput.childNodes[0].textContent).toBe('new output');
   });
 
   it('processes raw clear sequences before filtering and uses the raw suffix for line filters', () => {
