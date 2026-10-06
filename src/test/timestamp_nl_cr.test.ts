@@ -129,6 +129,17 @@ describe('ANSI clear-screen handling', () => {
     expect(WEBVIEW_PANEL_SRC).toContain('serialOutput.replaceChildren();');
   });
 
+  it.each(['2', '3'])('removes prior output and renders text after CSI %s J', (mode) => {
+    const { appendSerialData, serialOutput } = createRenderer();
+
+    appendSerialData('old output\n');
+    appendSerialData(`${ESC}[${mode}Jnew output`);
+
+    expect(serialOutput.textContent).not.toContain('old output');
+    expect(serialOutput.childNodes).toHaveLength(1);
+    expect(serialOutput.childNodes[0].textContent).toBe('new output');
+  });
+
   it('processes raw clear sequences before filtering and uses the raw suffix for line filters', () => {
     const clearHandling = WEBVIEW_PANEL_SRC.indexOf('if (clearEnd !== -1) {');
     const rawClearProcessing = WEBVIEW_PANEL_SRC.indexOf(
