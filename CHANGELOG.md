@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.28.1] - 2026-10-06
+
+### Feature / Bug fix
+- **Clear Terminal** — The serial output now clears when ANSI erase-display modes 2 or 3 are received, matching the expected terminal behavior.
+
 ## [0.28.0] - 2026-10-01
 
 ### New Feature
