@@ -351,7 +351,7 @@ export class SerialPortManager extends vscode.Disposable {
           path: this._selectedPath!,
           baudRate: this._baudRate,
           autoOpen: false,
-          hupcl: false,
+          hupcl: true,
         },
       );
     } catch (err) {
