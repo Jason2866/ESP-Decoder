@@ -1,5 +1,8 @@
 import { SerialPort } from 'serialport';
 import * as vscode from 'vscode';
+import { getUse1200BpsTouch } from './pioIntegration';
+
+type ResetMethod = 'auto' | '1200-baud-touch' | 'rts-en';
 
 export interface SerialPortInfo {
   path: string;
@@ -90,6 +93,7 @@ export class SerialPortManager extends vscode.Disposable {
   // State for temporary port release (e.g., during pioarduino upload)
   private _suspendedPath: string | undefined;
   private _suspendedBaudRate: number | undefined;
+  private _pioEnvironment: string | undefined;
 
   constructor(outputChannel?: vscode.OutputChannel) {
     super(() => this.dispose());
@@ -132,6 +136,11 @@ export class SerialPortManager extends vscode.Disposable {
     }
     this._baudRate = rate;
     return true;
+  }
+
+  /** Associate the connected port with the PlatformIO environment that owns it. */
+  setPlatformIOEnvironment(environment?: string): void {
+    this._pioEnvironment = environment?.trim() || undefined;
   }
 
   /** True while an auto-reconnect window is active. */
@@ -607,6 +616,36 @@ export class SerialPortManager extends vscode.Disposable {
     const path = this._selectedPath;
     if (!path) {
       throw new Error('No serial port selected');
+    }
+
+    const resetMethod = vscode.workspace
+      .getConfiguration('esp-decoder')
+      .get<ResetMethod>('serialMonitor.resetMethod', 'auto');
+    let use1200BpsTouch = resetMethod === '1200-baud-touch';
+    if (resetMethod === 'auto') {
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const configuredEnvironment = vscode.workspace
+        .getConfiguration('esp-decoder')
+        .get<string>('serialMonitor.platformioEnvironment', '')
+        .trim();
+      const environment = this._pioEnvironment ?? (configuredEnvironment || undefined);
+      const boardSetting = workspaceFolder
+        ? await getUse1200BpsTouch(workspaceFolder, environment)
+        : undefined;
+      use1200BpsTouch = boardSetting === true;
+      if (boardSetting === undefined) {
+        this.log.appendLine(
+          '[ESP Decoder] PlatformIO 1200-baud-touch setting is unknown; using RTS/EN reset',
+        );
+      }
+    }
+
+    if (!use1200BpsTouch) {
+      if (!this._isConnected && !(await this.connect())) {
+        throw new Error(`Failed to reopen serial port ${this._selectedPath ?? path}`);
+      }
+      await this.pulseResetSignals();
+      return;
     }
 
     const originalIdentity: PortIdentity = {

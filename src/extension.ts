@@ -82,7 +82,12 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand(
       'esp-decoder.openMonitor',
-      async (opts?: { port?: string; baudRate?: number; autoConnect?: boolean }) => {
+      async (opts?: {
+        port?: string;
+        baudRate?: number;
+        autoConnect?: boolean;
+        environment?: string;
+      }) => {
         // Allow callers (e.g. pioarduino's "Monitor" task) to hand over the
         // already-selected serial port (and optionally baud rate) and request
         // an immediate connect, so the user does not have to pick the port
@@ -95,6 +100,12 @@ export function activate(context: vscode.ExtensionContext) {
         if (opts?.port) {
           serialManager.setPort(opts.port);
         }
+        const pioEnvironment = opts?.environment?.trim()
+          || vscode.workspace
+            .getConfiguration('esp-decoder')
+            .get<string>('serialMonitor.platformioEnvironment', '')
+            .trim();
+        serialManager.setPlatformIOEnvironment(pioEnvironment);
         // If the caller did not supply a baud rate, look it up from
         // platformio.ini via pioarduino-node-helpers so the project's
         // monitor_speed is always honoured without the user having to
@@ -102,7 +113,9 @@ export function activate(context: vscode.ExtensionContext) {
         let resolvedBaudRate: number | undefined = opts?.baudRate;
         if (typeof resolvedBaudRate !== 'number') {
           const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-          resolvedBaudRate = folder ? await getMonitorBaudRate(folder) : undefined;
+          resolvedBaudRate = folder
+            ? await getMonitorBaudRate(folder, pioEnvironment)
+            : undefined;
         }
         if (typeof resolvedBaudRate === 'number') {
           serialManager.setBaudRate(resolvedBaudRate);

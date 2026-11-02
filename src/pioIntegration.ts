@@ -334,6 +334,31 @@ function getPioCoreDir(): string | undefined {
   return undefined;
 }
 
+/** Initialize the helper's Python path when another extension has not set it. */
+function ensurePioCorePython(): void {
+  const state = pioCore.getCoreState();
+  if (state.python_exe) {
+    return;
+  }
+
+  const coreDir = pioCore.getCoreDir();
+  const envDir = pioCore.getEnvDir();
+  const envBinDir = pioCore.getEnvBinDir();
+  const candidates = process.platform === 'win32'
+    ? [path.join(envDir, 'python.exe'), path.join(envBinDir, 'python.exe')]
+    : [path.join(envBinDir, 'python3'), path.join(envBinDir, 'python')];
+  const pythonExe = candidates.find((candidate) => fs.existsSync(candidate));
+  if (pythonExe) {
+    pioCore.setCoreState({
+      ...state,
+      core_dir: state.core_dir ?? coreDir,
+      penv_dir: state.penv_dir ?? envDir,
+      penv_bin_dir: state.penv_bin_dir ?? envBinDir,
+      python_exe: pythonExe,
+    });
+  }
+}
+
 export function getPioPackagesDir(projectCoreDir?: string): string | undefined {
   const coreDir = projectCoreDir ?? getPioCoreDir();
   if (!coreDir) {
@@ -576,13 +601,78 @@ function resolveBuildDir(workspaceFolder: string, sections: Sections): string {
  * Returns `undefined` when PIO Core is unavailable, the key is absent, or
  * the env is not found in the project config.
  */
-export async function getMonitorBaudRate(projectPath: string): Promise<number | undefined> {
+export async function getMonitorBaudRate(
+  projectPath: string,
+  environment?: string,
+): Promise<number | undefined> {
   try {
+    ensurePioCorePython();
     const config = new pioProject.ProjectConfig(projectPath);
     await config.read();
-    return config.getEnvMonitorSpeed(config.defaultEnv());
+    return config.getEnvMonitorSpeed(environment || config.defaultEnv());
   } catch {
     // PIO Core not available or project not configured — ignore
+  }
+  return undefined;
+}
+
+/**
+ * Read the effective board's `upload.use_1200bps_touch` value for a PlatformIO
+ * environment. PlatformIO resolves the board manifest and `board_*` overrides
+ * through its own APIs; this avoids guessing from arbitrary board JSON files.
+ */
+export async function getUse1200BpsTouch(
+  projectPath: string,
+  environment?: string,
+): Promise<boolean | undefined> {
+  try {
+    ensurePioCorePython();
+    const script = String.raw`
+import json
+import sys
+from platformio.platform.factory import PlatformFactory
+from platformio.project.config import ProjectConfig
+
+config = ProjectConfig.get_instance()
+env_name = sys.argv[1] or config.get_default_env()
+if not env_name or env_name not in config.envs():
+    print(json.dumps(None))
+    raise SystemExit(0)
+section = f"env:{env_name}"
+platform_spec = config.get(section, "platform", None)
+board_id = config.get(section, "board", None)
+if not platform_spec or not board_id:
+    print(json.dumps(None))
+    raise SystemExit(0)
+
+board = PlatformFactory.new(platform_spec).board_config(board_id)
+for option, value in config.items(env=env_name, as_dict=True).items():
+    if not option.startswith("board_"):
+        continue
+    option = option.lower()[6:]
+    try:
+        current = board.get(option)
+        if isinstance(current, bool):
+            value = str(value).lower() in ("1", "yes", "true")
+        elif isinstance(current, int):
+            value = int(value)
+    except KeyError:
+        pass
+    board.update(option, value)
+
+value = board.get("upload.use_1200bps_touch", None)
+if isinstance(value, str):
+    value = value.lower() in ("1", "yes", "true")
+print(json.dumps(value if isinstance(value, bool) else None))
+`;
+    const output = await pioCore.getCorePythonCommandOutput(
+      ['-c', script, environment ?? ''],
+      { projectDir: projectPath },
+    );
+    const value: unknown = JSON.parse(output.trim());
+    return typeof value === 'boolean' ? value : undefined;
+  } catch {
+    // PlatformIO Core, the configured environment, or its board may be absent.
   }
   return undefined;
 }

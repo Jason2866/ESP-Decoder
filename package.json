@@ -163,6 +163,26 @@
           "default": 15000,
           "description": "Maximum time (in milliseconds) to keep polling for the device to reappear before giving up auto-reconnect."
         },
+        "esp-decoder.serialMonitor.resetMethod": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "1200-baud-touch",
+            "rts-en"
+          ],
+          "enumDescriptions": [
+            "Use the selected PlatformIO board's upload.use_1200bps_touch setting; otherwise use RTS/EN.",
+            "Force a 1200-baud touch, including when PlatformIO board metadata is unavailable.",
+            "Force the RTS/EN reset sequence."
+          ],
+          "description": "Reset method for the serial monitor. The PlatformIO board flag selects a reset procedure; it does not identify the USB stack."
+        },
+        "esp-decoder.serialMonitor.platformioEnvironment": {
+          "type": "string",
+          "default": "",
+          "description": "PlatformIO environment associated with the connected serial device. Leave empty to use the project's default environment; an environment passed to esp-decoder.openMonitor takes precedence."
+        },
         "esp-decoder.logDirectory": {
           "type": "string",
           "default": "logs",
