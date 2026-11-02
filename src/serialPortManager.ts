@@ -570,31 +570,56 @@ export class SerialPortManager extends vscode.Disposable {
   }
 
   /**
-   * Perform a hard reset of the connected ESP chip by toggling the RTS line
-   * (which is wired to the chip's EN/RESET pin on the standard auto-reset
-   * circuit used by virtually every ESP dev-board).
-   *
-   * Mirrors esptool's `HardReset` strategy
-   * (https://github.com/espressif/esptool/blob/af0787da2cccaf68080d8032cfaf4ce918c3037d/esptool/reset.py)
-   * and is invoked by `esptool reset_chip("hard-reset")`:
-   *   RTS = True  → EN low  (chip held in reset)
-   *   sleep 100 ms
-   *   RTS = False → EN high (chip released, boots normally)
-   *
-   * DTR is explicitly held LOW (false) the whole time so the two-transistor
-   * auto-reset circuit only pulls EN — pulling DTR high (the node-serialport
-   * default for unspecified flags is `dtr: true`) would assert IO0 LOW and
-   * drop the chip into the ROM bootloader instead of doing a normal boot.
-   *
-   * Note: on chips that talk via native USB-CDC (ESP32-S2/S3/C3/P4 when no
-   * USB-UART bridge is involved) the reset may not work. The port disappears when 
-   * the chip resets, and ESP-Decoder tries to auto-reconnect to the same port before the reset.
+   * Reset the connected chip using 1200-baud touch first. Tiny USB CDC
+   * firmware can use that touch to reset into its bootloader; if the serial
+   * port disappears, reconnect by the re-enumerated device identity.
+   * USB-UART bridges ignore the touch, so they fall back to the RTS/EN reset
+   * sequence.
    */
   async hardReset(): Promise<void> {
     if (!this.port || !this._isConnected) {
       throw new Error('Serial port not connected');
     }
+    const path = this._selectedPath;
+    if (!path) {
+      throw new Error('No serial port selected');
+    }
+
+    // PlatformIO's use_1200bps_touch action briefly opens the CDC port at
+    // 1200 baud, then closes it. TinyUSB devices interpret that as a request
+    // to reset/re-enumerate. Release the monitor handle first so the temporary
+    // connection can open the same port (especially on Windows).
+    await this.disconnect();
+    const wasEnumerated = (await this.listPorts(/* suppressToasts */ true))
+      .some((candidate) => candidate.path === path);
+    const disappearance = this.waitForPortDisappearance(path, wasEnumerated, 2000);
+    try {
+      await this.touchSerialPortAt1200(path);
+    } catch (err) {
+      this.log.appendLine(
+        `[ESP Decoder] 1200-baud touch failed: ${err instanceof Error ? err.message : err}`
+      );
+    }
+
+    const disappeared = await disappearance;
+    if (disappeared) {
+      this.log.appendLine('[ESP Decoder] Port disappeared after 1200-baud touch; waiting for TinyUSB re-enumeration');
+      const timeoutMs = vscode.workspace
+        .getConfiguration('esp-decoder')
+        .get<number>('serialMonitor.autoReconnectTimeoutMs', 15000);
+      await this.reconnectAndWait(timeoutMs);
+      return;
+    }
+
+    // A USB-UART bridge generally ignores the 1200-baud touch. Re-open the
+    // monitor and use the standard RTS/EN reset sequence in that case.
+    if (!this._isConnected && !(await this.connect())) {
+      throw new Error(`Failed to reopen serial port ${this._selectedPath ?? path}`);
+    }
     const port = this.port;
+    if (!port || !port.isOpen) {
+      throw new Error('Serial port not connected');
+    }
     // Always pass BOTH dtr and rts: node-serialport's set() resets every
     // unspecified flag to its default (dtr: true, rts: true). Letting dtr
     // default to true would assert IO0 LOW via the auto-reset circuit and
@@ -608,6 +633,85 @@ export class SerialPortManager extends vscode.Disposable {
     await new Promise<void>((r) => setTimeout(r, 100));
     this.log.appendLine('[ESP Decoder] hard-reset: RTS=0 DTR=0 (EN high, IO0 high)');
     await setSignals(false, false);
+  }
+
+  private async touchSerialPortAt1200(path: string): Promise<void> {
+    const touchPort = new SerialPort({
+      path,
+      baudRate: 1200,
+      autoOpen: false,
+    });
+    touchPort.on('error', (err: Error) => {
+      this.log.appendLine(`[ESP Decoder] 1200-baud touch port error: ${err.message}`);
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      touchPort.open((err) => (err ? reject(err) : resolve()));
+    });
+    try {
+      // PlatformIO deasserts DTR during the touch so opening the port does not
+      // inadvertently assert the ESP download-mode strap.
+      await new Promise<void>((resolve, reject) => {
+        touchPort.set({ dtr: false }, (err) => (err ? reject(err) : resolve()));
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    } finally {
+      if (touchPort.isOpen) {
+        await new Promise<void>((resolve, reject) => {
+          touchPort.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
+    }
+    // Give the USB stack time to process the disconnect and start enumerating
+    // the booted firmware again, as PlatformIO does after its touch.
+    await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+  }
+
+  private async waitForPortDisappearance(
+    path: string,
+    wasEnumerated: boolean,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    if (!wasEnumerated) {
+      return false;
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const ports = await this.listPorts(/* suppressToasts */ true);
+      if (!ports.some((candidate) => candidate.path === path)) {
+        return true;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+  }
+
+  private async reconnectAndWait(timeoutMs: number): Promise<void> {
+    const boundedTimeout = Math.max(1000, timeoutMs);
+    let subscription: vscode.Disposable | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const connected = new Promise<void>((resolve, reject) => {
+      subscription = this.onConnectionChange((isConnected) => {
+        if (isConnected) {
+          resolve();
+        }
+      });
+      timer = setTimeout(
+        () => reject(new Error('Timed out waiting for the TinyUSB port to re-enumerate')),
+        boundedTimeout + 1000,
+      );
+    });
+    try {
+      // This explicit reset flow reconnects regardless of the optional setting
+      // that controls background reconnect after unexpected disconnects.
+      this.startAutoReconnect(boundedTimeout, 250);
+      await connected;
+    } finally {
+      subscription?.dispose();
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
   }
 
   async sendData(data: string): Promise<void> {
