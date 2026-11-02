@@ -733,6 +733,7 @@ export class SerialPortManager extends vscode.Disposable {
         pathsBeforeReset: new Set(bootloaderPorts.map((candidate) => candidate.path)),
         fallbackPath: bootloaderPath,
       };
+      this.cancelReconnect();
       await this.reconnectAndWait(timeoutMs, applicationResetContext);
       return;
     }
