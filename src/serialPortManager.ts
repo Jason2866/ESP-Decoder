@@ -17,6 +17,10 @@ export interface DisconnectInfo {
   suspended: boolean;
 }
 
+type PortEnumerationResult =
+  | { success: true; ports: SerialPortInfo[] }
+  | { success: false; error: unknown };
+
 export class SerialPortManager extends vscode.Disposable {
   private port: SerialPort | null = null;
   private _selectedPath: string | undefined;
@@ -139,6 +143,28 @@ export class SerialPortManager extends vscode.Disposable {
   }
 
   async listPorts(suppressToasts = false): Promise<SerialPortInfo[]> {
+    const result = await this.enumeratePorts();
+    if (result.success) {
+      return result.ports;
+    }
+
+    const err = result.error;
+    // Background callers (auto-reconnect poll, identity capture) pass
+    // suppressToasts=true so a transient enumeration failure does not flood
+    // the user with modal error messages mid-reset cycle.
+    if (!suppressToasts) {
+      vscode.window.showErrorMessage(
+        `Failed to list serial ports: ${err instanceof Error ? err.message : err}`
+      );
+    } else {
+      this.log.appendLine(
+        `[ESP Decoder] listPorts failed (suppressed): ${err instanceof Error ? err.message : err}`
+      );
+    }
+    return [];
+  }
+
+  private async enumeratePorts(): Promise<PortEnumerationResult> {
     try {
       const ports = await SerialPort.list();
       const mappedPorts = ports.map((p) => ({
@@ -149,21 +175,9 @@ export class SerialPortManager extends vscode.Disposable {
         productId: p.productId,
         friendlyName: (p as unknown as Record<string, unknown>).friendlyName as string | undefined,
       }));
-      return this.filterPorts(mappedPorts);
+      return { success: true, ports: this.filterPorts(mappedPorts) };
     } catch (err) {
-      // Background callers (auto-reconnect poll, identity capture) pass
-      // suppressToasts=true so a transient enumeration failure does not flood
-      // the user with modal error messages mid-reset cycle.
-      if (!suppressToasts) {
-        vscode.window.showErrorMessage(
-          `Failed to list serial ports: ${err instanceof Error ? err.message : err}`
-        );
-      } else {
-        this.log.appendLine(
-          `[ESP Decoder] listPorts failed (suppressed): ${err instanceof Error ? err.message : err}`
-        );
-      }
-      return [];
+      return { success: false, error: err };
     }
   }
 
@@ -677,8 +691,8 @@ export class SerialPortManager extends vscode.Disposable {
     }
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const ports = await this.listPorts(/* suppressToasts */ true);
-      if (!ports.some((candidate) => candidate.path === path)) {
+      const result = await this.enumeratePorts();
+      if (result.success && !result.ports.some((candidate) => candidate.path === path)) {
         return true;
       }
       await new Promise<void>((resolve) => setTimeout(resolve, 100));
@@ -705,6 +719,9 @@ export class SerialPortManager extends vscode.Disposable {
       // This explicit reset flow reconnects regardless of the optional setting
       // that controls background reconnect after unexpected disconnects.
       this.startAutoReconnect(boundedTimeout, 250);
+      if (!this._isReconnecting) {
+        throw new Error('Cannot reconnect after TinyUSB touch: no device identity was captured');
+      }
       await connected;
     } finally {
       subscription?.dispose();
