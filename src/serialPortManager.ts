@@ -21,6 +21,18 @@ type PortEnumerationResult =
   | { success: true; ports: SerialPortInfo[] }
   | { success: false; error: unknown };
 
+interface PortIdentity {
+  vendorId: string | undefined;
+  productId: string | undefined;
+  serialNumber: string | undefined;
+}
+
+interface ResetReconnectContext {
+  identity: PortIdentity;
+  pathsBeforeReset: Set<string>;
+  fallbackPath: string;
+}
+
 export class SerialPortManager extends vscode.Disposable {
   private port: SerialPort | null = null;
   private _selectedPath: string | undefined;
@@ -584,11 +596,9 @@ export class SerialPortManager extends vscode.Disposable {
   }
 
   /**
-   * Reset the connected chip using 1200-baud touch first. Tiny USB CDC
-   * firmware can use that touch to reset into its bootloader; if the serial
-   * port disappears, reconnect by the re-enumerated device identity.
-   * USB-UART bridges ignore the touch, so they fall back to the RTS/EN reset
-   * sequence.
+   * Attempt PlatformIO's 1200-baud reset touch, then return to the application
+   * monitor. A port disappearance only indicates re-enumeration; it does not
+   * identify the USB stack. USB-UART bridges that stay present use RTS/EN.
    */
   async hardReset(): Promise<void> {
     if (!this.port || !this._isConnected) {
@@ -599,13 +609,21 @@ export class SerialPortManager extends vscode.Disposable {
       throw new Error('No serial port selected');
     }
 
-    // PlatformIO's use_1200bps_touch action briefly opens the CDC port at
-    // 1200 baud, then closes it. TinyUSB devices interpret that as a request
-    // to reset/re-enumerate. Release the monitor handle first so the temporary
-    // connection can open the same port (especially on Windows).
+    const originalIdentity: PortIdentity = {
+      vendorId: this._connectedVendorId,
+      productId: this._connectedProductId,
+      serialNumber: this._connectedSerialNumber,
+    };
+
+    // PlatformIO's use_1200bps_touch action opens the CDC port at 1200 baud,
+    // then closes it. Arduino-ESP32 TinyUSB firmware may restart into its
+    // bootloader in response. Release the monitor handle before opening the
+    // temporary connection, especially on Windows.
     await this.disconnect();
-    const wasEnumerated = (await this.listPorts(/* suppressToasts */ true))
-      .some((candidate) => candidate.path === path);
+    const beforeTouch = await this.enumeratePorts();
+    const portsBeforeTouch = beforeTouch.success ? beforeTouch.ports : [];
+    const wasEnumerated = beforeTouch.success
+      && portsBeforeTouch.some((candidate) => candidate.path === path);
     const disappearance = this.waitForPortDisappearance(path, wasEnumerated, 2000);
     try {
       await this.touchSerialPortAt1200(path);
@@ -617,11 +635,66 @@ export class SerialPortManager extends vscode.Disposable {
 
     const disappeared = await disappearance;
     if (disappeared) {
-      this.log.appendLine('[ESP Decoder] Port disappeared after 1200-baud touch; waiting for TinyUSB re-enumeration');
+      this.log.appendLine('[ESP Decoder] Port disappeared after 1200-baud touch; waiting for re-enumeration');
       const timeoutMs = vscode.workspace
         .getConfiguration('esp-decoder')
         .get<number>('serialMonitor.autoReconnectTimeoutMs', 15000);
-      await this.reconnectAndWait(timeoutMs);
+      const firstResetContext: ResetReconnectContext = {
+        identity: originalIdentity,
+        pathsBeforeReset: new Set(portsBeforeTouch.map((candidate) => candidate.path)),
+        fallbackPath: path,
+      };
+      await this.reconnectAndWait(timeoutMs, firstResetContext);
+
+      // The 1200-baud touch can leave Arduino-ESP32 in its bootloader. Pulse
+      // reset on the re-enumerated port to start the application, then wait
+      // for its port and reconnect using the original identity or a unique
+      // port that appeared during this reset cycle.
+      const bootloaderPath = this._selectedPath;
+      if (!bootloaderPath) {
+        throw new Error('No re-enumerated serial port selected after 1200-baud touch');
+      }
+      const beforeApplicationReset = await this.enumeratePorts();
+      const bootloaderPorts = beforeApplicationReset.success
+        ? beforeApplicationReset.ports
+        : [];
+      const applicationDisappearance = this.waitForPortDisappearance(
+        bootloaderPath,
+        beforeApplicationReset.success
+          && bootloaderPorts.some((candidate) => candidate.path === bootloaderPath),
+        2000,
+      );
+      let resetError: unknown;
+      try {
+        await this.pulseResetSignals();
+      } catch (err) {
+        resetError = err;
+        this.log.appendLine(
+          `[ESP Decoder] Reset signal ended with an error during re-enumeration: ${err instanceof Error ? err.message : err}`
+        );
+      }
+      if (!(await applicationDisappearance)) {
+        if (resetError instanceof Error) {
+          throw resetError;
+        }
+        throw new Error('The re-enumerated port did not disappear after reset; application mode could not be confirmed');
+      }
+
+      if (this._isConnected) {
+        try {
+          await this.disconnect();
+        } catch (err) {
+          this.log.appendLine(
+            `[ESP Decoder] Port close after reset was already in progress: ${err instanceof Error ? err.message : err}`
+          );
+        }
+      }
+      const applicationResetContext: ResetReconnectContext = {
+        identity: originalIdentity,
+        pathsBeforeReset: new Set(bootloaderPorts.map((candidate) => candidate.path)),
+        fallbackPath: bootloaderPath,
+      };
+      await this.reconnectAndWait(timeoutMs, applicationResetContext);
       return;
     }
 
@@ -630,8 +703,12 @@ export class SerialPortManager extends vscode.Disposable {
     if (!this._isConnected && !(await this.connect())) {
       throw new Error(`Failed to reopen serial port ${this._selectedPath ?? path}`);
     }
+    await this.pulseResetSignals();
+  }
+
+  private async pulseResetSignals(): Promise<void> {
     const port = this.port;
-    if (!port || !port.isOpen) {
+    if (!port || !this._isConnected || !port.isOpen) {
       throw new Error('Serial port not connected');
     }
     // Always pass BOTH dtr and rts: node-serialport's set() resets every
@@ -676,8 +753,8 @@ export class SerialPortManager extends vscode.Disposable {
         });
       }
     }
-    // Give the USB stack time to process the disconnect and start enumerating
-    // the booted firmware again, as PlatformIO does after its touch.
+    // Give the USB stack time to process the disconnect and begin enumerating
+    // the bootloader or application port, as PlatformIO does after its touch.
     await new Promise<void>((resolve) => setTimeout(resolve, 1000));
   }
 
@@ -700,7 +777,10 @@ export class SerialPortManager extends vscode.Disposable {
     return false;
   }
 
-  private async reconnectAndWait(timeoutMs: number): Promise<void> {
+  private async reconnectAndWait(
+    timeoutMs: number,
+    resetContext?: ResetReconnectContext,
+  ): Promise<void> {
     const boundedTimeout = Math.max(1000, timeoutMs);
     let subscription: vscode.Disposable | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -711,16 +791,16 @@ export class SerialPortManager extends vscode.Disposable {
         }
       });
       timer = setTimeout(
-        () => reject(new Error('Timed out waiting for the TinyUSB port to re-enumerate')),
+        () => reject(new Error('Timed out waiting for the serial port to re-enumerate')),
         boundedTimeout + 1000,
       );
     });
     try {
       // This explicit reset flow reconnects regardless of the optional setting
       // that controls background reconnect after unexpected disconnects.
-      this.startAutoReconnect(boundedTimeout, 250);
+      this.startAutoReconnect(boundedTimeout, 250, resetContext);
       if (!this._isReconnecting) {
-        throw new Error('Cannot reconnect after TinyUSB touch: no device identity was captured');
+        throw new Error('Cannot reconnect: no device identity or unique reset port was captured');
       }
       await connected;
     } finally {
@@ -804,6 +884,9 @@ export class SerialPortManager extends vscode.Disposable {
    * reconnect to it. The poll only matches a port whose VID/PID/serialNumber
    * exactly equal the values captured at the most recent successful connect,
    * so a different device plugged in afterwards is never auto-attached.
+   * The explicit 1200-baud reset path may supply a context that permits the
+   * original path or one unique newly enumerated path when bootloader USB
+   * descriptors differ from the application descriptors.
    *
    * Safe to call repeatedly — only one polling loop runs at a time.
    * Cancelled automatically by {@link connect}, {@link disconnect}, and
@@ -812,12 +895,26 @@ export class SerialPortManager extends vscode.Disposable {
    * @param timeoutMs Total wall-clock budget for polling.
    * @param pollIntervalMs Delay between port-list polls.
    */
-  startAutoReconnect(timeoutMs: number, pollIntervalMs = 500): void {
+  startAutoReconnect(
+    timeoutMs: number,
+    pollIntervalMs = 500,
+    resetContext?: ResetReconnectContext,
+  ): void {
     if (this._isConnected && !this._stabilityTimer) {
       // Already stably connected — nothing to do.
       return;
     }
-    if (!this._connectedVendorId && !this._connectedProductId && !this._connectedSerialNumber) {
+    const targetIdentity = resetContext?.identity ?? {
+      vendorId: this._connectedVendorId,
+      productId: this._connectedProductId,
+      serialNumber: this._connectedSerialNumber,
+    };
+    if (
+      !targetIdentity.vendorId
+      && !targetIdentity.productId
+      && !targetIdentity.serialNumber
+      && !resetContext
+    ) {
       this.log.appendLine('[ESP Decoder] auto-reconnect skipped: no device identity captured');
       this._isReconnecting = false;
       return;
@@ -829,7 +926,7 @@ export class SerialPortManager extends vscode.Disposable {
       this._reconnectDeadline = Date.now() + timeoutMs;
       this._isReconnecting = true;
       this.log.appendLine(
-        `[ESP Decoder] auto-reconnect armed: VID=${this._connectedVendorId ?? '?'} PID=${this._connectedProductId ?? '?'} SN=${this._connectedSerialNumber ?? '?'} timeout=${timeoutMs}ms`
+        `[ESP Decoder] auto-reconnect armed: VID=${targetIdentity.vendorId ?? '?'} PID=${targetIdentity.productId ?? '?'} SN=${targetIdentity.serialNumber ?? '?'} timeout=${timeoutMs}ms`
       );
     }
     if (this._reconnectTimer) {
@@ -837,10 +934,10 @@ export class SerialPortManager extends vscode.Disposable {
       return;
     }
 
-    const targetVid = this._connectedVendorId;
-    const targetPid = this._connectedProductId;
-    const targetSn = this._connectedSerialNumber;
-    const previousPath = this._selectedPath;
+    const targetVid = targetIdentity.vendorId;
+    const targetPid = targetIdentity.productId;
+    const targetSn = targetIdentity.serialNumber;
+    const previousPath = resetContext?.fallbackPath ?? this._selectedPath;
 
     const poll = async (): Promise<void> => {
       this._reconnectTimer = null;
@@ -875,9 +972,23 @@ export class SerialPortManager extends vscode.Disposable {
       if (!this._isReconnecting || this._isConnected) {
         return;
       }
-      const match = ports.find((p) =>
+      let match = ports.find((p) =>
         portIdentityMatches(p, targetVid, targetPid, targetSn)
       );
+      if (!match && resetContext) {
+        // A 1200-baud touch can switch between application and bootloader USB
+        // descriptors. During this explicit reset only, accept the original
+        // path or one unambiguous newly enumerated path as the same board.
+        match = ports.find((p) => p.path === resetContext.fallbackPath);
+        if (!match) {
+          const newlyEnumerated = ports.filter(
+            (p) => !resetContext.pathsBeforeReset.has(p.path)
+          );
+          if (newlyEnumerated.length === 1) {
+            match = newlyEnumerated[0];
+          }
+        }
+      }
       if (match) {
         this.log.appendLine(
           `[ESP Decoder] auto-reconnect: matched device at ${match.path} (was ${previousPath ?? '?'})`
