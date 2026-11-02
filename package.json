@@ -232,13 +232,13 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/vscode": "^1.85.0",
-    "@typescript-eslint/eslint-plugin": "^8.59.4",
-    "@typescript-eslint/parser": "^8.59.4",
-    "esbuild": "^0.28.0",
-    "eslint": "^10.4.0",
-    "pioarduino-node-helpers": "^12.6.1",
+    "@typescript-eslint/eslint-plugin": "^8.72.1",
+    "@typescript-eslint/parser": "^8.72.1",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.14.0",
+    "pioarduino-node-helpers": "^12.7.0",
     "typescript": "6.0.3",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.11"
   },
   "allowScripts": {
     "@jason2866/serialport-bindings-cpp@13.0.5": true,
