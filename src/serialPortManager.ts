@@ -32,8 +32,6 @@ interface PortIdentity {
 
 interface ResetReconnectContext {
   identity: PortIdentity;
-  pathsBeforeReset: Set<string>;
-  fallbackPath: string;
 }
 
 export class SerialPortManager extends vscode.Disposable {
@@ -680,15 +678,13 @@ export class SerialPortManager extends vscode.Disposable {
         .get<number>('serialMonitor.autoReconnectTimeoutMs', 15000);
       const firstResetContext: ResetReconnectContext = {
         identity: originalIdentity,
-        pathsBeforeReset: new Set(portsBeforeTouch.map((candidate) => candidate.path)),
-        fallbackPath: path,
       };
       await this.reconnectAndWait(timeoutMs, firstResetContext);
 
       // The 1200-baud touch can leave Arduino-ESP32 in its bootloader. Pulse
       // reset on the re-enumerated port to start the application, then wait
-      // for its port and reconnect using the original identity or a unique
-      // port that appeared during this reset cycle.
+      // for its port and reconnect only if the original device identity is
+      // still available after the descriptor change.
       const bootloaderPath = this._selectedPath;
       if (!bootloaderPath) {
         throw new Error('No re-enumerated serial port selected after 1200-baud touch');
@@ -730,8 +726,6 @@ export class SerialPortManager extends vscode.Disposable {
       }
       const applicationResetContext: ResetReconnectContext = {
         identity: originalIdentity,
-        pathsBeforeReset: new Set(bootloaderPorts.map((candidate) => candidate.path)),
-        fallbackPath: bootloaderPath,
       };
       this.cancelReconnect();
       await this.reconnectAndWait(timeoutMs, applicationResetContext);
@@ -840,7 +834,7 @@ export class SerialPortManager extends vscode.Disposable {
       // that controls background reconnect after unexpected disconnects.
       this.startAutoReconnect(boundedTimeout, 250, resetContext);
       if (!this._isReconnecting) {
-        throw new Error('Cannot reconnect: no device identity or unique reset port was captured');
+        throw new Error('Cannot reconnect: no device identity was captured');
       }
       await connected;
     } finally {
@@ -977,7 +971,7 @@ export class SerialPortManager extends vscode.Disposable {
     const targetVid = targetIdentity.vendorId;
     const targetPid = targetIdentity.productId;
     const targetSn = targetIdentity.serialNumber;
-    const previousPath = resetContext?.fallbackPath ?? this._selectedPath;
+    const previousPath = this._selectedPath;
 
     const poll = async (): Promise<void> => {
       this._reconnectTimer = null;
@@ -1015,20 +1009,6 @@ export class SerialPortManager extends vscode.Disposable {
       let match = ports.find((p) =>
         portIdentityMatches(p, targetVid, targetPid, targetSn)
       );
-      if (!match && resetContext) {
-        // A 1200-baud touch can switch between application and bootloader USB
-        // descriptors. During this explicit reset only, accept the original
-        // path or one unambiguous newly enumerated path as the same board.
-        match = ports.find((p) => p.path === resetContext.fallbackPath);
-        if (!match) {
-          const newlyEnumerated = ports.filter(
-            (p) => !resetContext.pathsBeforeReset.has(p.path)
-          );
-          if (newlyEnumerated.length === 1) {
-            match = newlyEnumerated[0];
-          }
-        }
-      }
       if (match) {
         this.log.appendLine(
           `[ESP Decoder] auto-reconnect: matched device at ${match.path} (was ${previousPath ?? '?'})`
