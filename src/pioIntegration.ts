@@ -663,6 +663,8 @@ for option, value in config.items(env=env_name, as_dict=True).items():
 value = board.get("upload.use_1200bps_touch", None)
 if isinstance(value, str):
     value = value.lower() in ("1", "yes", "true")
+elif isinstance(value, int):
+    value = value != 0
 print(json.dumps(value if isinstance(value, bool) else None))
 `;
     const output = await pioCore.getCorePythonCommandOutput(
