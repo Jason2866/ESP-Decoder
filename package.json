@@ -126,7 +126,7 @@
             "Set DTR low (equivalent to PlatformIO monitor_dtr = 0).",
             "Set DTR high (equivalent to PlatformIO monitor_dtr = 1)."
           ],
-          "description": "DTR state applied after the serial port opens. On Linux, DTR may be asserted during opening before this setting is applied, so false does not prevent that initial state. Leave unset to preserve the existing serial port behavior."
+          "description": "DTR state applied after the serial port opens. Both monitorDtr and monitorRts must be set to true or false for either line to be changed; if either is unset, both are left unchanged. On Linux, DTR may be asserted during opening before this setting is applied, so false does not prevent that initial state."
         },
         "esp-decoder.monitorRts": {
           "type": [
@@ -144,7 +144,7 @@
             "Set RTS low (equivalent to PlatformIO monitor_rts = 0).",
             "Set RTS high (equivalent to PlatformIO monitor_rts = 1)."
           ],
-          "description": "RTS state applied after the serial port opens. On Linux, RTS may be asserted during opening before this setting is applied, so false does not prevent that initial state. Leave unset to preserve the existing serial port behavior."
+          "description": "RTS state applied after the serial port opens. Both monitorDtr and monitorRts must be set to true or false for either line to be changed; if either is unset, both are left unchanged. On Linux, RTS may be asserted during opening before this setting is applied, so false does not prevent that initial state."
         },
         "esp-decoder.autoDetectElf": {
           "type": "boolean",

@@ -41,8 +41,8 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `esp-decoder.defaultBaudRate` | `115200` | Default baud rate |
-| `esp-decoder.monitorDtr` | `null` | DTR state applied after the port opens (`null` preserves current behavior; `false`/`true` map to PlatformIO `monitor_dtr = 0`/`1`). Linux may assert DTR while opening, before this setting applies, so `false` does not prevent that initial state. |
-| `esp-decoder.monitorRts` | `null` | RTS state applied after the port opens (`null` preserves current behavior; `false`/`true` map to PlatformIO `monitor_rts = 0`/`1`). Linux may assert RTS while opening, before this setting applies, so `false` does not prevent that initial state. |
+| `esp-decoder.monitorDtr` | `null` | DTR state applied after the port opens (`false`/`true` map to PlatformIO `monitor_dtr = 0`/`1`). Both DTR and RTS must be set to `false` or `true` for either change to apply; otherwise both are left unchanged. Linux may assert DTR while opening, before this setting applies, so `false` does not prevent that initial state. |
+| `esp-decoder.monitorRts` | `null` | RTS state applied after the port opens (`false`/`true` map to PlatformIO `monitor_rts = 0`/`1`). Both DTR and RTS must be set to `false` or `true` for either change to apply; otherwise both are left unchanged. Linux may assert RTS while opening, before this setting applies, so `false` does not prevent that initial state. |
 | `esp-decoder.autoDetectElf` | `true` | Auto-detect ELF from PlatformIO and ESP-IDF builds |
 | `esp-decoder.elfPath` | `""` | Manual ELF file path |
 | `esp-decoder.toolPath` | `""` | Manual GDB/addr2line path |

@@ -435,13 +435,6 @@ export class SerialPortManager extends vscode.Disposable {
       const config = vscode.workspace.getConfiguration('esp-decoder');
       const dtr = config.get<boolean | null>('monitorDtr', null);
       const rts = config.get<boolean | null>('monitorRts', null);
-      const lineSettings: { dtr?: boolean; rts?: boolean } = {};
-      if (dtr !== null) {
-        lineSettings.dtr = dtr;
-      }
-      if (rts !== null) {
-        lineSettings.rts = rts;
-      }
 
       const continueConnection = () => {
         // Register the data listener only after the port is open and any
@@ -481,19 +474,23 @@ export class SerialPortManager extends vscode.Disposable {
           });
       };
 
-      if (Object.keys(lineSettings).length === 0) {
-        // Keep the previous behavior by leaving the driver's line states alone
-        // unless the user explicitly configures DTR or RTS.
+      if (typeof dtr !== 'boolean' || typeof rts !== 'boolean') {
+        // Set both lines together so a partial configuration cannot change one
+        // line while leaving the other at an unintended driver state.
+        this.log.appendLine(
+          '[ESP Decoder] Warning: monitorDtr and monitorRts must both be configured as true or false to set DTR/RTS; skipping line settings.'
+        );
         continueConnection();
       } else {
         // If a driver does not support changing a line, keep the serial
         // connection usable and report the failure in the output channel.
-        portInstance.set(lineSettings, (setErr) => {
+        portInstance.set({ dtr, rts }, (setErr) => {
           if (setErr) {
-            const requested = Object.entries(lineSettings)
-              .map(([line, value]) => `${line.toUpperCase()}=${Number(value)}`)
-              .join(' ');
+            const requested = `DTR=${Number(dtr)} RTS=${Number(rts)}`;
             this.log.appendLine(`[ESP Decoder] Failed to set ${requested}: ${setErr.message}`);
+            vscode.window.showWarningMessage(
+              `ESP Decoder: Failed to set serial monitor ${requested}: ${setErr.message}. The connection remains open.`
+            );
           }
           continueConnection();
         });
