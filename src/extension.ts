@@ -3,7 +3,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SerialPortManager } from './serialPortManager';
 import { EspDecoderWebviewPanel, SessionConfig } from './webviewPanel';
-import { findPioEnvironments, selectElfFile, getMonitorBaudRate } from './pioIntegration';
+import {
+  findPioEnvironments,
+  selectElfFile,
+  getMonitorBaudRate,
+  getActivePioEnvironment,
+} from './pioIntegration';
 import { findEspIdfBuilds } from './espIdfIntegration';
 
 /** Shape of the public API exported by the pioarduino IDE extension. */
@@ -100,11 +105,13 @@ export function activate(context: vscode.ExtensionContext) {
         if (opts?.port) {
           serialManager.setPort(opts.port);
         }
+        const configuredEnvironment = vscode.workspace
+          .getConfiguration('esp-decoder')
+          .get<string>('serialMonitor.platformioEnvironment', '')
+          .trim();
         const pioEnvironment = opts?.environment?.trim()
-          || vscode.workspace
-            .getConfiguration('esp-decoder')
-            .get<string>('serialMonitor.platformioEnvironment', '')
-            .trim();
+          || await getActivePioEnvironment()
+          || configuredEnvironment;
         serialManager.setPlatformIOEnvironment(pioEnvironment);
         // If the caller did not supply a baud rate, look it up from
         // platformio.ini via pioarduino-node-helpers so the project's
@@ -299,6 +306,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 }
 
+/** Return the environment selected in pioarduino, when its project is active. */
 function isPlatformIoBuildElf(elfPath: string): boolean {
   const normalized = path.normalize(elfPath);
   return normalized.includes(`${path.sep}.pio${path.sep}build${path.sep}`);

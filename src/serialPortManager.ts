@@ -1,6 +1,6 @@
 import { SerialPort } from 'serialport';
 import * as vscode from 'vscode';
-import { getUse1200BpsTouch } from './pioIntegration';
+import { getActivePioEnvironment, getUse1200BpsTouch } from './pioIntegration';
 
 type ResetMethod = 'platformio' | '1200-baud-touch' | 'rts-en';
 
@@ -614,14 +614,31 @@ export class SerialPortManager extends vscode.Disposable {
         .getConfiguration('esp-decoder')
         .get<string>('serialMonitor.platformioEnvironment', '')
         .trim();
-      const environment = this._pioEnvironment ?? (configuredEnvironment || undefined);
-      const boardSetting = workspaceFolder
-        ? await getUse1200BpsTouch(workspaceFolder, environment)
-        : undefined;
+      const activeEnvironment = await getActivePioEnvironment();
+      const environment = activeEnvironment
+        ?? this._pioEnvironment
+        ?? (configuredEnvironment || undefined);
+      let boardSetting: boolean | undefined;
+      let resolvedEnvironment = environment;
+      if (workspaceFolder) {
+        try {
+          const setting = await getUse1200BpsTouch(workspaceFolder, environment);
+          boardSetting = setting?.value;
+          resolvedEnvironment = setting?.environment ?? environment;
+        } catch (error) {
+          this.log.appendLine(
+            `[ESP Decoder] Could not resolve PIO board setting: ${error instanceof Error ? error.message : error}`,
+          );
+        }
+      }
       use1200BpsTouch = boardSetting === true;
       if (boardSetting === undefined) {
         this.log.appendLine(
-          '[ESP Decoder] PlatformIO 1200-baud-touch setting is unknown; using RTS/EN reset',
+          `[ESP Decoder] 1200-baud-touch setting is unknown for environment "${resolvedEnvironment ?? 'unresolved'}"; using RTS/EN reset`,
+        );
+      } else {
+        this.log.appendLine(
+          `[ESP Decoder] PlatformIO 1200-baud-touch setting for environment "${resolvedEnvironment ?? 'unknown'}": ${boardSetting}`,
         );
       }
     }

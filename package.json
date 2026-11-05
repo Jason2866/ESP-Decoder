@@ -113,7 +113,7 @@
         "esp-decoder.autoDetectElf": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically detect ELF file from PlatformIO or ESP-IDF build directories"
+          "description": "Automatically detect ELF file from PIO or ESP-IDF build directories"
         },
         "esp-decoder.elfPath": {
           "type": "string",
@@ -172,16 +172,16 @@
             "rts-en"
           ],
           "enumDescriptions": [
-            "Follow the selected PlatformIO board's upload.use_1200bps_touch setting; otherwise use RTS/EN.",
-            "Force a 1200-baud touch, including when PlatformIO board metadata is unavailable.",
+            "Follow the selected PIO board's upload.use_1200bps_touch setting; otherwise use RTS/EN.",
+            "Force a 1200-baud touch, including when PIO board metadata is unavailable.",
             "Force the RTS/EN reset sequence."
           ],
-          "description": "Reset method for the serial monitor. The PlatformIO board flag selects a reset procedure; it does not identify the USB stack."
+          "description": "Reset method for the serial monitor. The PIO board flag selects a reset procedure; it does not identify the USB stack."
         },
         "esp-decoder.serialMonitor.platformioEnvironment": {
           "type": "string",
           "default": "",
-          "description": "PlatformIO environment associated with the connected serial device. Leave empty to use the project's default environment; an environment passed to esp-decoder.openMonitor takes precedence."
+          "description": "Fallback PIO environment for the connected serial device. pioarduino's active environment takes precedence unless esp-decoder.openMonitor passes an environment explicitly."
         },
         "esp-decoder.logDirectory": {
           "type": "string",

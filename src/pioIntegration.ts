@@ -17,6 +17,11 @@ export interface PioEnvironment {
   romElfPath?: string;
 }
 
+export interface PioBoardTouchSetting {
+  environment?: string;
+  value?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // PlatformIO INI parsing (ported from esp-exception-decoder)
 // ---------------------------------------------------------------------------
@@ -616,21 +621,31 @@ export async function getMonitorBaudRate(
   return undefined;
 }
 
+/** Return the environment currently selected in the pioarduino IDE, if any. */
+export async function getActivePioEnvironment(): Promise<string | undefined> {
+  try {
+    const environment = await vscode.commands.executeCommand<string>(
+      'platformio-ide.activeEnvironment',
+    );
+    return environment?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Read the effective board's `upload.use_1200bps_touch` value for a PlatformIO
  * environment. PlatformIO resolves the board manifest and `board_*` overrides
- * through its own APIs. Git URL platform specifications are mapped to their
- * installed platform directory before asking PlatformIO for the board config.
+ * through its own APIs, including Git URL and ZIP platform specifications.
  */
 export async function getUse1200BpsTouch(
   projectPath: string,
   environment?: string,
-): Promise<boolean | undefined> {
+): Promise<PioBoardTouchSetting | undefined> {
   try {
     ensurePioCorePython();
     const script = String.raw`
 import json
-import os
 import sys
 from platformio.platform.factory import PlatformFactory
 from platformio.project.config import ProjectConfig
@@ -638,34 +653,18 @@ from platformio.project.config import ProjectConfig
 config = ProjectConfig.get_instance()
 env_name = sys.argv[1] or config.get_default_env()
 if not env_name or env_name not in config.envs():
-    print(json.dumps(None))
+    print(json.dumps({"environment": env_name, "value": None}))
     raise SystemExit(0)
 section = f"env:{env_name}"
-platform_spec = config.get(section, "platform", None)
 board_id = config.get(section, "board", None)
-if not platform_spec or not board_id:
-    print(json.dumps(None))
+if not board_id:
+    print(json.dumps({"environment": env_name, "value": None}))
     raise SystemExit(0)
 
-def load_board_config():
-    try:
-        return PlatformFactory.new(platform_spec).board_config(board_id)
-    except Exception:
-        # A Git URL is the project config value, but PlatformFactory expects
-        # the installed platform path for this form of platform specification.
-        platform_url = platform_spec.split("#", 1)[0].rstrip("/")
-        platform_name = os.path.basename(platform_url)
-        for suffix in (".git", ".zip"):
-            if platform_name.lower().endswith(suffix):
-                platform_name = platform_name[:-len(suffix)]
-                break
-        if platform_name.startswith("platform-"):
-            platform_name = platform_name[len("platform-"):]
-        core_dir = sys.argv[2]
-        installed_platform = os.path.join(core_dir, "platforms", platform_name)
-        return PlatformFactory.new(installed_platform).board_config(board_id)
-
-board = load_board_config()
+# Let PlatformIO resolve registry, Git and ZIP platform specifications for
+# this environment instead of deriving an installed directory from the URL.
+platform = PlatformFactory.from_env(env_name)
+board = platform.board_config(board_id)
 for option, value in config.items(env=env_name, as_dict=True).items():
     if not option.lower().startswith("board_"):
         continue
@@ -683,18 +682,30 @@ for option, value in config.items(env=env_name, as_dict=True).items():
 value = board.get("upload.use_1200bps_touch", None)
 if isinstance(value, str):
     value = value.lower() in ("1", "yes", "true")
-print(json.dumps(value if isinstance(value, bool) else None))
+print(json.dumps({
+    "environment": env_name,
+    "value": value if isinstance(value, bool) else None,
+}))
 `;
     const output = await pioCore.getCorePythonCommandOutput(
-      ['-c', script, environment ?? '', pioCore.getCoreDir()],
+      ['-c', script, environment ?? ''],
       { projectDir: projectPath },
     );
-    const value: unknown = JSON.parse(output.trim());
-    return typeof value === 'boolean' ? value : undefined;
-  } catch {
-    // PlatformIO Core, the configured environment, or its board may be absent.
+    const result: unknown = JSON.parse(output.trim());
+    if (!result || typeof result !== 'object') {
+      return undefined;
+    }
+    const response = result as { environment?: unknown; value?: unknown };
+    return {
+      environment: typeof response.environment === 'string' ? response.environment : undefined,
+      value: typeof response.value === 'boolean' ? response.value : undefined,
+    };
+  } catch (error) {
+    throw new Error(
+      `Could not read PIO board setting: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
-  return undefined;
 }
 
 /**
