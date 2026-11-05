@@ -488,9 +488,11 @@ export class SerialPortManager extends vscode.Disposable {
           if (setErr) {
             const requested = `DTR=${Number(dtr)} RTS=${Number(rts)}`;
             this.log.appendLine(`[ESP Decoder] Failed to set ${requested}: ${setErr.message}`);
-            vscode.window.showWarningMessage(
-              `ESP Decoder: Failed to set serial monitor ${requested}: ${setErr.message}. The connection remains open.`
-            );
+            if (!this._suppressErrorToasts) {
+              vscode.window.showWarningMessage(
+                `ESP Decoder: Failed to set serial monitor ${requested}: ${setErr.message}. The connection remains open.`
+              );
+            }
           }
           continueConnection();
         });
