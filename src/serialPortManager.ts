@@ -2,7 +2,7 @@ import { SerialPort } from 'serialport';
 import * as vscode from 'vscode';
 import { getUse1200BpsTouch } from './pioIntegration';
 
-type ResetMethod = 'auto' | '1200-baud-touch' | 'rts-en';
+type ResetMethod = 'platformio' | '1200-baud-touch' | 'rts-en';
 
 export interface SerialPortInfo {
   path: string;
@@ -606,9 +606,9 @@ export class SerialPortManager extends vscode.Disposable {
 
     const resetMethod = vscode.workspace
       .getConfiguration('esp-decoder')
-      .get<ResetMethod>('serialMonitor.resetMethod', 'auto');
+      .get<ResetMethod>('serialMonitor.resetMethod', 'platformio');
     let use1200BpsTouch = resetMethod === '1200-baud-touch';
-    if (resetMethod === 'auto') {
+    if (resetMethod === 'platformio') {
       const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
       const configuredEnvironment = vscode.workspace
         .getConfiguration('esp-decoder')

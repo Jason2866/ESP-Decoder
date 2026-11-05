@@ -165,14 +165,14 @@
         },
         "esp-decoder.serialMonitor.resetMethod": {
           "type": "string",
-          "default": "auto",
+          "default": "platformio",
           "enum": [
-            "auto",
+            "platformio",
             "1200-baud-touch",
             "rts-en"
           ],
           "enumDescriptions": [
-            "Use the selected PlatformIO board's upload.use_1200bps_touch setting; otherwise use RTS/EN.",
+            "Follow the selected PlatformIO board's upload.use_1200bps_touch setting; otherwise use RTS/EN.",
             "Force a 1200-baud touch, including when PlatformIO board metadata is unavailable.",
             "Force the RTS/EN reset sequence."
           ],
