@@ -603,11 +603,7 @@ export class SerialPortManager extends vscode.Disposable {
     });
   }
 
-  /**
-   * Attempt PlatformIO's 1200-baud reset touch, then return to the application
-   * monitor. A port disappearance only indicates re-enumeration; it does not
-   * identify the USB stack. USB-UART bridges that stay present use RTS/EN.
-   */
+  /** Attempt the configured reset procedure and return to the serial monitor. */
   async hardReset(): Promise<void> {
     if (!this.port || !this._isConnected) {
       throw new Error('Serial port not connected');
@@ -647,25 +643,19 @@ export class SerialPortManager extends vscode.Disposable {
       return;
     }
 
-    const originalIdentity: PortIdentity = {
-      vendorId: this._connectedVendorId,
-      productId: this._connectedProductId,
-      serialNumber: this._connectedSerialNumber,
-    };
-
     // PlatformIO's use_1200bps_touch action opens the CDC port at 1200 baud,
-    // then closes it. Arduino-ESP32 TinyUSB firmware may restart into its
-    // bootloader in response. Release the monitor handle before opening the
-    // temporary connection, especially on Windows.
+    // then closes it. Release the monitor handle before opening the temporary
+    // connection, especially on Windows.
     await this.disconnect();
     const beforeTouch = await this.enumeratePorts();
     const portsBeforeTouch = beforeTouch.success ? beforeTouch.ports : [];
     const pathsBeforeTouch = beforeTouch.success
-      ? new Set(portsBeforeTouch.map((candidate) => candidate.path))
+      ? new Set([...portsBeforeTouch.map((candidate) => candidate.path), path])
       : undefined;
-    const wasEnumerated = beforeTouch.success
-      && portsBeforeTouch.some((candidate) => candidate.path === path);
-    const disappearance = this.waitForPortDisappearance(path, wasEnumerated, 2000);
+    const timeoutMs = vscode.workspace
+      .getConfiguration('esp-decoder')
+      .get<number>('serialMonitor.autoReconnectTimeoutMs', 15000);
+    const changedPort = this.waitForNewPort(pathsBeforeTouch, timeoutMs);
     try {
       await this.touchSerialPortAt1200(path);
     } catch (err) {
@@ -674,78 +664,74 @@ export class SerialPortManager extends vscode.Disposable {
       );
     }
 
-    const disappeared = await disappearance;
-    if (disappeared) {
-      this.log.appendLine('[ESP Decoder] Port disappeared after 1200-baud touch; waiting for re-enumeration');
-      const timeoutMs = vscode.workspace
-        .getConfiguration('esp-decoder')
-        .get<number>('serialMonitor.autoReconnectTimeoutMs', 15000);
-      const firstResetContext: ResetReconnectContext = {
-        identity: originalIdentity,
-        pathsBeforeReset: pathsBeforeTouch,
-      };
-      await this.reconnectAndWait(timeoutMs, firstResetContext);
-
-      // The 1200-baud touch can leave Arduino-ESP32 in its bootloader. Pulse
-      // reset on the re-enumerated port to start the application, then wait
-      // for its port and reconnect using the original identity or one
-      // unambiguous port that appeared after a successful baseline scan.
-      const bootloaderPath = this._selectedPath;
-      if (!bootloaderPath) {
-        throw new Error('No re-enumerated serial port selected after 1200-baud touch');
+    const reenumeratedPort = await changedPort;
+    if (!reenumeratedPort) {
+      this.log.appendLine('[ESP Decoder] No TinyUSB port found.');
+      this._selectedPath = path;
+      if (!(await this.connect())) {
+        throw new Error(`Failed to reopen serial port ${path}`);
       }
-      const beforeApplicationReset = await this.enumeratePorts();
-      const bootloaderPorts = beforeApplicationReset.success
-        ? beforeApplicationReset.ports
-        : [];
-      const applicationDisappearance = this.waitForPortDisappearance(
-        bootloaderPath,
-        beforeApplicationReset.success
-          && bootloaderPorts.some((candidate) => candidate.path === bootloaderPath),
-        2000,
-      );
-      let resetError: unknown;
-      try {
-        await this.pulseResetSignals();
-      } catch (err) {
-        resetError = err;
-        this.log.appendLine(
-          `[ESP Decoder] Reset signal ended with an error during re-enumeration: ${err instanceof Error ? err.message : err}`
-        );
-      }
-      if (!(await applicationDisappearance)) {
-        if (resetError instanceof Error) {
-          throw resetError;
-        }
-        throw new Error('The re-enumerated port did not disappear after reset; application mode could not be confirmed');
-      }
-
-      if (this._isConnected) {
-        try {
-          await this.disconnect();
-        } catch (err) {
-          this.log.appendLine(
-            `[ESP Decoder] Port close after reset was already in progress: ${err instanceof Error ? err.message : err}`
-          );
-        }
-      }
-      const applicationResetContext: ResetReconnectContext = {
-        identity: originalIdentity,
-        pathsBeforeReset: beforeApplicationReset.success
-          ? new Set(bootloaderPorts.map((candidate) => candidate.path))
-          : undefined,
-      };
-      this.cancelReconnect();
-      await this.reconnectAndWait(timeoutMs, applicationResetContext);
       return;
     }
 
-    // A USB-UART bridge generally ignores the 1200-baud touch. Re-open the
-    // monitor and use the standard RTS/EN reset sequence in that case.
-    if (!this._isConnected && !(await this.connect())) {
-      throw new Error(`Failed to reopen serial port ${this._selectedPath ?? path}`);
+    this.log.appendLine(
+      `[ESP Decoder] TinyUSB port changed from ${path} to ${reenumeratedPort.path}`
+    );
+    this._selectedPath = reenumeratedPort.path;
+    if (!(await this.connect())) {
+      throw new Error(`Failed to connect to re-enumerated serial port ${reenumeratedPort.path}`);
     }
-    await this.pulseResetSignals();
+
+    // The 1200-baud touch can leave the device in its bootloader. Reset the
+    // re-enumerated port, then reconnect to the application port.
+    const bootloaderPath = reenumeratedPort.path;
+    const beforeApplicationReset = await this.enumeratePorts();
+    const bootloaderPorts = beforeApplicationReset.success
+      ? beforeApplicationReset.ports
+      : [];
+    const applicationDisappearance = this.waitForPortDisappearance(
+      bootloaderPath,
+      beforeApplicationReset.success
+        && bootloaderPorts.some((candidate) => candidate.path === bootloaderPath),
+      2000,
+    );
+    let resetError: unknown;
+    try {
+      await this.pulseResetSignals();
+    } catch (err) {
+      resetError = err;
+      this.log.appendLine(
+        `[ESP Decoder] Reset signal ended with an error during re-enumeration: ${err instanceof Error ? err.message : err}`
+      );
+    }
+    if (!(await applicationDisappearance)) {
+      if (resetError instanceof Error) {
+        throw resetError;
+      }
+      throw new Error('The re-enumerated port did not disappear after reset; application mode could not be confirmed');
+    }
+
+    if (this._isConnected) {
+      try {
+        await this.disconnect();
+      } catch (err) {
+        this.log.appendLine(
+          `[ESP Decoder] Port close after reset was already in progress: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    }
+    const applicationResetContext: ResetReconnectContext = {
+      identity: {
+        vendorId: this._connectedVendorId,
+        productId: this._connectedProductId,
+        serialNumber: this._connectedSerialNumber,
+      },
+      pathsBeforeReset: beforeApplicationReset.success
+        ? new Set(bootloaderPorts.map((candidate) => candidate.path))
+        : undefined,
+    };
+    this.cancelReconnect();
+    await this.reconnectAndWait(timeoutMs, applicationResetContext);
   }
 
   private async pulseResetSignals(): Promise<void> {
@@ -817,6 +803,44 @@ export class SerialPortManager extends vscode.Disposable {
       await new Promise<void>((resolve) => setTimeout(resolve, 100));
     }
     return false;
+  }
+
+  private async waitForNewPort(
+    pathsBeforeTouch: Set<string> | undefined,
+    timeoutMs: number,
+  ): Promise<SerialPortInfo | undefined> {
+    if (!pathsBeforeTouch) {
+      return undefined;
+    }
+    const deadline = Date.now() + timeoutMs;
+    let candidatePath: string | undefined;
+    let candidatePolls = 0;
+    while (Date.now() < deadline) {
+      const result = await this.enumeratePorts();
+      if (result.success) {
+        const newPorts = result.ports.filter((port) => !pathsBeforeTouch.has(port.path));
+        if (newPorts.length === 1) {
+          const candidate = newPorts[0];
+          if (candidate.path === candidatePath) {
+            candidatePolls += 1;
+          } else {
+            candidatePath = candidate.path;
+            candidatePolls = 1;
+          }
+          if (candidatePolls >= 2) {
+            return candidate;
+          }
+        } else {
+          candidatePath = undefined;
+          candidatePolls = 0;
+        }
+      } else {
+        candidatePath = undefined;
+        candidatePolls = 0;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+    return undefined;
   }
 
   private async reconnectAndWait(
