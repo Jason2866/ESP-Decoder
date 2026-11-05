@@ -1017,8 +1017,6 @@ export class SerialPortManager extends vscode.Disposable {
         this.log.appendLine(
           `[ESP Decoder] listPorts failed (suppressed): ${enumeration.error instanceof Error ? enumeration.error.message : enumeration.error}`
         );
-        confirmedNewPath = undefined;
-        newPathConfirmationCount = 0;
       }
       // Re-check the reconnect guard after the await: cancelReconnect() or
       // disconnect() may have run while we were enumerating ports, in which
@@ -1027,15 +1025,22 @@ export class SerialPortManager extends vscode.Disposable {
       if (!this._isReconnecting || this._isConnected) {
         return;
       }
-      let match = ports.find((p) =>
-        portIdentityMatches(p, targetVid, targetPid, targetSn)
-      );
-      if (!match && resetBaselinePaths && enumeration.success) {
+      if (!enumeration.success) {
+        observedNewPaths.clear();
+        confirmedNewPath = undefined;
+        newPathConfirmationCount = 0;
+      } else if (resetBaselinePaths) {
+        observedNewPaths.clear();
         for (const port of ports) {
           if (!resetBaselinePaths.has(port.path)) {
             observedNewPaths.add(port.path);
           }
         }
+      }
+      let match = ports.find((p) =>
+        portIdentityMatches(p, targetVid, targetPid, targetSn)
+      );
+      if (!match && resetBaselinePaths && enumeration.success) {
         if (observedNewPaths.size === 1) {
           const [newPath] = observedNewPaths;
           const candidate = ports.find((p) => p.path === newPath);
@@ -1053,7 +1058,10 @@ export class SerialPortManager extends vscode.Disposable {
             confirmedNewPath = undefined;
             newPathConfirmationCount = 0;
           }
-        } else if (observedNewPaths.size > 1) {
+        } else if (observedNewPaths.size === 0) {
+          confirmedNewPath = undefined;
+          newPathConfirmationCount = 0;
+        } else {
           confirmedNewPath = undefined;
           newPathConfirmationCount = 0;
           if (!loggedAmbiguousNewPaths) {
