@@ -110,6 +110,16 @@
             921600
           ]
         },
+        "esp-decoder.monitorDtr": {
+          "type": "boolean",
+          "default": true,
+          "description": "DTR line state for the serial monitor (equivalent to PlatformIO monitor_dtr). Set to false to disable DTR."
+        },
+        "esp-decoder.monitorRts": {
+          "type": "boolean",
+          "default": true,
+          "description": "RTS line state for the serial monitor (equivalent to PlatformIO monitor_rts). Set to false to disable RTS."
+        },
         "esp-decoder.autoDetectElf": {
           "type": "boolean",
           "default": true,

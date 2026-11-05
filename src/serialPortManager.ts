@@ -432,46 +432,54 @@ export class SerialPortManager extends vscode.Disposable {
         finishAttempt(false);
         return;
       }
-      // Register the data listener only after the port is open so the
-      // stream's first _read() runs with a fully initialised handle.
-      portInstance.on('data', (data: Buffer) => {
-        // Only process callbacks from the current port instance
-        if (this.port !== portInstance) {
-          return;
+      const config = vscode.workspace.getConfiguration('esp-decoder');
+      const dtr = config.get<boolean>('monitorDtr', true);
+      const rts = config.get<boolean>('monitorRts', true);
+
+      // Apply PlatformIO-compatible monitor line states once the port is open.
+      // This is useful on Windows drivers that react badly to the default DTR
+      // or RTS state. If a driver does not support changing a line, keep the
+      // serial connection usable and report the failure in the output channel.
+      portInstance.set({ dtr, rts }, (setErr) => {
+        if (setErr) {
+          this.log.appendLine(`[ESP Decoder] Failed to set DTR=${Number(dtr)} RTS=${Number(rts)}: ${setErr.message}`);
         }
-        this._onData.fire(data);
-      });
-      // Capture device identity BEFORE firing connection-change / resolving,
-      // so that an immediate reset (within a few hundred ms of connect)
-      // still finds VID/PID/SN populated when startAutoReconnect runs.
-      // This is awaited but typically completes in <100 ms.
-      void this.captureDeviceIdentity()
-        .catch(() => { /* best effort — identity used only for reconnect matching */ })
-        .then(() => {
-          if (this.port !== portInstance || this._connectGeneration !== attemptGeneration) {
-            this.log.appendLine('[ESP Decoder] Ignoring delayed callback from stale connection attempt');
-            abandonPortIfStale(portInstance);
-            finishAttempt(false);
+        // Register the data listener only after the port is open and the
+        // configured modem control lines have been applied.
+        portInstance.on('data', (data: Buffer) => {
+          if (this.port !== portInstance) {
             return;
           }
-          this._isConnected = true;
-          // If this open happened inside a reconnect window, arm the
-          // stability timer. The window only ends if the port stays open
-          // for STABILITY_MS without a close.
-          if (this._isReconnecting) {
-            this.clearStabilityTimer();
-            this._stabilityTimer = setTimeout(() => {
-              this._stabilityTimer = null;
-              if (this._isConnected) {
-                this._isReconnecting = false;
-                this._reconnectDeadline = 0;
-                this.log.appendLine('[ESP Decoder] auto-reconnect: connection stable');
-              }
-            }, SerialPortManager.STABILITY_MS);
-          }
-          this._onConnectionChange.fire(true);
-          finishAttempt(true);
+          this._onData.fire(data);
         });
+        // Capture device identity BEFORE firing connection-change / resolving,
+        // so that an immediate reset still finds VID/PID/SN populated when
+        // startAutoReconnect runs.
+        void this.captureDeviceIdentity()
+          .catch(() => { /* best effort — identity used only for reconnect matching */ })
+          .then(() => {
+            if (this.port !== portInstance || this._connectGeneration !== attemptGeneration) {
+              this.log.appendLine('[ESP Decoder] Ignoring delayed callback from stale connection attempt');
+              abandonPortIfStale(portInstance);
+              finishAttempt(false);
+              return;
+            }
+            this._isConnected = true;
+            if (this._isReconnecting) {
+              this.clearStabilityTimer();
+              this._stabilityTimer = setTimeout(() => {
+                this._stabilityTimer = null;
+                if (this._isConnected) {
+                  this._isReconnecting = false;
+                  this._reconnectDeadline = 0;
+                  this.log.appendLine('[ESP Decoder] auto-reconnect: connection stable');
+                }
+              }, SerialPortManager.STABILITY_MS);
+            }
+            this._onConnectionChange.fire(true);
+            finishAttempt(true);
+          });
+      });
     });
   }
 
