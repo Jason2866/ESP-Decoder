@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.28.2] - 2026-11-05
+
+### New Feature
+
+- **Serial monitor DTR/RTS settings** — Added configurable DTR and RTS line states, with defaults that preserve the existing serial port behavior.
+
 ## [0.28.1] - 2026-10-06
 
 ### Feature / Bug fix
