@@ -41,8 +41,8 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `esp-decoder.defaultBaudRate` | `115200` | Default baud rate |
-| `esp-decoder.monitorDtr` | `true` | DTR line state for the serial monitor (PlatformIO `monitor_dtr`); set to `false` to disable DTR |
-| `esp-decoder.monitorRts` | `true` | RTS line state for the serial monitor (PlatformIO `monitor_rts`); set to `false` to disable RTS |
+| `esp-decoder.monitorDtr` | `null` | DTR state for the serial monitor (`null` preserves current behavior; `false`/`true` map to PlatformIO `monitor_dtr = 0`/`1`) |
+| `esp-decoder.monitorRts` | `null` | RTS state for the serial monitor (`null` preserves current behavior; `false`/`true` map to PlatformIO `monitor_rts = 0`/`1`) |
 | `esp-decoder.autoDetectElf` | `true` | Auto-detect ELF from PlatformIO and ESP-IDF builds |
 | `esp-decoder.elfPath` | `""` | Manual ELF file path |
 | `esp-decoder.toolPath` | `""` | Manual GDB/addr2line path |

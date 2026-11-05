@@ -73,7 +73,7 @@ vi.mock('vscode', () => {
     },
     workspace: {
       getConfiguration: () => ({
-        get: () => 115200,
+        get: (_section: string, defaultValue?: unknown) => defaultValue,
       }),
     },
     Disposable: class {

@@ -433,19 +433,19 @@ export class SerialPortManager extends vscode.Disposable {
         return;
       }
       const config = vscode.workspace.getConfiguration('esp-decoder');
-      const dtr = config.get<boolean>('monitorDtr', true);
-      const rts = config.get<boolean>('monitorRts', true);
+      const dtr = config.get<boolean | null>('monitorDtr', null);
+      const rts = config.get<boolean | null>('monitorRts', null);
+      const lineSettings: { dtr?: boolean; rts?: boolean } = {};
+      if (dtr !== null) {
+        lineSettings.dtr = dtr;
+      }
+      if (rts !== null) {
+        lineSettings.rts = rts;
+      }
 
-      // Apply PlatformIO-compatible monitor line states once the port is open.
-      // This is useful on Windows drivers that react badly to the default DTR
-      // or RTS state. If a driver does not support changing a line, keep the
-      // serial connection usable and report the failure in the output channel.
-      portInstance.set({ dtr, rts }, (setErr) => {
-        if (setErr) {
-          this.log.appendLine(`[ESP Decoder] Failed to set DTR=${Number(dtr)} RTS=${Number(rts)}: ${setErr.message}`);
-        }
-        // Register the data listener only after the port is open and the
-        // configured modem control lines have been applied.
+      const continueConnection = () => {
+        // Register the data listener only after the port is open and any
+        // explicitly configured modem control lines have been applied.
         portInstance.on('data', (data: Buffer) => {
           if (this.port !== portInstance) {
             return;
@@ -479,7 +479,25 @@ export class SerialPortManager extends vscode.Disposable {
             this._onConnectionChange.fire(true);
             finishAttempt(true);
           });
-      });
+      };
+
+      if (Object.keys(lineSettings).length === 0) {
+        // Keep the previous behavior by leaving the driver's line states alone
+        // unless the user explicitly configures DTR or RTS.
+        continueConnection();
+      } else {
+        // If a driver does not support changing a line, keep the serial
+        // connection usable and report the failure in the output channel.
+        portInstance.set(lineSettings, (setErr) => {
+          if (setErr) {
+            const requested = Object.entries(lineSettings)
+              .map(([line, value]) => `${line.toUpperCase()}=${Number(value)}`)
+              .join(' ');
+            this.log.appendLine(`[ESP Decoder] Failed to set ${requested}: ${setErr.message}`);
+          }
+          continueConnection();
+        });
+      }
     });
   }
 
