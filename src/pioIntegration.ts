@@ -619,7 +619,8 @@ export async function getMonitorBaudRate(
 /**
  * Read the effective board's `upload.use_1200bps_touch` value for a PlatformIO
  * environment. PlatformIO resolves the board manifest and `board_*` overrides
- * through its own APIs; this avoids guessing from arbitrary board JSON files.
+ * through its own APIs. Git URL platform specifications are mapped to their
+ * installed platform directory before asking PlatformIO for the board config.
  */
 export async function getUse1200BpsTouch(
   projectPath: string,
@@ -629,6 +630,7 @@ export async function getUse1200BpsTouch(
     ensurePioCorePython();
     const script = String.raw`
 import json
+import os
 import sys
 from platformio.platform.factory import PlatformFactory
 from platformio.project.config import ProjectConfig
@@ -645,9 +647,27 @@ if not platform_spec or not board_id:
     print(json.dumps(None))
     raise SystemExit(0)
 
-board = PlatformFactory.new(platform_spec).board_config(board_id)
+def load_board_config():
+    try:
+        return PlatformFactory.new(platform_spec).board_config(board_id)
+    except Exception:
+        # A Git URL is the project config value, but PlatformFactory expects
+        # the installed platform path for this form of platform specification.
+        platform_url = platform_spec.split("#", 1)[0].rstrip("/")
+        platform_name = os.path.basename(platform_url)
+        for suffix in (".git", ".zip"):
+            if platform_name.lower().endswith(suffix):
+                platform_name = platform_name[:-len(suffix)]
+                break
+        if platform_name.startswith("platform-"):
+            platform_name = platform_name[len("platform-"):]
+        core_dir = sys.argv[2]
+        installed_platform = os.path.join(core_dir, "platforms", platform_name)
+        return PlatformFactory.new(installed_platform).board_config(board_id)
+
+board = load_board_config()
 for option, value in config.items(env=env_name, as_dict=True).items():
-    if not option.startswith("board_"):
+    if not option.lower().startswith("board_"):
         continue
     option = option.lower()[6:]
     try:
@@ -666,7 +686,7 @@ if isinstance(value, str):
 print(json.dumps(value if isinstance(value, bool) else None))
 `;
     const output = await pioCore.getCorePythonCommandOutput(
-      ['-c', script, environment ?? ''],
+      ['-c', script, environment ?? '', pioCore.getCoreDir()],
       { projectDir: projectPath },
     );
     const value: unknown = JSON.parse(output.trim());
