@@ -2,7 +2,7 @@
   "name": "esp-decoder",
   "displayName": "ESP Crash Decoder",
   "description": "Decode ESP32 / ESP8266 crash dumps from serial port",
-  "version": "0.28.1",
+  "version": "0.28.2",
   "publisher": "Jason2866",
   "license": "GPL-3.0",
   "icon": "assets/icon_large.png",
@@ -109,6 +109,42 @@
             460800,
             921600
           ]
+        },
+        "esp-decoder.monitorDtr": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "enum": [
+            null,
+            false,
+            true
+          ],
+          "enumDescriptions": [
+            "Keep the serial port's existing default behavior.",
+            "Set DTR deasserted (equivalent to PlatformIO monitor_dtr = 0).",
+            "Set DTR asserted (equivalent to PlatformIO monitor_dtr = 1)."
+          ],
+          "description": "DTR state applied after the serial port opens. Both monitorDtr and monitorRts must be set to true or false for either line to be changed; if either is unset, both are left unchanged. On Linux, DTR may be asserted during opening before this setting is applied, so false does not prevent that initial state."
+        },
+        "esp-decoder.monitorRts": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "enum": [
+            null,
+            false,
+            true
+          ],
+          "enumDescriptions": [
+            "Keep the serial port's existing default behavior.",
+            "Set RTS deasserted (equivalent to PlatformIO monitor_rts = 0).",
+            "Set RTS asserted (equivalent to PlatformIO monitor_rts = 1)."
+          ],
+          "description": "RTS state applied after the serial port opens. Both monitorDtr and monitorRts must be set to true or false for either line to be changed; if either is unset, both are left unchanged. On Linux, RTS may be asserted during opening before this setting is applied, so false does not prevent that initial state."
         },
         "esp-decoder.autoDetectElf": {
           "type": "boolean",
@@ -236,9 +272,9 @@
     "@typescript-eslint/parser": "^8.72.1",
     "esbuild": "^0.28.2",
     "eslint": "^10.14.0",
-    "pioarduino-node-helpers": "^12.7.0",
+    "pioarduino-node-helpers": "^12.7.1",
     "typescript": "6.0.3",
-    "vitest": "^4.1.11"
+    "vitest": "^5.1.0"
   },
   "allowScripts": {
     "@jason2866/serialport-bindings-cpp@13.0.5": true,

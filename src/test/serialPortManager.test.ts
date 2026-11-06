@@ -25,6 +25,9 @@ vi.mock('serialport', () => {
       this.isOpen = true;
       cb(null);
     }
+    set(_options: { dtr?: boolean; rts?: boolean }, cb: (err: Error | null) => void) {
+      cb(null);
+    }
     close(cb?: (err?: Error | null) => void) {
       this.isOpen = false;
       if (cb) {
@@ -70,7 +73,7 @@ vi.mock('vscode', () => {
     },
     workspace: {
       getConfiguration: () => ({
-        get: () => 115200,
+        get: (_section: string, defaultValue?: unknown) => defaultValue,
       }),
     },
     Disposable: class {
