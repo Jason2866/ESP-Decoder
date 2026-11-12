@@ -4,6 +4,7 @@ declare module 'pioarduino-node-helpers' {
     getCacheDir(): string;
     getEnvDir(): string;
     getEnvBinDir(): string;
+    getCorePythonCommandOutput(args: string[], options?: { projectDir?: string }): Promise<string>;
   };
   export const project: {
     ProjectConfig: new (projectDir: string) => {

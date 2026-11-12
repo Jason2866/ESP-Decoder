@@ -550,15 +550,46 @@ function getProjectName(workspaceFolder: string, sections?: Sections): string | 
 
 /**
  * Resolve the build directory for a PlatformIO project.
- * Checks for custom build_dir in platformio.ini, falls back to .pio/build.
+ * Respects configured and environment-overridden build/workspace directories,
+ * then falls back to the default .pio/build directory.
  */
-function resolveBuildDir(workspaceFolder: string, sections: Sections): string {
-  const buildDirValue = sections['platformio']?.['build_dir'];
+async function resolveBuildDir(workspaceFolder: string, sections: Sections): Promise<string> {
+  const buildDirValue = process.env.PLATFORMIO_BUILD_DIR || sections['platformio']?.['build_dir'];
+  const workspaceDirValue = process.env.PLATFORMIO_WORKSPACE_DIR || sections['platformio']?.['workspace_dir'];
+
+  // Let PlatformIO expand its built-in variables (including $PROJECT_HASH)
+  // instead of duplicating its variable resolution here.
+  if ([buildDirValue, workspaceDirValue].some((value) => value?.includes('$PROJECT_HASH'))) {
+    try {
+      const script = [
+        'import json',
+        'from platformio.public import ProjectConfig',
+        'config = ProjectConfig()',
+        'print(json.dumps(config.get("platformio", "build_dir", default=None)))',
+      ].join('\n');
+      const output = await pioCore.getCorePythonCommandOutput(['-c', script], { projectDir: workspaceFolder });
+      const resolved = JSON.parse(output.trim());
+      if (typeof resolved === 'string' && resolved) {
+        return path.isAbsolute(resolved) ? resolved : path.resolve(workspaceFolder, resolved);
+      }
+    } catch {
+      // Fall back to the local path handling if PlatformIO is unavailable.
+    }
+  }
   
   if (buildDirValue) {
     const resolved = expandPioPath(buildDirValue, workspaceFolder);
     if (resolved) {
       return resolved;
+    }
+  }
+
+  // PlatformIO defaults build_dir to <workspace_dir>/build. The workspace
+  // directory can be overridden globally or in [platformio].
+  if (workspaceDirValue) {
+    const resolved = expandPioPath(workspaceDirValue, workspaceFolder);
+    if (resolved) {
+      return path.join(resolved, 'build');
     }
   }
   
@@ -614,7 +645,7 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
   const projectName = getProjectName(workspaceFolder, sections);
   
   // Resolve build directory (supports custom build_dir)
-  const pioBuildDir = resolveBuildDir(workspaceFolder, sections);
+  const pioBuildDir = await resolveBuildDir(workspaceFolder, sections);
   
   if (!fs.existsSync(pioBuildDir)) {
     return envs;
