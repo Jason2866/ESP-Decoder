@@ -459,25 +459,29 @@ function findGdbPackage(packagesDir: string, isRiscV: boolean, chipName?: string
 // ---------------------------------------------------------------------------
 
 /**
- * Expand a PlatformIO path value with environment variables and home directory.
- * Returns the resolved path if it exists, otherwise undefined.
++ * Expand a PlatformIO path value without requiring it to exist.
++ */
+function normalizePioPath(value: string, workspaceFolder: string): string {
+  let expanded = value.replace(/\$\{sysenv\.([^}]+)\}/g, (_: string, varName: string) =>
+    process.env[varName] ?? ''
+  );
+
+  if (expanded.startsWith('~')) {
+    expanded = os.homedir() + expanded.slice(1);
+  }
+
+  return path.resolve(workspaceFolder, expanded);
+}
+
+/**
+ * Expand a PlatformIO path value and return it only when it exists.
  */
 function expandPioPath(value: string | undefined, workspaceFolder: string): string | undefined {
   if (!value) {
     return undefined;
   }
 
-  // Expand environment variables
-  let expanded = value.replace(/\$\{sysenv\.([^}]+)\}/g, (_: string, varName: string) => 
-    process.env[varName] ?? ''
-  );
-  
-  // Expand home directory
-  if (expanded.startsWith('~')) {
-    expanded = os.homedir() + expanded.slice(1);
-  }
-  
-  const resolved = path.resolve(workspaceFolder, expanded);
+  const resolved = normalizePioPath(value, workspaceFolder);
   return fs.existsSync(resolved) ? resolved : undefined;
 }
 
@@ -580,19 +584,13 @@ async function resolveBuildDir(workspaceFolder: string, sections: Sections): Pro
   }
   
   if (buildDirValue) {
-    const resolved = expandPioPath(buildDirValue, workspaceFolder);
-    if (resolved) {
-      return resolved;
-    }
+    return normalizePioPath(buildDirValue, workspaceFolder);
   }
 
   // PlatformIO defaults build_dir to <workspace_dir>/build. The workspace
   // directory can be overridden globally or in [platformio].
   if (workspaceDirValue) {
-    const resolved = expandPioPath(workspaceDirValue, workspaceFolder);
-    if (resolved) {
-      return path.join(resolved, 'build');
-    }
+    return path.join(normalizePioPath(workspaceDirValue, workspaceFolder), 'build');
   }
   
   // Default PlatformIO build directory
