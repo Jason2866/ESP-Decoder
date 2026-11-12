@@ -7,7 +7,7 @@ The serial monitor includes a filter toolbar that lets you transform, suppress, 
 ## Toolbar Overview
 
 ```text
-Filters: [✓ Timestamp] | Suppress: [regex…] | Highlight: [regex…] | Dedup: [regex…] after [N] | [Save]
+Filters: [✓ Timestamp] [✓ Local] | Suppress: [regex…] | Highlight: [regex…] | Dedup: [regex…] after [N] | [Save]
 ```
 
 All filters operate on the **raw text** of each line (including ANSI escape codes) before it is rendered to the DOM.
@@ -19,6 +19,10 @@ All filters operate on the **raw text** of each line (including ANSI escape code
 Prepends a dimmed `[HH:MM:SS.mmm]` timestamp to every completed line.
 
 **VS Code setting:** `esp-decoder.serialFilters.timestamp` (boolean, default `false`)
+
+By default the timestamp uses **UTC**. Check the **Local** checkbox (or set the setting below) to display timestamps in your system's local time zone instead.
+
+**VS Code setting:** `esp-decoder.serialFilters.timestampLocal` (boolean, default `false`)
 
 **Example output:**
 

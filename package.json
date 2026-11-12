@@ -222,6 +222,11 @@
           "default": false,
           "description": "Prepend a timestamp (HH:MM:SS.mmm) to each line in the serial monitor"
         },
+        "esp-decoder.serialFilters.timestampLocal": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use local time for timestamps instead of UTC (default)"
+        },
         "esp-decoder.serialFilters.suppressPattern": {
           "type": "string",
           "default": "",

@@ -44,7 +44,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   private logStream: import('fs').WriteStream | null = null;
   private logFilePath: string | null = null;
   private logFiltered = false;
-  private logFilterConfig: { timestamp: boolean; suppressRe: RegExp | null; dedupRe: RegExp | null; dedupThreshold: number } | null = null;
+  private logFilterConfig: { timestamp: boolean; timestampLocal: boolean; suppressRe: RegExp | null; dedupRe: RegExp | null; dedupThreshold: number } | null = null;
   private logLineBuffer = '';
   private logDedupCount = 0;
   // Saved log session params so logging can be auto-resumed after port reacquire
@@ -279,6 +279,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       targetArch: this.config.targetArch,
       serialFilters: {
         timestamp: cfg.get<boolean>('serialFilters.timestamp', false),
+        timestampLocal: cfg.get<boolean>('serialFilters.timestampLocal', false),
         suppressPattern: cfg.get<string>('serialFilters.suppressPattern', ''),
         highlightPattern: cfg.get<string>('serialFilters.highlightPattern', ''),
         dedupPattern: cfg.get<string>('serialFilters.dedupPattern', ''),
@@ -622,6 +623,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       try { dedupRe = filters.dedupPattern ? new RegExp(filters.dedupPattern, 'g') : null; } catch { /* invalid regex ignored */ }
       this.logFilterConfig = {
         timestamp: !!filters.timestamp,
+        timestampLocal: vscode.workspace.getConfiguration('esp-decoder').get<boolean>('serialFilters.timestampLocal', false),
         suppressRe,
         dedupRe,
         dedupThreshold: (typeof filters.dedupThreshold === 'number' && filters.dedupThreshold >= 1) ? filters.dedupThreshold : 3,
@@ -799,7 +801,16 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // Timestamp filter
     if (cfg.timestamp) {
       const now = new Date();
-      const ts = now.toISOString().slice(11, 23);
+      let ts: string;
+      if (cfg.timestampLocal) {
+        const hh = String(now.getHours()).padStart(2, '0');
+        const mm = String(now.getMinutes()).padStart(2, '0');
+        const ss = String(now.getSeconds()).padStart(2, '0');
+        const ms = String(now.getMilliseconds()).padStart(3, '0');
+        ts = `${hh}:${mm}:${ss}.${ms}`;
+      } else {
+        ts = now.toISOString().slice(11, 23);
+      }
       line = `[${ts}] ${line}`;
     }
 
@@ -1824,6 +1835,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // ── Serial filter state ──────────────────────────────────────────────────
     const filterState = {
       timestamp: false,
+      timestampLocal: false,
       suppressPattern: '',
       highlightPattern: '',
       _suppressRe: null,
@@ -1871,7 +1883,16 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       // Prepend timestamp once at the start of the line.
       if (filterState.timestamp && !filterState._lineStarted) {
         var now = new Date();
-        var ts = now.toISOString().slice(11, 23);
+        var ts;
+        if (filterState.timestampLocal) {
+          var hh = String(now.getHours()).padStart(2, '0');
+          var mm = String(now.getMinutes()).padStart(2, '0');
+          var ss = String(now.getSeconds()).padStart(2, '0');
+          var ms = String(now.getMilliseconds()).padStart(3, '0');
+          ts = hh + ':' + mm + ':' + ss + '.' + ms;
+        } else {
+          ts = now.toISOString().slice(11, 23);
+        }
         // Save the current SGR state, render the timestamp dim, then restore
         // the previous SGR state so multi-line coloured output (e.g. an
         // ESP_LOGI message containing embedded newlines) keeps its colour
@@ -2752,6 +2773,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       if (f.timestamp !== undefined) {
         filterState.timestamp = !!f.timestamp;
         cbTs.checked = filterState.timestamp;
+      }
+      if (f.timestampLocal !== undefined) {
+        filterState.timestampLocal = !!f.timestampLocal;
       }
       if (f.suppressPattern !== undefined) {
         inSuppress.value = f.suppressPattern;
