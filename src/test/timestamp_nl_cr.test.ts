@@ -44,6 +44,9 @@ const WEBVIEW_PANEL_SRC = fs.readFileSync(
   path.resolve(__dirname, '..', 'webviewPanel.ts'),
   'utf8'
 );
+const PACKAGE_JSON = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, '..', '..', 'package.json'), 'utf8')
+);
 
 class RendererNode {
   childNodes: RendererNode[] = [];
@@ -540,5 +543,59 @@ describe('PR #36 – timestamp prefix preserves active SGR state', () => {
       resetAnsiState(s);
       expect(ansiStateToSgr(s)).toBe('');
     });
+  });
+});
+
+describe('serial monitor timestamp time zone setting', () => {
+  class FixedDate {
+    getHours(): number { return 22; }
+    getMinutes(): number { return 23; }
+    getSeconds(): number { return 24; }
+    getMilliseconds(): number { return 987; }
+    toISOString(): string { return '2024-01-02T03:04:05.006Z'; }
+  }
+
+  function applyTimestamp(timestampLocal: boolean): string {
+    function extractFunction(name: string, signature: string): string {
+      const start = WEBVIEW_PANEL_SRC.indexOf(`    function ${name}(${signature}) {`);
+      const end = WEBVIEW_PANEL_SRC.indexOf('\n    function ', start + 1);
+      if (start === -1 || end === -1) {
+        throw new Error(`Could not find ${name} function`);
+      }
+      return WEBVIEW_PANEL_SRC.slice(start, end).replace(/\\\\/g, '\\');
+    }
+
+    const applyChunkFiltersSource = extractFunction('applyChunkFilters', 'chunk');
+    const applyFilterSettingsSource = extractFunction('applyFilterSettings', 'f');
+    const source = `
+      var filterState = { timestamp: true, timestampLocal: ${timestampLocal}, _lineStarted: false };
+      var applyDedupToChunk = function(chunk) { return chunk; };
+      var ansiStateToSgr = function() { return ''; };
+      var ESC = '\\x1b';
+      var document = { getElementById: function() { return {}; } };
+      ${applyFilterSettingsSource}
+      ${applyChunkFiltersSource}
+      applyFilterSettings({ timestampLocal: ${timestampLocal} });
+      applyChunkFilters('payload');
+    `;
+
+    return runInNewContext(source, { Date: FixedDate }) as string;
+  }
+
+  it('declares UTC as the default and exposes local time as a boolean setting', () => {
+    const setting = PACKAGE_JSON.contributes.configuration.properties['esp-decoder.serialFilters.timestampLocal'];
+    expect(setting.type).toBe('boolean');
+    expect(setting.default).toBe(false);
+    expect(WEBVIEW_PANEL_SRC).toContain(
+      "timestampLocal: cfg.get<boolean>('serialFilters.timestampLocal', false)"
+    );
+  });
+
+  it('uses UTC time by default when local time is disabled', () => {
+    expect(applyTimestamp(false)).toBe('\x1b[0m\x1b[2m[03:04:05.006]\x1b[0m payload');
+  });
+
+  it('uses local time when the local time setting is enabled', () => {
+    expect(applyTimestamp(true)).toBe('\x1b[0m\x1b[2m[22:23:24.987]\x1b[0m payload');
   });
 });

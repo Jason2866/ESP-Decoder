@@ -91,6 +91,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
               filtered: this.logFiltered,
               filters: this.logFilterConfig ? {
                 timestamp: this.logFilterConfig.timestamp,
+                timestampLocal: this.logFilterConfig.timestampLocal,
                 suppressPattern: this.logFilterConfig.suppressRe?.source ?? '',
                 dedupPattern: this.logFilterConfig.dedupRe?.source ?? '',
                 dedupThreshold: this.logFilterConfig.dedupThreshold,
@@ -623,7 +624,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       try { dedupRe = filters.dedupPattern ? new RegExp(filters.dedupPattern, 'g') : null; } catch { /* invalid regex ignored */ }
       this.logFilterConfig = {
         timestamp: !!filters.timestamp,
-        timestampLocal: vscode.workspace.getConfiguration('esp-decoder').get<boolean>('serialFilters.timestampLocal', false),
+        timestampLocal: typeof filters.timestampLocal === 'boolean'
+          ? filters.timestampLocal
+          : vscode.workspace.getConfiguration('esp-decoder').get<boolean>('serialFilters.timestampLocal', false),
         suppressRe,
         dedupRe,
         dedupThreshold: (typeof filters.dedupThreshold === 'number' && filters.dedupThreshold >= 1) ? filters.dedupThreshold : 3,
