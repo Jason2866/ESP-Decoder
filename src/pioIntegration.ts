@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { findEspIdfBuilds } from './espIdfIntegration';
-import { core as pioCore, project as pioProject } from 'pioarduino-node-helpers';
+import { core as pioCore, installer as pioInstaller, project as pioProject } from 'pioarduino-node-helpers';
 import { CHIP_TARGET_MAP, RISCV_TARGETS } from './chipTargets';
 
 /**
@@ -553,7 +553,7 @@ function getProjectName(workspaceFolder: string, sections?: Sections): string | 
  * Respects configured and environment-overridden build/workspace directories,
  * then falls back to the default .pio/build directory.
  */
-async function resolveBuildDir(workspaceFolder: string, sections: Sections): Promise<string> {
+async function resolveBuildDir(workspaceFolder: string, sections: Sections): Promise<string | undefined> {
   const buildDirValue = process.env.PLATFORMIO_BUILD_DIR || sections['platformio']?.['build_dir'];
   const workspaceDirValue = process.env.PLATFORMIO_WORKSPACE_DIR || sections['platformio']?.['workspace_dir'];
 
@@ -561,11 +561,12 @@ async function resolveBuildDir(workspaceFolder: string, sections: Sections): Pro
   // instead of duplicating its variable resolution here.
   if ([buildDirValue, workspaceDirValue].some((value) => value?.includes('$PROJECT_HASH'))) {
     try {
+      await ensurePioCoreInitialized();
       const script = [
         'import json',
         'from platformio.public import ProjectConfig',
         'config = ProjectConfig()',
-        'print(json.dumps(config.get("platformio", "build_dir", default=None)))',
+        'print(json.dumps(config.get("platformio", "build_dir")))',
       ].join('\n');
       const output = await pioCore.getCorePythonCommandOutput(['-c', script], { projectDir: workspaceFolder });
       const resolved = JSON.parse(output.trim());
@@ -573,8 +574,9 @@ async function resolveBuildDir(workspaceFolder: string, sections: Sections): Pro
         return path.isAbsolute(resolved) ? resolved : path.resolve(workspaceFolder, resolved);
       }
     } catch {
-      // Fall back to the local path handling if PlatformIO is unavailable.
+      // Do not guess a path when PlatformIO cannot expand its built-in variables.
     }
+    return undefined;
   }
   
   if (buildDirValue) {
@@ -595,6 +597,68 @@ async function resolveBuildDir(workspaceFolder: string, sections: Sections): Pro
   
   // Default PlatformIO build directory
   return path.join(workspaceFolder, '.pio', 'build');
+}
+
+let pioCoreInitialization: Promise<void> | undefined;
+
+/**
+ * Initialize this bundled helper instance from the installed PIO Core.
+ * Another extension's helper instance has separate module state, so it cannot
+ * initialize this copy for us.
+ */
+async function ensurePioCoreInitialized(): Promise<void> {
+  try {
+    await pioCore.getCorePythonExe();
+    return;
+  } catch {
+    // Load the installed Core state below.
+  }
+
+  if (!pioCoreInitialization) {
+    const configuredBuiltin = vscode.workspace
+      .getConfiguration('pioarduino-ide')
+      .get<boolean | undefined>('useBuiltinPIOCore');
+    const useBuiltinPIOCore = configuredBuiltin ?? fs.existsSync(path.join(pioCore.getCoreDir(), 'penv'));
+    const stage = new pioInstaller.pioarduinoCoreStage({}, () => {}, {
+      useBuiltinPIOCore,
+      disableAutoUpdates: true,
+      // loadCoreState calls whereIsPython() which reads this status even when
+      // prompt=false, so provide the status constant without enabling prompts.
+      pythonPrompt: { STATUS_TRY_AGAIN: 0 },
+    });
+
+    pioCoreInitialization = stage.loadCoreState().then(() => undefined).catch((error: unknown) => {
+      pioCoreInitialization = undefined;
+      throw error;
+    });
+  }
+
+  await pioCoreInitialization;
+}
+
+function readPlatformioSections(workspaceFolder: string): Sections | undefined {
+  const platformIniPath = path.join(workspaceFolder, 'platformio.ini');
+  if (!fs.existsSync(platformIniPath)) {
+    return undefined;
+  }
+
+  const content = fs.readFileSync(platformIniPath, 'utf8');
+  const sections = parsePlatformioIni(content);
+  mergeExtraConfigs(workspaceFolder, sections);
+  interpolateVariables(sections);
+  return sections;
+}
+
+/**
+ * Resolve the project's effective PlatformIO build directory. This is also
+ * used to watch custom/external workspace directories for newly built ELFs.
+ */
+export async function getPioBuildDir(workspaceFolder: string): Promise<string | undefined> {
+  const sections = readPlatformioSections(workspaceFolder);
+  if (!sections) {
+    return undefined;
+  }
+  return await resolveBuildDir(workspaceFolder, sections);
 }
 
 // ---------------------------------------------------------------------------
@@ -626,17 +690,12 @@ export async function getMonitorBaudRate(projectPath: string): Promise<number | 
  */
 export async function findPioEnvironments(workspaceFolder: string): Promise<PioEnvironment[]> {
   const envs: PioEnvironment[] = [];
-  
-  const platformIniPath = path.join(workspaceFolder, 'platformio.ini');
-  if (!fs.existsSync(platformIniPath)) {
-    return envs;
-  }
 
   // Parse all environments from platformio.ini (+ extra_configs)
-  const content = fs.readFileSync(platformIniPath, 'utf8');
-  const sections = parsePlatformioIni(content);
-  mergeExtraConfigs(workspaceFolder, sections);
-  interpolateVariables(sections);
+  const sections = readPlatformioSections(workspaceFolder);
+  if (!sections) {
+    return envs;
+  }
   
   const parsedEnvs = parseEnvironments(sections);
   const coreDir = expandPioPath(sections['platformio']?.['core_dir'], workspaceFolder);
@@ -646,7 +705,10 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
   
   // Resolve build directory (supports custom build_dir)
   const pioBuildDir = await resolveBuildDir(workspaceFolder, sections);
-  
+  if (!pioBuildDir) {
+    return envs;
+  }
+
   if (!fs.existsSync(pioBuildDir)) {
     return envs;
   }
