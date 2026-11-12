@@ -321,7 +321,8 @@ function watchPioBuildDirectory(context: vscode.ExtensionContext, workspaceFolde
       }
 
       const relativeBuildDir = path.relative(watchRoot, buildDir).split(path.sep).join('/');
-      const pattern = relativeBuildDir ? `${relativeBuildDir}/**/*.elf` : '**/*.elf';
+      const escapedRelativeBuildDir = relativeBuildDir.replace(/[\\*?\[\]{}]/g, '\\$&');
+      const pattern = escapedRelativeBuildDir ? `${escapedRelativeBuildDir}/**/*.elf` : '**/*.elf';
       const watcher = vscode.workspace.createFileSystemWatcher(
         new vscode.RelativePattern(vscode.Uri.file(watchRoot), pattern),
         false,

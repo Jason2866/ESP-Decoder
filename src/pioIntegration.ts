@@ -561,9 +561,10 @@ async function resolveBuildDir(workspaceFolder: string, sections: Sections): Pro
   const buildDirValue = process.env.PLATFORMIO_BUILD_DIR || sections['platformio']?.['build_dir'];
   const workspaceDirValue = process.env.PLATFORMIO_WORKSPACE_DIR || sections['platformio']?.['workspace_dir'];
 
-  // Let PlatformIO expand its built-in variables (including $PROJECT_HASH)
-  // instead of duplicating its variable resolution here.
-  if ([buildDirValue, workspaceDirValue].some((value) => value?.includes('$PROJECT_HASH'))) {
+  // Let PlatformIO expand its built-in variables (including both forms of
+  // $PROJECT_HASH) in the selected build path.
+  const selectedBuildPathValue = buildDirValue || workspaceDirValue;
+  if (selectedBuildPathValue && /\$(?:PROJECT_HASH|\{PROJECT_HASH\})/.test(selectedBuildPathValue)) {
     try {
       await ensurePioCoreInitialized();
       const script = [

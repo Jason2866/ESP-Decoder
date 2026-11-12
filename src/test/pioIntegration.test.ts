@@ -123,6 +123,39 @@ describe('findPioEnvironments build directory resolution', () => {
     expect(pioCore.getCorePythonCommandOutput).toHaveBeenCalledTimes(1);
   });
 
+  it('uses PlatformIO Core to resolve a braced workspace hash placeholder', async () => {
+    process.env.PLATFORMIO_WORKSPACE_DIR = path.join(workspace, '${PROJECT_HASH}');
+    const resolvedBuildDir = path.join(workspace, 'resolved-hash', 'build');
+    fs.writeFileSync(path.join(workspace, 'platformio.ini'), '[env:demo]\nboard = esp32dev\n');
+    const elfPath = path.join(resolvedBuildDir, 'demo', 'firmware.elf');
+    fs.mkdirSync(path.dirname(elfPath), { recursive: true });
+    fs.writeFileSync(elfPath, '');
+    vi.mocked(pioCore.getCorePythonCommandOutput).mockResolvedValue(JSON.stringify(resolvedBuildDir));
+
+    const environments = await findPioEnvironments(workspace);
+
+    expect(pioCore.getCorePythonCommandOutput).toHaveBeenCalledTimes(1);
+    expect(environments).toContainEqual(expect.objectContaining({ name: 'demo', elfPath }));
+  });
+
+  it('does not require PlatformIO Core for a configured absolute build directory', async () => {
+    const buildDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-pio-build-'));
+    tempDirs.push(buildDir);
+    process.env.PLATFORMIO_WORKSPACE_DIR = path.join(workspace, '${PROJECT_HASH}');
+    fs.writeFileSync(
+      path.join(workspace, 'platformio.ini'),
+      `[platformio]\nbuild_dir = ${buildDir}\n\n[env:demo]\nboard = esp32dev\n`
+    );
+    const elfPath = path.join(buildDir, 'demo', 'firmware.elf');
+    fs.mkdirSync(path.dirname(elfPath), { recursive: true });
+    fs.writeFileSync(elfPath, '');
+
+    const environments = await findPioEnvironments(workspace);
+
+    expect(pioCore.getCorePythonCommandOutput).not.toHaveBeenCalled();
+    expect(environments).toContainEqual(expect.objectContaining({ name: 'demo', elfPath }));
+  });
+
   it('continues to discover ELFs in the default .pio/build directory', async () => {
     fs.writeFileSync(
       path.join(workspace, 'platformio.ini'),
