@@ -179,7 +179,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           this.postMessage({
             type: 'crashDecodeError',
             eventId: event.id,
-            error: 'No ELF file configured. Use "ESP Decoder: Select ELF File" to select one.',
+            error: 'No ELF file configured. Build the project first so ESP Decoder can auto-detect the ELF, or use "ESP Decoder: Select ELF File" to select one.',
           });
         }
       })
