@@ -20,6 +20,10 @@ Prepends a dimmed `[HH:MM:SS.mmm]` timestamp to every completed line.
 
 **VS Code setting:** `esp-decoder.serialFilters.timestamp` (boolean, default `false`)
 
+By default the timestamp uses **UTC**. Set the setting below to display timestamps in your system's local time zone instead.
+
+**VS Code setting:** `esp-decoder.serialFilters.timestampLocal` (boolean, default `false`)
+
 **Example output:**
 
 ```text

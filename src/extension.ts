@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SerialPortManager } from './serialPortManager';
 import { EspDecoderWebviewPanel, SessionConfig } from './webviewPanel';
-import { findPioEnvironments, selectElfFile, getMonitorBaudRate } from './pioIntegration';
+import { findPioEnvironments, getPioBuildDir, selectElfFile, getMonitorBaudRate } from './pioIntegration';
 import { findEspIdfBuilds } from './espIdfIntegration';
 
 /** Shape of the public API exported by the pioarduino IDE extension. */
@@ -262,6 +262,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(watcher);
 
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (workspaceFolder) {
+      watchPioBuildDirectory(context, workspaceFolder);
+    }
+
     // Try auto-detect on activation
     tryAutoDetectElf();
   }
@@ -289,6 +294,57 @@ export function activate(context: vscode.ExtensionContext) {
 function isPlatformIoBuildElf(elfPath: string): boolean {
   const normalized = path.normalize(elfPath);
   return normalized.includes(`${path.sep}.pio${path.sep}build${path.sep}`);
+}
+
+/**
+ * Watch the resolved PlatformIO build directory when it is outside the default
+ * .pio/build location. This covers PLATFORMIO_WORKSPACE_DIR, including paths
+ * outside the opened workspace.
+ */
+function watchPioBuildDirectory(context: vscode.ExtensionContext, workspaceFolder: string): void {
+  void getPioBuildDir(workspaceFolder)
+    .then((buildDir) => {
+      if (!buildDir || path.resolve(buildDir) === path.resolve(workspaceFolder, '.pio', 'build')) {
+        return false;
+      }
+
+      // RelativePattern watchers need an existing base directory. Anchor at
+      // the closest existing parent so a workspace hash directory created by
+      // the next PlatformIO build is still observed.
+      let watchRoot = buildDir;
+      while (!fs.existsSync(watchRoot)) {
+        const parent = path.dirname(watchRoot);
+        if (parent === watchRoot) {
+          return false;
+        }
+        watchRoot = parent;
+      }
+
+      const relativeBuildDir = path.relative(watchRoot, buildDir).split(path.sep).join('/');
+      const escapedRelativeBuildDir = relativeBuildDir.replace(/[\\*?\[\]{}]/g, '\\$&');
+      const pattern = escapedRelativeBuildDir ? `${escapedRelativeBuildDir}/**/*.elf` : '**/*.elf';
+      const watcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(vscode.Uri.file(watchRoot), pattern),
+        false,
+        false,
+        true
+      );
+      const detectPioElf = (uri: vscode.Uri) => autoDetectFromPio(uri.fsPath);
+      watcher.onDidCreate(detectPioElf);
+      watcher.onDidChange(detectPioElf);
+      context.subscriptions.push(watcher);
+      return true;
+    })
+    .then((watcherRegistered) => {
+      // Rescan after watcher registration to cover ELFs created while the
+      // PlatformIO Core state and external watcher were being initialized.
+      if (watcherRegistered) {
+        void tryAutoDetectElf();
+      }
+    })
+    .catch(() => {
+      // PlatformIO may be unavailable; the regular workspace watcher remains active.
+    });
 }
 
 /**

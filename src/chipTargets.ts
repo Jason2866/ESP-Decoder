@@ -6,6 +6,8 @@ export const CHIP_TARGET_MAP: Record<string, string> = {
   esp32c3: 'esp32c3',
   esp32c5: 'esp32c5',
   esp32c6: 'esp32c6',
+  // ESP32-C61 shares the C6 crash/register decoding implementation.
+  esp32c61: 'esp32c6',
   esp32h2: 'esp32h2',
   esp32h4: 'esp32h4',
   esp32p4: 'esp32p4',
@@ -18,6 +20,7 @@ export const RISCV_TARGETS = new Set([
   'esp32c3',
   'esp32c5',
   'esp32c6',
+  'esp32c61',
   'esp32h2',
   'esp32h4',
   'esp32p4',

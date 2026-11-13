@@ -731,7 +731,7 @@ async function decodeCoredumpElfInternal(
  * Try to auto-detect a GDB binary from the local PlatformIO packages directory.
  * This is used as a fallback when no toolPath is configured in the extension settings.
  *
- * RISC-V (ESP32-C2/C3/C6/H2/H4/P4):
+ * RISC-V (ESP32-C2/C3/C6/C61/H2/H4/P4):
  *   ~/.platformio/packages/tool-riscv32-esp-elf-gdb/bin/riscv32-esp-elf-gdb
  *
  * Xtensa (ESP32/ESP32-S2/ESP32-S3/ESP8266):

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.29.0] - 2026-11-12
+
+### Fixed
+
+- **PlatformIO ELF detection** — Fixed ELF discovery when env variable `PLATFORMIO_WORKSPACE_DIR` is used.
+
+### Added
+
+- **Local timestamps** — Added an option to display serial monitor timestamps in local time instead of UTC.
+
 ## [0.28.2] - 2026-11-05
 
 ### New Feature
