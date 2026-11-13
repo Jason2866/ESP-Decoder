@@ -39,7 +39,7 @@ vi.mock('pioarduino-node-helpers', () => ({
 }));
 
 import { core as pioCore } from 'pioarduino-node-helpers';
-import { findPioEnvironments } from '../pioIntegration.js';
+import { findPioEnvironments, getPioBuildDir } from '../pioIntegration.js';
 
 describe('findPioEnvironments build directory resolution', () => {
   let workspace: string;
@@ -154,6 +154,24 @@ describe('findPioEnvironments build directory resolution', () => {
 
     expect(pioCore.getCorePythonCommandOutput).not.toHaveBeenCalled();
     expect(environments).toContainEqual(expect.objectContaining({ name: 'demo', elfPath }));
+  });
+
+  it('resolves PROJECT_DIR in an overridden workspace before resolving dependent build_dir options', async () => {
+    process.env.PLATFORMIO_WORKSPACE_DIR = '${PROJECT_DIR}/.pio';
+    fs.writeFileSync(
+      path.join(workspace, 'platformio.ini'),
+      '[platformio]\nworkspace_dir = configured-workspace\nbuild_dir = ${platformio.workspace_dir}/build\n\n[env:demo]\nboard = esp32dev\n'
+    );
+    const resolvedBuildDir = path.join(workspace, '.pio', 'build');
+    const elfPath = path.join(resolvedBuildDir, 'demo', 'firmware.elf');
+    fs.mkdirSync(path.dirname(elfPath), { recursive: true });
+    fs.writeFileSync(elfPath, '');
+
+    const environments = await findPioEnvironments(workspace);
+
+    expect(await getPioBuildDir(workspace)).toBe(resolvedBuildDir);
+    expect(environments).toContainEqual(expect.objectContaining({ name: 'demo', elfPath }));
+    expect(pioCore.getCorePythonCommandOutput).not.toHaveBeenCalled();
   });
 
   it('continues to discover ELFs in the default .pio/build directory', async () => {

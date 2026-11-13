@@ -466,6 +466,8 @@ function normalizePioPath(value: string, workspaceFolder: string): string {
     process.env[varName] ?? ''
   );
 
+  expanded = expanded.replace(/\$\{PROJECT_DIR\}/g, workspaceFolder);
+
   if (expanded.startsWith('~')) {
     expanded = os.homedir() + expanded.slice(1);
   }
@@ -558,8 +560,8 @@ function getProjectName(workspaceFolder: string, sections?: Sections): string | 
  * then falls back to the default .pio/build directory.
  */
 async function resolveBuildDir(workspaceFolder: string, sections: Sections): Promise<string | undefined> {
-  const buildDirValue = process.env.PLATFORMIO_BUILD_DIR || sections['platformio']?.['build_dir'];
-  const workspaceDirValue = process.env.PLATFORMIO_WORKSPACE_DIR || sections['platformio']?.['workspace_dir'];
+  const buildDirValue = sections['platformio']?.['build_dir'];
+  const workspaceDirValue = sections['platformio']?.['workspace_dir'];
 
   // Let PlatformIO expand its built-in variables (including both forms of
   // $PROJECT_HASH) in the selected build path.
@@ -644,6 +646,15 @@ function readPlatformioSections(workspaceFolder: string): Sections | undefined {
   const content = fs.readFileSync(platformIniPath, 'utf8');
   const sections = parsePlatformioIni(content);
   mergeExtraConfigs(workspaceFolder, sections);
+  // Apply environment overrides before interpolation so options that refer to
+  // platformio.workspace_dir or platformio.build_dir use the effective value.
+  const platformio = sections['platformio'] ?? (sections['platformio'] = {});
+  if (process.env.PLATFORMIO_WORKSPACE_DIR) {
+    platformio['workspace_dir'] = process.env.PLATFORMIO_WORKSPACE_DIR;
+  }
+  if (process.env.PLATFORMIO_BUILD_DIR) {
+    platformio['build_dir'] = process.env.PLATFORMIO_BUILD_DIR;
+  }
   interpolateVariables(sections);
   return sections;
 }
