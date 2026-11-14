@@ -897,12 +897,12 @@ function setupMcpServer(
     data: panel,
     getWorkspaceFolder,
     log,
-    runUpload: (environment) => {
+    runUpload: (environment, firmwarePath) => {
       const folder = getWorkspaceFolder();
       if (!folder) {
         return Promise.reject(new Error('No workspace folder open'));
       }
-      return runUpload(serial, folder, environment, log);
+      return runUpload(serial, folder, environment, firmwarePath, log);
     },
   };
 

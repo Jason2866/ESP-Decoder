@@ -37,6 +37,71 @@ function findPioBinary(): string {
   return 'pio';
 }
 
+/** Resolve the esptool executable from PlatformIO's Python environment or PATH. */
+function findEsptoolBinary(): string {
+  const executableNames =
+    process.platform === 'win32' ? ['esptool.exe', 'esptool.py'] : ['esptool', 'esptool.py'];
+  try {
+    const binDir = pioCore.getEnvBinDir();
+    for (const name of executableNames) {
+      const candidate = path.join(binDir, name);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  } catch {
+    // fall through to PATH lookup
+  }
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+    for (const name of executableNames) {
+      const candidate = path.join(dir, name);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  throw new Error('esptool was not found in the PlatformIO environment or PATH');
+}
+
+/** Resolve an in-workspace merged image for direct esptool flashing. */
+function resolveFirmwareFileCommand(
+  workspaceFolder: string,
+  firmwarePath: string,
+  uploadPort: string | undefined
+): { command: string; args: string[]; label: string } {
+  if (!uploadPort) {
+    throw new Error('Connect to the board before uploading a prebuilt firmware image');
+  }
+
+  const workspaceRealPath = fs.realpathSync(workspaceFolder);
+  const imagePath = path.resolve(workspaceFolder, firmwarePath);
+  const realImagePath = fs.realpathSync(imagePath);
+  const relativeImagePath = path.relative(workspaceRealPath, realImagePath);
+  if (relativeImagePath === '..' || relativeImagePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativeImagePath)) {
+    throw new Error('Prebuilt firmware image must be inside the open workspace');
+  }
+  const imageStat = fs.statSync(realImagePath);
+  if (!imageStat.isFile() || imageStat.size === 0) {
+    throw new Error('Prebuilt firmware image must be a non-empty file');
+  }
+
+  const command = findEsptoolBinary();
+  const args = [
+    '--chip',
+    'auto',
+    '--port',
+    uploadPort,
+    '--baud',
+    '460800',
+    'write-flash',
+    '--flash-size',
+    'detect',
+    '0x0',
+    realImagePath,
+  ];
+  return { command, args, label: `esptool flash (${path.basename(realImagePath)})` };
+}
+
 /**
  * Resolve the upload command for the workspace: PlatformIO if platformio.ini
  * environments exist, otherwise ESP-IDF (idf.py flash).
@@ -187,16 +252,18 @@ export async function runUpload(
   serial: SerialPortManager,
   workspaceFolder: string,
   environment: string | undefined,
+  firmwarePath: string | undefined,
   log: vscode.OutputChannel
 ): Promise<UploadResult> {
   if (uploadInFlight) {
     throw new Error('An upload is already in progress');
   }
-  const { command, args, label } = await resolveUploadCommand(
-    workspaceFolder,
-    environment,
-    serial.selectedPath
-  );
+  if (firmwarePath && environment) {
+    throw new Error('Choose either a PlatformIO environment or a prebuilt firmware image');
+  }
+  const { command, args, label } = firmwarePath
+    ? resolveFirmwareFileCommand(workspaceFolder, firmwarePath, serial.selectedPath)
+    : await resolveUploadCommand(workspaceFolder, environment, serial.selectedPath);
 
   uploadInFlight = true;
   const start = Date.now();

@@ -29,7 +29,7 @@ export interface McpServerDeps {
   data: MonitorDataSource;
   getWorkspaceFolder(): string | undefined;
   log: vscode.OutputChannel;
-  runUpload(environment?: string): Promise<UploadResult>;
+  runUpload(environment?: string, firmwarePath?: string): Promise<UploadResult>;
 }
 
 const READ_SERIAL_DEFAULT_LINES = 200;
@@ -287,16 +287,21 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
     'upload_firmware',
     {
       description:
-        'Build & flash firmware to the board via PlatformIO (pio run -t upload) or ESP-IDF (idf.py flash), run as a visible VS Code task. The serial port is released during the upload and reconnected afterwards.',
+        'Build & flash firmware to the board via PlatformIO (pio run -t upload) or ESP-IDF (idf.py flash), or flash a prebuilt merged image with esptool. Runs as a visible VS Code task. The serial port is released during the upload and reconnected afterwards.',
       inputSchema: {
         environment: z
           .string()
           .optional()
           .describe('PlatformIO environment name (required when the project defines several — see list_environments)'),
+        firmwarePath: z
+          .string()
+          .optional()
+          .describe('Path to a prebuilt merged firmware image inside the workspace; flashed at offset 0x0 with esptool'),
       },
       annotations: { destructiveHint: true },
     },
-    async ({ environment }) => jsonResult(await deps.runUpload(environment))
+    async ({ environment, firmwarePath }) =>
+      jsonResult(await deps.runUpload(environment, firmwarePath))
   );
 
   server.registerTool(

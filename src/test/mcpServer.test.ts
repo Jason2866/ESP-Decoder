@@ -441,7 +441,24 @@ describe('MCP tools', () => {
 
     const result = await callTool(client, 'upload_firmware', { environment: 'esp32dev' });
     expect(result).toEqual(uploadResult);
-    expect(runUpload).toHaveBeenCalledWith('esp32dev');
+    expect(runUpload).toHaveBeenCalledWith('esp32dev', undefined);
+  });
+
+  it('upload_firmware forwards a prebuilt firmware path', async () => {
+    const uploadResult: UploadResult = {
+      success: true,
+      exitCode: 0,
+      durationMs: 5000,
+      outputTail: 'SUCCESS',
+    };
+    const runUpload = vi.fn(async () => uploadResult);
+    const client = await connectClient(makeDeps({ runUpload }));
+
+    const result = await callTool(client, 'upload_firmware', {
+      firmwarePath: 'build_output/firmware/test.factory.bin',
+    });
+    expect(result).toEqual(uploadResult);
+    expect(runUpload).toHaveBeenCalledWith(undefined, 'build_output/firmware/test.factory.bin');
   });
 
   it('list_environments errors without a workspace folder', async () => {

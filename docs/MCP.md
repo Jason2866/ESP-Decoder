@@ -19,9 +19,9 @@ state with the webview. Agent and human see the same session.
 | Area | State |
 |---|---|
 | Transport (streamable HTTP, localhost, stateless) | ✅ implemented |
-| Serial tools (connect/disconnect/read/send/reset/status) | ✅ verified on ESP32-C6 hardware |
-| Crash tools (list_crashes/decode_crash) | ✅ implemented, unit-tested (full protocol); hardware crash test pending |
-| upload_firmware (PlatformIO / ESP-IDF as VS Code task) | ✅ implemented; hardware flash test pending |
+| Serial tools (connect/disconnect/read/send/reset/status) | ✅ verified on ESP32-C6 hardware (Tasmota) |
+| Crash tools (list_crashes/decode_crash) | ✅ implemented, unit-tested; hardware crash detection verified on ESP32-C6/Tasmota; decoding needs a matching ELF |
+| upload_firmware (PlatformIO / ESP-IDF and prebuilt merged images) | ✅ MCP flash verified on ESP32-C6; hash verified and Tasmota boot confirmed |
 | Authentication | none — endpoint is bound to 127.0.0.1 and **off by default** |
 
 ## Installation
@@ -61,7 +61,7 @@ state with the webview. Agent and human see the same session.
 | `hard_reset` | — | reboots the board via RTS toggle |
 | `list_crashes` | — | detected crash events (panics, Guru Meditation, asserts) with summaries |
 | `decode_crash` | `crash_id` | resolved backtrace (function/file/line), registers, fault info |
-| `upload_firmware` | `environment?` | builds & flashes via `pio run -t upload` / `idf.py flash`; exit code + output tail |
+| `upload_firmware` | `environment?`, `firmwarePath?` | builds & flashes via `pio run -t upload` / `idf.py flash`, or flashes a prebuilt merged image with esptool at `0x0`; exit code + output tail |
 | `list_environments` | — | detected PlatformIO environments and ESP-IDF builds |
 
 ## Usage patterns
@@ -84,7 +84,11 @@ auto-detected from `.pio/build/` or `build/`, or set via
 
 **Reflash** — `upload_firmware` releases the serial port, runs the upload as a
 visible VS Code task, then reconnects the monitor. With multiple PlatformIO
-environments, pass `environment` (see `list_environments`).
+environments, pass `environment` (see `list_environments`). To flash a prebuilt
+merged factory image, connect to the board and pass its path relative to the
+workspace as `firmwarePath`; the file must be inside the open workspace and is
+written at offset `0x0` with esptool. Choose either `environment` or
+`firmwarePath`.
 
 ## Security
 
