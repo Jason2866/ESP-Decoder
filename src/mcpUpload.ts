@@ -113,18 +113,19 @@ async function resolveUploadCommand(
 ): Promise<{ command: string; args: string[]; label: string }> {
   const pioEnvs = await findPioEnvironments(workspaceFolder);
   if (pioEnvs.length > 0) {
+    const environments = [...new Set(pioEnvs.map((env) => env.environmentName))];
     let env = environment;
     if (!env) {
-      if (pioEnvs.length === 1) {
-        env = pioEnvs[0].name;
+      if (environments.length === 1) {
+        env = environments[0];
       } else {
         throw new Error(
-          `Multiple PlatformIO environments found — specify one of: ${pioEnvs.map((e) => e.name).join(', ')}`
+          `Multiple PlatformIO environments found — specify one of: ${environments.join(', ')}`
         );
       }
-    } else if (!pioEnvs.some((e) => e.name === env)) {
+    } else if (!environments.includes(env)) {
       throw new Error(
-        `Unknown PlatformIO environment '${env}' — available: ${pioEnvs.map((e) => e.name).join(', ')}`
+        `Unknown PlatformIO environment '${env}' — available: ${environments.join(', ')}`
       );
     }
     const args = ['run', '-e', env, '-t', 'upload'];
@@ -258,16 +259,18 @@ export async function runUpload(
   if (uploadInFlight) {
     throw new Error('An upload is already in progress');
   }
-  if (firmwarePath && environment) {
-    throw new Error('Choose either a PlatformIO environment or a prebuilt firmware image');
-  }
-  const { command, args, label } = firmwarePath
-    ? resolveFirmwareFileCommand(workspaceFolder, firmwarePath, serial.selectedPath)
-    : await resolveUploadCommand(workspaceFolder, environment, serial.selectedPath);
-
   uploadInFlight = true;
   const start = Date.now();
+  let uploadOwnership: ReturnType<SerialPortManager['acquireUploadOwnership']> | undefined;
   try {
+    uploadOwnership = serial.acquireUploadOwnership();
+    if (firmwarePath && environment) {
+      throw new Error('Choose either a PlatformIO environment or a prebuilt firmware image');
+    }
+    const { command, args, label } = firmwarePath
+      ? resolveFirmwareFileCommand(workspaceFolder, firmwarePath, serial.selectedPath)
+      : await resolveUploadCommand(workspaceFolder, environment, serial.selectedPath);
+
     log.appendLine(`[ESP Decoder] MCP upload: releasing serial port for ${label}`);
     await serial.releasePort();
     const { exitCode, outputTail } = await executeUploadTask(
@@ -283,8 +286,14 @@ export async function runUpload(
       outputTail,
     };
   } finally {
-    uploadInFlight = false;
-    await reacquireWithRetry(serial, log);
+    try {
+      if (uploadOwnership) {
+        await reacquireWithRetry(serial, log, uploadOwnership.token);
+      }
+    } finally {
+      uploadOwnership?.release();
+      uploadInFlight = false;
+    }
   }
 }
 
@@ -295,12 +304,13 @@ export async function runUpload(
 async function reacquireWithRetry(
   serial: SerialPortManager,
   log: vscode.OutputChannel,
+  uploadToken?: symbol,
   maxAttempts = 5,
   baseDelayMs = 300
 ): Promise<void> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      await serial.reacquirePort();
+      await serial.reacquirePort(uploadToken);
       return;
     } catch (err) {
       if (attempt === maxAttempts) {

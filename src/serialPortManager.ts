@@ -28,6 +28,7 @@ export class SerialPortManager extends vscode.Disposable {
   // Connection gating to prevent race conditions
   private _connectPromise: Promise<boolean> | null = null;
   private _connectGeneration = 0; // Incremented on each connect attempt
+  private _uploadOwner: symbol | null = null;
 
   // Identity of the currently/last connected device — used to match the same
   // physical board when it re-enumerates (e.g. native USB-CDC after reset).
@@ -97,6 +98,30 @@ export class SerialPortManager extends vscode.Disposable {
 
   get isConnected(): boolean {
     return this._isConnected;
+  }
+
+  get uploadInProgress(): boolean {
+    return this._uploadOwner !== null;
+  }
+
+  /** Reserve the serial port across an upload and its recovery reconnect. */
+  acquireUploadOwnership(): { token: symbol; release: () => void } {
+    if (this._uploadOwner) {
+      throw new Error('An upload is already in progress');
+    }
+    if (this._connectPromise) {
+      throw new Error('Cannot start an upload while a serial connection is in progress');
+    }
+    const owner = Symbol('serial upload');
+    this._uploadOwner = owner;
+    return {
+      token: owner,
+      release: () => {
+        if (this._uploadOwner === owner) {
+          this._uploadOwner = null;
+        }
+      },
+    };
   }
 
   /**
@@ -254,7 +279,11 @@ export class SerialPortManager extends vscode.Disposable {
     return this._baudRate;
   }
 
-  async connect(): Promise<boolean> {
+  async connect(uploadToken?: symbol): Promise<boolean> {
+    if (this._uploadOwner && this._uploadOwner !== uploadToken) {
+      this.log.appendLine('[ESP Decoder] Connection rejected while firmware upload owns the serial port');
+      return false;
+    }
     // Gate connection initiation - if a connection is already in progress, wait for it.
     // The promise is created and stored BEFORE any await so concurrent callers joining
     // after this point will always find it and share the same attempt.
@@ -679,12 +708,13 @@ export class SerialPortManager extends vscode.Disposable {
     if (!this.port || !this._isConnected) {
       throw new Error('Serial port not connected');
     }
+    const port = this.port;
     return new Promise((resolve, reject) => {
-      this.port!.write(data, (err) => {
+      port.write(data, (err) => {
         if (err) {
           reject(err);
         } else {
-          this.port!.drain((drainErr) => (drainErr ? reject(drainErr) : resolve()));
+          port.drain((drainErr) => (drainErr ? reject(drainErr) : resolve()));
         }
       });
     });
@@ -722,7 +752,7 @@ export class SerialPortManager extends vscode.Disposable {
    * Re-open the serial port that was previously released via
    * {@link releasePort}. No-op if there was no suspended connection.
    */
-  async reacquirePort(): Promise<void> {
+  async reacquirePort(uploadToken?: symbol): Promise<void> {
     if (!this._suspendedPath) {
       return;
     }
@@ -735,7 +765,7 @@ export class SerialPortManager extends vscode.Disposable {
     this._baudRate = this._suspendedBaudRate ?? this._baudRate;
     // Only clear suspended state after a successful connect so that
     // callers (e.g. reacquireWithRetry) can retry on failure.
-    const connected = await this.connect();
+    const connected = await this.connect(uploadToken);
     if (!connected) {
       throw new Error(`Failed to reopen serial port ${this._selectedPath}`);
     }

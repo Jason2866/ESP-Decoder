@@ -886,6 +886,7 @@ function setupMcpServer(
   log: vscode.OutputChannel
 ): void {
   let mcpServer: EspDecoderMcpHttpServer | undefined;
+  let startGeneration = 0;
 
   const mcpConfig = () => vscode.workspace.getConfiguration('esp-decoder');
   const isEnabled = () => mcpConfig().get<boolean>('mcp.enabled', false);
@@ -907,13 +908,18 @@ function setupMcpServer(
   };
 
   const start = async () => {
-    if (mcpServer) {
+    if (mcpServer || !isEnabled()) {
       return;
     }
+    const generation = ++startGeneration;
     const port = getPort();
     const server = new EspDecoderMcpHttpServer(deps);
     try {
       await server.start(port);
+      if (generation !== startGeneration || !isEnabled() || getPort() !== port) {
+        server.dispose();
+        return;
+      }
       mcpServer = server;
       log.appendLine(`[ESP Decoder] MCP server listening at ${server.url}`);
       log.appendLine(
@@ -921,6 +927,9 @@ function setupMcpServer(
       );
     } catch (err) {
       server.dispose();
+      if (generation !== startGeneration || !isEnabled()) {
+        return;
+      }
       const inUse = (err as NodeJS.ErrnoException)?.code === 'EADDRINUSE';
       const msg = inUse
         ? `port ${port} is already in use (another VS Code window?) — set "esp-decoder.mcp.port" as a workspace setting to a free port`
@@ -933,6 +942,7 @@ function setupMcpServer(
   };
 
   const stop = () => {
+    startGeneration++;
     mcpServer?.dispose();
     mcpServer = undefined;
   };

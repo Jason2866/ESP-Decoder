@@ -17,7 +17,7 @@ state with the webview. Agent and human see the same session.
 ## Status
 
 | Area | State |
-|---|---|
+| --- | --- |
 | Transport (streamable HTTP, localhost, stateless) | ✅ implemented |
 | Serial tools (connect/disconnect/read/send/reset/status) | ✅ verified on ESP32-C6 hardware (Tasmota) |
 | Crash tools (list_crashes/decode_crash) | ✅ implemented, unit-tested; hardware crash detection verified on ESP32-C6/Tasmota; decoding needs a matching ELF |
@@ -51,7 +51,7 @@ state with the webview. Agent and human see the same session.
 ## Tools
 
 | Tool | Arguments | Returns |
-|---|---|---|
+| --- | --- | --- |
 | `list_ports` | — | available serial ports (Bluetooth filtered out) |
 | `connect` | `port?`, `baudRate?` | connects; auto-selects when exactly one port exists |
 | `disconnect` | — | closes the port |
@@ -62,7 +62,7 @@ state with the webview. Agent and human see the same session.
 | `list_crashes` | — | detected crash events (panics, Guru Meditation, asserts) with summaries |
 | `decode_crash` | `crash_id` | resolved backtrace (function/file/line), registers, fault info |
 | `upload_firmware` | `environment?`, `firmwarePath?` | builds & flashes via `pio run -t upload` / `idf.py flash`, or flashes a prebuilt merged image with esptool at `0x0`; exit code + output tail |
-| `list_environments` | — | detected PlatformIO environments and ESP-IDF builds |
+| `list_environments` | — | unique configured PlatformIO environment names with ELF paths, plus ESP-IDF builds |
 
 ## Usage patterns
 

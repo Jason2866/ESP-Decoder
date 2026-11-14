@@ -17,6 +17,7 @@ import {
   encodeRPC,
   IMPROV_HEADER,
   IMPROV_VERSION,
+  cancelImprovSession,
   withImprovSession,
 } from '../improvWiFi';
 
@@ -106,6 +107,20 @@ describe('ImprovEngine.requestInfo', () => {
       version: '1.2.3',
       chipFamily: 'ESP32',
       name: 'living-room',
+    });
+  });
+
+  it('ignores RPC results for a different command', async () => {
+    const engine = new ImprovEngine(async () => {
+      engine.feed(frame(ImprovType.RPCResult, rpcResult(ImprovRPCCommand.RequestScannedWifiNetworks, 'stale')));
+      engine.feed(frame(ImprovType.RPCResult, rpcResult(ImprovRPCCommand.RequestDeviceInformation, 'fw', 'v', 'chip', 'name')));
+    }, 1000);
+
+    await expect(engine.requestInfo()).resolves.toEqual({
+      firmware: 'fw',
+      version: 'v',
+      chipFamily: 'chip',
+      name: 'name',
     });
   });
 });
@@ -210,6 +225,31 @@ describe('frame parser', () => {
     await assertion;
     vi.useRealTimers();
   });
+
+  it('resynchronizes past an invalid-version header before a valid frame', async () => {
+    const engine = new ImprovEngine(async () => {
+      const invalid = Buffer.from([...IMPROV_HEADER, 0x7f, ImprovType.RPCResult, 0xff, 1, 2, 3]);
+      const valid = frame(ImprovType.RPCResult, rpcResult(ImprovRPCCommand.RequestDeviceInformation, 'fw', 'v', 'chip', 'name'));
+      engine.feed(Buffer.concat([invalid, valid]));
+    }, 1000);
+
+    await expect(engine.requestInfo()).resolves.toMatchObject({ firmware: 'fw' });
+  });
+
+  it('clears pending response state when the serial write rejects', async () => {
+    let firstWrite = true;
+    let engine: ImprovEngine;
+    engine = new ImprovEngine(async () => {
+      if (firstWrite) {
+        firstWrite = false;
+        throw new Error('write failed');
+      }
+      engine.feed(frame(ImprovType.RPCResult, rpcResult(ImprovRPCCommand.RequestDeviceInformation, 'fw', 'v', 'chip', 'name')));
+    }, 1000);
+
+    await expect(engine.requestInfo()).rejects.toThrow('write failed');
+    await expect(engine.requestInfo()).resolves.toMatchObject({ firmware: 'fw' });
+  });
 });
 
 // --- timeout --------------------------------------------------------------
@@ -275,5 +315,42 @@ describe('withImprovSession', () => {
     };
     await expect(withImprovSession(transport, 1000, async () => 'x')).rejects.toThrow(/not connected/i);
     expect(transport.setRxInterceptor).not.toHaveBeenCalled();
+  });
+
+  it('queues sessions so a later session cannot replace an active interceptor', async () => {
+    let interceptor: ((d: Buffer) => void) | null = null;
+    let finishFirst!: () => void;
+    const transport = {
+      isConnected: true,
+      writeBytes: vi.fn(async () => {}),
+      setRxInterceptor: vi.fn((fn: ((d: Buffer) => void) | null) => { interceptor = fn; }),
+    };
+
+    const first = withImprovSession(transport, 1000, () => new Promise<void>((resolve) => { finishFirst = resolve; }));
+    await Promise.resolve();
+    const second = withImprovSession(transport, 1000, async () => 'second');
+    await Promise.resolve();
+    expect(transport.setRxInterceptor).toHaveBeenCalledTimes(1);
+    expect(interceptor).not.toBeNull();
+
+    finishFirst();
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).resolves.toBe('second');
+    expect(transport.setRxInterceptor.mock.calls.map(([fn]) => fn === null)).toEqual([false, true, false, true]);
+  });
+
+  it('cancels the active command and releases its interceptor', async () => {
+    let interceptor: ((d: Buffer) => void) | null = null;
+    const transport = {
+      isConnected: true,
+      writeBytes: vi.fn(async () => {}),
+      setRxInterceptor: vi.fn((fn: ((d: Buffer) => void) | null) => { interceptor = fn; }),
+    };
+    const session = withImprovSession(transport, 1000, (engine) => engine.requestInfo());
+    await Promise.resolve();
+    await Promise.resolve();
+    await cancelImprovSession(transport);
+    await expect(session).rejects.toThrow(/session closed/i);
+    expect(interceptor).toBeNull();
   });
 });

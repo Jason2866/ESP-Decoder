@@ -109,7 +109,7 @@ describe('findPioEnvironments build directory resolution', () => {
     expect(args[1]).toContain('config.get("platformio", "build_dir")');
     expect(args[1]).not.toContain('default=None');
     expect(options).toEqual({ projectDir: workspace });
-    expect(environments).toContainEqual(expect.objectContaining({ name: 'demo', elfPath }));
+    expect(environments).toContainEqual(expect.objectContaining({ environmentName: 'demo', name: 'demo', elfPath }));
   });
 
   it('does not guess .pio/build if PlatformIO cannot resolve a hash path', async () => {

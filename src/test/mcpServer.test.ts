@@ -171,6 +171,7 @@ interface FakeSerialState {
   baudRate: number;
   isConnected: boolean;
   connectResult: boolean;
+  uploadInProgress?: boolean;
 }
 
 function makeFakeSerial(state: FakeSerialState) {
@@ -183,6 +184,9 @@ function makeFakeSerial(state: FakeSerialState) {
     },
     get isConnected() {
       return state.isConnected;
+    },
+    get uploadInProgress() {
+      return state.uploadInProgress ?? false;
     },
     isReconnecting: false,
     listPorts: vi.fn(async () => state.ports),
@@ -311,6 +315,20 @@ describe('MCP tools', () => {
       baudRate: 921600,
     });
     expect(deps.serial.connect).toHaveBeenCalled();
+  });
+
+  it('rejects connect while an upload owns the serial port', async () => {
+    const serial = makeFakeSerial({
+      ports: [{ path: '/dev/cu.usbserial-1' }],
+      baudRate: 115200,
+      isConnected: false,
+      connectResult: true,
+      uploadInProgress: true,
+    });
+    const client = await connectClient(makeDeps({ serial }));
+
+    await expect(callTool(client, 'connect', { port: '/dev/cu.usbserial-1' })).rejects.toThrow(/upload owns/i);
+    expect(serial.connect).not.toHaveBeenCalled();
   });
 
   it('connect auto-selects the single available port', async () => {

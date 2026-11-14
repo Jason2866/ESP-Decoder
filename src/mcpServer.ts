@@ -78,6 +78,9 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
       },
     },
     async ({ port, baudRate }) => {
+      if (serial.uploadInProgress) {
+        throw new Error('Cannot connect while a firmware upload owns the serial port');
+      }
       if (port) {
         if (!serial.setPort(port)) {
           throw new Error(`Invalid port path: '${port}'`);
@@ -96,6 +99,9 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
       }
       if (baudRate !== undefined && !serial.setBaudRate(baudRate)) {
         throw new Error(`Invalid baud rate: ${baudRate}`);
+      }
+      if (serial.uploadInProgress) {
+        throw new Error('Cannot connect while a firmware upload owns the serial port');
       }
       const connected = await serial.connect();
       if (!connected) {
@@ -308,7 +314,7 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
     'list_environments',
     {
       description:
-        'List detected PlatformIO environments and ESP-IDF builds in the workspace (name, ELF path, target architecture).',
+        'List configured PlatformIO environment names once each, with their ELF paths and target architecture, plus detected ESP-IDF builds.',
       annotations: { readOnlyHint: true },
     },
     async () => {
@@ -320,7 +326,19 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
         findPioEnvironments(folder),
         findEspIdfBuilds(folder),
       ]);
-      return jsonResult({ pio, idf });
+      const pioByEnvironment = new Map<
+        string,
+        { name: string; elfPaths: string[]; targetArch?: string }
+      >();
+      for (const env of pio) {
+        let entry = pioByEnvironment.get(env.environmentName);
+        if (!entry) {
+          entry = { name: env.environmentName, elfPaths: [], targetArch: env.targetArch };
+          pioByEnvironment.set(env.environmentName, entry);
+        }
+        entry.elfPaths.push(env.elfPath);
+      }
+      return jsonResult({ pio: [...pioByEnvironment.values()], idf });
     }
   );
 

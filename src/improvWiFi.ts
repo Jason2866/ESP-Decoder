@@ -134,6 +134,7 @@ function decodeRPCStrings(payload: number[]): string[] {
 }
 
 type PendingResolver = {
+  command: ImprovRPCCommand;
   resolve: (packets: ImprovPacket[]) => void;
   reject: (err: Error) => void;
   /** Collected RPCResult packets for the in-flight command. */
@@ -189,6 +190,12 @@ export class ImprovEngine {
       // Need header(6)+version(1)+type(1)+len(1) before we know the size.
       if (this.buf.length < IMPROV_HEADER.length + 3) {
         return;
+      }
+      if (this.buf[6] !== IMPROV_VERSION) {
+        // This may be a false-positive magic sequence in log text. Drop only
+        // its first byte so a later valid header remains available to search.
+        this.buf = this.buf.slice(1);
+        continue;
       }
       const len = this.buf[8];
       // A frame ends at the checksum byte. The trailing newline that senders
@@ -252,6 +259,9 @@ export class ImprovEngine {
       return;
     }
     if (packet.type === ImprovType.RPCResult && this.pending) {
+      if (packet.payload[0] !== this.pending.command) {
+        return;
+      }
       this.pending.results.push(packet);
       if (this.pending.isTerminal(packet)) {
         this.resolvePending();
@@ -279,6 +289,15 @@ export class ImprovEngine {
     reject(err);
   }
 
+  private rejectPendingIfCurrent(pending: PendingResolver, err: Error): void {
+    if (this.pending !== pending) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pending = null;
+    pending.reject(err);
+  }
+
   /**
    * Send an RPC command and collect result packets until `isTerminal` accepts
    * one (default: the first result).
@@ -292,20 +311,36 @@ export class ImprovEngine {
       throw new ImprovError_('Another Improv command is already in flight');
     }
     const timeoutMs = opts.timeoutMs ?? this.defaultTimeoutMs;
+    let pending!: PendingResolver;
     const promise = new Promise<ImprovPacket[]>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending = null;
-        reject(new ImprovError_('Improv command timed out — no response from device'));
+        this.rejectPendingIfCurrent(
+          pending,
+          new ImprovError_('Improv command timed out — no response from device'),
+        );
       }, timeoutMs);
-      this.pending = {
+      pending = {
+        command,
         resolve,
         reject,
         results: [],
         isTerminal: opts.isTerminal ?? (() => true),
         timer,
       };
+      this.pending = pending;
     });
-    await this.write(encodeRPC(command, commandData));
+    // Keep an immediate rejection handler attached while the write is in
+    // flight. The original promise is still returned when the write succeeds.
+    void promise.catch(() => {});
+    try {
+      await this.write(encodeRPC(command, commandData));
+    } catch (err) {
+      this.rejectPendingIfCurrent(
+        pending,
+        err instanceof Error ? err : new Error(String(err)),
+      );
+      throw err;
+    }
     return promise;
   }
 
@@ -377,6 +412,18 @@ export interface ImprovTransport {
   setRxInterceptor(fn: ((data: Buffer) => void) | null): void;
 }
 
+const improvSessionQueues = new WeakMap<object, Promise<void>>();
+const activeImprovSessions = new WeakMap<object, { owner: symbol; cancel: () => void; done: Promise<void> }>();
+
+/** Abort the active Improv command and wait until it releases the transport. */
+export async function cancelImprovSession(transport: ImprovTransport): Promise<void> {
+  const active = activeImprovSessions.get(transport);
+  if (active) {
+    active.cancel();
+    await active.done;
+  }
+}
+
 /**
  * Run `fn` with an {@link ImprovEngine} wired to `transport`. Installs an RX
  * interceptor for the duration and always clears it (and disposes the engine)
@@ -390,12 +437,39 @@ export async function withImprovSession<T>(
   if (!transport.isConnected) {
     throw new ImprovError_('Serial port not connected');
   }
+  const previous = improvSessionQueues.get(transport) ?? Promise.resolve();
+  let releaseQueue!: () => void;
+  const queueEntry = new Promise<void>((resolve) => {
+    releaseQueue = resolve;
+  });
+  improvSessionQueues.set(transport, previous.then(() => queueEntry));
+  await previous;
+
+  if (!transport.isConnected) {
+    releaseQueue();
+    throw new ImprovError_('Serial port not connected');
+  }
   const engine = new ImprovEngine((data) => transport.writeBytes(data), timeoutMs);
-  transport.setRxInterceptor((data) => engine.feed(data));
+  const owner = Symbol('Improv session');
+  let finishSession!: () => void;
+  const done = new Promise<void>((resolve) => { finishSession = resolve; });
+  activeImprovSessions.set(transport, { owner, cancel: () => engine.dispose(), done });
   try {
+    transport.setRxInterceptor((data) => engine.feed(data));
     return await fn(engine);
   } finally {
-    transport.setRxInterceptor(null);
-    engine.dispose();
+    try {
+      if (activeImprovSessions.get(transport)?.owner === owner) {
+        try {
+          transport.setRxInterceptor(null);
+        } finally {
+          activeImprovSessions.delete(transport);
+        }
+      }
+    } finally {
+      engine.dispose();
+      finishSession();
+      releaseQueue();
+    }
   }
 }
