@@ -75,6 +75,10 @@ export class SerialPortManager extends vscode.Disposable {
   private _suspendedPath: string | undefined;
   private _suspendedBaudRate: number | undefined;
 
+  // Optional raw-RX interceptor. When set, incoming bytes are delivered here
+  // instead of the normal _onData consumers (used by Improv provisioning).
+  private _rxInterceptor: ((data: Buffer) => void) | null = null;
+
   constructor(outputChannel?: vscode.OutputChannel) {
     super(() => this.dispose());
     this.ownsLog = !outputChannel;
@@ -443,6 +447,13 @@ export class SerialPortManager extends vscode.Disposable {
           if (this.port !== portInstance) {
             return;
           }
+          // While an RX interceptor is installed (e.g. Improv provisioning),
+          // raw bytes are routed to it and withheld from the normal monitor /
+          // crash-capturer / MCP consumers.
+          if (this._rxInterceptor) {
+            this._rxInterceptor(data);
+            return;
+          }
           this._onData.fire(data);
         });
         // Capture device identity BEFORE firing connection-change / resolving,
@@ -657,6 +668,35 @@ export class SerialPortManager extends vscode.Disposable {
         }
       });
     });
+  }
+
+  /**
+   * Write raw bytes to the port. Unlike {@link sendData} (which takes text),
+   * this transmits a Buffer verbatim — used for binary protocols such as the
+   * Improv-WiFi framing.
+   */
+  async writeBytes(data: Buffer): Promise<void> {
+    if (!this.port || !this._isConnected) {
+      throw new Error('Serial port not connected');
+    }
+    return new Promise((resolve, reject) => {
+      this.port!.write(data, (err) => {
+        if (err) {
+          reject(err);
+        } else {
+          this.port!.drain((drainErr) => (drainErr ? reject(drainErr) : resolve()));
+        }
+      });
+    });
+  }
+
+  /**
+   * Install (or clear with `null`) a raw-RX interceptor. While set, incoming
+   * serial bytes are delivered to `fn` and withheld from the normal monitor,
+   * crash-capturer and MCP consumers. Always clear it in a `finally`.
+   */
+  setRxInterceptor(fn: ((data: Buffer) => void) | null): void {
+    this._rxInterceptor = fn;
   }
 
   /**

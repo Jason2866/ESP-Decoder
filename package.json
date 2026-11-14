@@ -88,6 +88,16 @@
       {
         "command": "esp-decoder.clearOutput",
         "title": "ESP Decoder: Clear Output"
+      },
+      {
+        "command": "esp-decoder.copyMcpUrl",
+        "title": "ESP Decoder: Copy MCP Server URL"
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "espDecoderMcpUpload",
+        "properties": {}
       }
     ],
     "configuration": {
@@ -252,6 +262,24 @@
           "type": "boolean",
           "default": false,
           "description": "Emit verbose diagnostic messages (e.g. internal state of the serial-port manager, auto-reconnect classification) to the ESP Decoder output channel. Enable when troubleshooting; leave off for normal use."
+        },
+        "esp-decoder.mcp.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run an MCP (Model Context Protocol) server on localhost so AI agents (e.g. Claude Code) can drive the serial monitor: connect/disconnect, read the log, upload firmware, and decode crashes. The endpoint is unauthenticated and bound to 127.0.0.1 only."
+        },
+        "esp-decoder.mcp.port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 37373,
+          "description": "TCP port for the MCP server (streamable HTTP at http://127.0.0.1:<port>/mcp). Use a per-workspace override when running multiple VS Code windows."
+        },
+        "esp-decoder.improv.timeout": {
+          "type": "integer",
+          "minimum": 1000,
+          "default": 30000,
+          "description": "Timeout (ms) for each Improv-WiFi serial command (device info, network scan, provisioning). Applies to the WiFi provisioning button and the provision_wifi MCP tool."
         }
       }
     }
@@ -268,7 +296,9 @@
     "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.5"
   },
   "dependencies": {
-    "serialport": "^13.0.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "serialport": "^13.0.0",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
