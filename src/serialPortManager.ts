@@ -22,12 +22,14 @@ export class SerialPortManager extends vscode.Disposable {
   private _selectedPath: string | undefined;
   private _baudRate: number;
   private _isConnected = false;
+  private _connectionIdentity: symbol | undefined;
   private readonly log: vscode.OutputChannel;
   private readonly ownsLog: boolean;
 
   // Connection gating to prevent race conditions
   private _connectPromise: Promise<boolean> | null = null;
   private _connectGeneration = 0; // Incremented on each connect attempt
+  private _uploadOwner: symbol | null = null;
 
   // Identity of the currently/last connected device — used to match the same
   // physical board when it re-enumerates (e.g. native USB-CDC after reset).
@@ -75,6 +77,10 @@ export class SerialPortManager extends vscode.Disposable {
   private _suspendedPath: string | undefined;
   private _suspendedBaudRate: number | undefined;
 
+  // Optional raw-RX interceptor. When set, incoming bytes are delivered here
+  // instead of the normal _onData consumers (used by Improv provisioning).
+  private _rxInterceptor: ((data: Buffer) => void) | null = null;
+
   constructor(outputChannel?: vscode.OutputChannel) {
     super(() => this.dispose());
     this.ownsLog = !outputChannel;
@@ -93,6 +99,35 @@ export class SerialPortManager extends vscode.Disposable {
 
   get isConnected(): boolean {
     return this._isConnected;
+  }
+
+  /** Unique identity for the currently open serial connection. */
+  get connectionIdentity(): symbol | undefined {
+    return this._connectionIdentity;
+  }
+
+  get uploadInProgress(): boolean {
+    return this._uploadOwner !== null;
+  }
+
+  /** Reserve the serial port across an upload and its recovery reconnect. */
+  acquireUploadOwnership(): { token: symbol; release: () => void } {
+    if (this._uploadOwner) {
+      throw new Error('An upload is already in progress');
+    }
+    if (this._connectPromise) {
+      throw new Error('Cannot start an upload while a serial connection is in progress');
+    }
+    const owner = Symbol('serial upload');
+    this._uploadOwner = owner;
+    return {
+      token: owner,
+      release: () => {
+        if (this._uploadOwner === owner) {
+          this._uploadOwner = null;
+        }
+      },
+    };
   }
 
   /**
@@ -250,7 +285,11 @@ export class SerialPortManager extends vscode.Disposable {
     return this._baudRate;
   }
 
-  async connect(): Promise<boolean> {
+  async connect(uploadToken?: symbol): Promise<boolean> {
+    if (this._uploadOwner && this._uploadOwner !== uploadToken) {
+      this.log.appendLine('[ESP Decoder] Connection rejected while firmware upload owns the serial port');
+      return false;
+    }
     // Gate connection initiation - if a connection is already in progress, wait for it.
     // The promise is created and stored BEFORE any await so concurrent callers joining
     // after this point will always find it and share the same attempt.
@@ -396,6 +435,7 @@ export class SerialPortManager extends vscode.Disposable {
           this._onError.fire(disconnectError);
         }
       }
+      this._connectionIdentity = undefined;
       this.port = null;
       if (this._isConnected) {
         this._isConnected = false;
@@ -443,6 +483,13 @@ export class SerialPortManager extends vscode.Disposable {
           if (this.port !== portInstance) {
             return;
           }
+          // While an RX interceptor is installed (e.g. Improv provisioning),
+          // raw bytes are routed to it and withheld from the normal monitor /
+          // crash-capturer / MCP consumers.
+          if (this._rxInterceptor) {
+            this._rxInterceptor(data);
+            return;
+          }
           this._onData.fire(data);
         });
         // Capture device identity BEFORE firing connection-change / resolving,
@@ -458,6 +505,7 @@ export class SerialPortManager extends vscode.Disposable {
               return;
             }
             this._isConnected = true;
+            this._connectionIdentity = Symbol('serial connection');
             if (this._isReconnecting) {
               this.clearStabilityTimer();
               this._stabilityTimer = setTimeout(() => {
@@ -573,6 +621,7 @@ export class SerialPortManager extends vscode.Disposable {
     return new Promise<void>((resolve, reject) => {
       if (!this.port || !this._isConnected) {
         this._isConnected = false;
+        this._connectionIdentity = undefined;
         this._userInitiatedDisconnect = false;
         this._onConnectionChange.fire(false);
         this._onDisconnect.fire({ userInitiated: true, suspended: false });
@@ -660,6 +709,36 @@ export class SerialPortManager extends vscode.Disposable {
   }
 
   /**
+   * Write raw bytes to the port. Unlike {@link sendData} (which takes text),
+   * this transmits a Buffer verbatim — used for binary protocols such as the
+   * Improv-WiFi framing.
+   */
+  async writeBytes(data: Buffer): Promise<void> {
+    if (!this.port || !this._isConnected) {
+      throw new Error('Serial port not connected');
+    }
+    const port = this.port;
+    return new Promise((resolve, reject) => {
+      port.write(data, (err) => {
+        if (err) {
+          reject(err);
+        } else {
+          port.drain((drainErr) => (drainErr ? reject(drainErr) : resolve()));
+        }
+      });
+    });
+  }
+
+  /**
+   * Install (or clear with `null`) a raw-RX interceptor. While set, incoming
+   * serial bytes are delivered to `fn` and withheld from the normal monitor,
+   * crash-capturer and MCP consumers. Always clear it in a `finally`.
+   */
+  setRxInterceptor(fn: ((data: Buffer) => void) | null): void {
+    this._rxInterceptor = fn;
+  }
+
+  /**
    * Temporarily release the serial port so another extension (e.g. pioarduino)
    * can use it for flashing. The current connection state is saved so that
    * {@link reacquirePort} can restore it afterwards.
@@ -682,7 +761,7 @@ export class SerialPortManager extends vscode.Disposable {
    * Re-open the serial port that was previously released via
    * {@link releasePort}. No-op if there was no suspended connection.
    */
-  async reacquirePort(): Promise<void> {
+  async reacquirePort(uploadToken?: symbol): Promise<void> {
     if (!this._suspendedPath) {
       return;
     }
@@ -695,7 +774,7 @@ export class SerialPortManager extends vscode.Disposable {
     this._baudRate = this._suspendedBaudRate ?? this._baudRate;
     // Only clear suspended state after a successful connect so that
     // callers (e.g. reacquireWithRetry) can retry on failure.
-    const connected = await this.connect();
+    const connected = await this.connect(uploadToken);
     if (!connected) {
       throw new Error(`Failed to reopen serial port ${this._selectedPath}`);
     }
@@ -824,6 +903,7 @@ export class SerialPortManager extends vscode.Disposable {
 
   dispose(): void {
     this.cancelReconnect();
+    this._connectionIdentity = undefined;
     this._connectPromise = null;
     this._connectGeneration++;
     if (this.port && this._isConnected) {

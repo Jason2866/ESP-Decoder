@@ -10,6 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
+import { ImprovSessionCancellation } from '../improvWiFi';
 
 // Mock vscode before importing webviewPanel
 vi.mock('vscode', () => {
@@ -152,6 +153,47 @@ describe('EspDecoderWebviewPanel – PR #42 file opening', () => {
       get: () => [],
       configurable: true,
     });
+  });
+
+  it('scopes Improv session IDs to their webview instance', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    internal.liveWebviewInstances.add(10);
+    internal.liveWebviewInstances.add(11);
+
+    await internal.handleImprovStart(10, 1);
+    await internal.handleImprovStart(10, 1);
+    await internal.handleImprovStart(11, 1);
+
+    expect(internal.improvGenerations.get(10)).toBe(1);
+    expect(internal.improvGenerations.get(11)).toBe(1);
+    internal.cancelImprovForWebview(10);
+    internal.cancelImprovForWebview(11);
+  });
+
+  it('rejects provisioning when the serial connection changed after discovery', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    const webviewInstanceId = 12;
+    const sessionId = 1;
+    internal.activeImprovSessions.set(webviewInstanceId, sessionId);
+    internal.improvCancellations.set(webviewInstanceId, {
+      sessionId,
+      cancellation: new ImprovSessionCancellation(),
+    });
+    internal.improvConnectionIdentities.set(webviewInstanceId, Symbol('discovery connection'));
+    internal.serialManager._isConnected = true;
+    internal.serialManager._connectionIdentity = Symbol('current connection');
+    const post = vi.spyOn(internal, 'postImprovMessage').mockImplementation(() => {});
+
+    await internal.handleImprovProvision(webviewInstanceId, sessionId, 'ssid', 'password');
+
+    expect(post).toHaveBeenCalledWith(webviewInstanceId, expect.objectContaining({
+      type: 'improvError',
+      sessionId,
+      message: expect.stringMatching(/scan again/i),
+    }));
+    expect(internal.improvConnectionIdentities.has(webviewInstanceId)).toBe(false);
   });
 
   describe('resolveSourcePath', () => {
