@@ -17,7 +17,7 @@ import {
   encodeRPC,
   IMPROV_HEADER,
   IMPROV_VERSION,
-  cancelImprovSession,
+  ImprovSessionCancellation,
   withImprovSession,
 } from '../improvWiFi';
 
@@ -275,6 +275,8 @@ describe('withImprovSession', () => {
     let interceptor: ((d: Buffer) => void) | null = null;
     const transport = {
       isConnected: true,
+      connectionIdentity: Symbol('test connection'),
+      onConnectionChange: vi.fn(() => ({ dispose: vi.fn() })),
       writeBytes: vi.fn(async (data: Buffer) => {
         // echo a device-info reply back through the interceptor
         interceptor?.(
@@ -296,6 +298,8 @@ describe('withImprovSession', () => {
   it('clears the interceptor even when the body throws', async () => {
     const transport = {
       isConnected: true,
+      connectionIdentity: Symbol('test connection'),
+      onConnectionChange: vi.fn(() => ({ dispose: vi.fn() })),
       writeBytes: vi.fn(async () => {}),
       setRxInterceptor: vi.fn(),
     };
@@ -310,6 +314,8 @@ describe('withImprovSession', () => {
   it('throws if the transport is not connected', async () => {
     const transport = {
       isConnected: false,
+      connectionIdentity: undefined,
+      onConnectionChange: vi.fn(() => ({ dispose: vi.fn() })),
       writeBytes: vi.fn(),
       setRxInterceptor: vi.fn(),
     };
@@ -322,6 +328,8 @@ describe('withImprovSession', () => {
     let finishFirst!: () => void;
     const transport = {
       isConnected: true,
+      connectionIdentity: Symbol('test connection'),
+      onConnectionChange: vi.fn(() => ({ dispose: vi.fn() })),
       writeBytes: vi.fn(async () => {}),
       setRxInterceptor: vi.fn((fn: ((d: Buffer) => void) | null) => { interceptor = fn; }),
     };
@@ -343,13 +351,113 @@ describe('withImprovSession', () => {
     let interceptor: ((d: Buffer) => void) | null = null;
     const transport = {
       isConnected: true,
+      connectionIdentity: Symbol('test connection'),
+      onConnectionChange: vi.fn(() => ({ dispose: vi.fn() })),
+      writeBytes: vi.fn(async () => {}),
+      setRxInterceptor: vi.fn((fn: ((d: Buffer) => void) | null) => { interceptor = fn; }),
+    };
+    const cancellation = new ImprovSessionCancellation();
+    const session = withImprovSession(transport, 1000, (engine) => engine.requestInfo(), cancellation);
+    await Promise.resolve();
+    await Promise.resolve();
+    await cancellation.cancel();
+    await expect(session).rejects.toThrow(/session closed/i);
+    expect(interceptor).toBeNull();
+  });
+
+  it('does not let a finished dialog handle cancel a later transport session', async () => {
+    let interceptor: ((d: Buffer) => void) | null = null;
+    let markInstalled!: () => void;
+    const installed = new Promise<void>((resolve) => { markInstalled = resolve; });
+    const transport = {
+      isConnected: true,
+      connectionIdentity: Symbol('test connection'),
+      onConnectionChange: vi.fn(() => ({ dispose: vi.fn() })),
+      writeBytes: vi.fn(async () => {}),
+      setRxInterceptor: vi.fn((fn: ((d: Buffer) => void) | null) => {
+        interceptor = fn;
+        if (fn) { markInstalled(); }
+      }),
+    };
+    const dialogCancellation = new ImprovSessionCancellation();
+    await withImprovSession(transport, 1000, async () => 'discovery complete', dialogCancellation);
+
+    const otherOperation = withImprovSession(transport, 1000, (engine) => engine.requestInfo());
+    await installed;
+    await dialogCancellation.cancel();
+    interceptor?.(frame(ImprovType.RPCResult, rpcResult(ImprovRPCCommand.RequestDeviceInformation, 'fw', 'v', 'chip', 'name')));
+
+    await expect(otherOperation).resolves.toMatchObject({ firmware: 'fw' });
+  });
+
+  it('cancels a queued operation before its callback can send a command', async () => {
+    let finishFirst!: () => void;
+    const transport = {
+      isConnected: true,
+      connectionIdentity: Symbol('test connection'),
+      onConnectionChange: vi.fn(() => ({ dispose: vi.fn() })),
+      writeBytes: vi.fn(async () => {}),
+      setRxInterceptor: vi.fn(),
+    };
+    const first = withImprovSession(transport, 1000, () => new Promise<void>((resolve) => { finishFirst = resolve; }));
+    await Promise.resolve();
+    const cancellation = new ImprovSessionCancellation();
+    const callback = vi.fn(async () => 'should not run');
+    const queued = withImprovSession(transport, 1000, callback, cancellation);
+    await Promise.resolve();
+    await cancellation.cancel();
+    finishFirst();
+    await first;
+    await expect(queued).rejects.toThrow(/cancelled/i);
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('rejects a queued session if the serial connection identity changes', async () => {
+    let connectionChanged!: (connected: boolean) => void;
+    const connectionIdentity = Symbol('original connection');
+    const transport = {
+      isConnected: true,
+      connectionIdentity,
+      onConnectionChange: vi.fn((listener: (connected: boolean) => void) => {
+        connectionChanged = listener;
+        return { dispose: vi.fn() };
+      }),
+      writeBytes: vi.fn(async () => {}),
+      setRxInterceptor: vi.fn(),
+    };
+    const first = withImprovSession(transport, 1000, (engine) => engine.requestInfo());
+    const firstAssertion = expect(first).rejects.toThrow(/session closed/i);
+    await Promise.resolve();
+    const callback = vi.fn(async () => 'should not run');
+    const queued = withImprovSession(transport, 1000, callback);
+    const queuedAssertion = expect(queued).rejects.toThrow(/connection changed/i);
+    await Promise.resolve();
+    transport.connectionIdentity = Symbol('reconnected');
+    connectionChanged(false);
+    await firstAssertion;
+    await queuedAssertion;
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('disposes an active session when the accepted connection closes', async () => {
+    let interceptor: ((d: Buffer) => void) | null = null;
+    let connectionChanged!: (connected: boolean) => void;
+    const transport = {
+      isConnected: true,
+      connectionIdentity: Symbol('test connection'),
+      onConnectionChange: vi.fn((listener: (connected: boolean) => void) => {
+        connectionChanged = listener;
+        return { dispose: vi.fn() };
+      }),
       writeBytes: vi.fn(async () => {}),
       setRxInterceptor: vi.fn((fn: ((d: Buffer) => void) | null) => { interceptor = fn; }),
     };
     const session = withImprovSession(transport, 1000, (engine) => engine.requestInfo());
     await Promise.resolve();
     await Promise.resolve();
-    await cancelImprovSession(transport);
+    transport.isConnected = false;
+    transport.connectionIdentity = undefined;
+    connectionChanged(false);
     await expect(session).rejects.toThrow(/session closed/i);
     expect(interceptor).toBeNull();
   });

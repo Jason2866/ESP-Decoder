@@ -408,19 +408,49 @@ export class ImprovEngine {
  */
 export interface ImprovTransport {
   isConnected: boolean;
+  /** Unique token for the current open connection; changes across reconnects. */
+  connectionIdentity: symbol | undefined;
+  onConnectionChange(listener: (connected: boolean) => void): { dispose(): void };
   writeBytes(data: Buffer): Promise<void>;
   setRxInterceptor(fn: ((data: Buffer) => void) | null): void;
 }
 
 const improvSessionQueues = new WeakMap<object, Promise<void>>();
-const activeImprovSessions = new WeakMap<object, { owner: symbol; cancel: () => void; done: Promise<void> }>();
 
-/** Abort the active Improv command and wait until it releases the transport. */
-export async function cancelImprovSession(transport: ImprovTransport): Promise<void> {
-  const active = activeImprovSessions.get(transport);
-  if (active) {
-    active.cancel();
-    await active.done;
+/** Cancellation scoped to one UI operation, never to the shared transport. */
+export class ImprovSessionCancellation {
+  private _cancelled = false;
+  private active?: { owner: symbol; cancel: () => void; done: Promise<void> };
+
+  get cancelled(): boolean {
+    return this._cancelled;
+  }
+
+  cancel(): Promise<void> {
+    this._cancelled = true;
+    const active = this.active;
+    if (active) {
+      active.cancel();
+      return active.done;
+    }
+    return Promise.resolve();
+  }
+
+  assertNotCancelled(): void {
+    if (this._cancelled) {
+      throw new ImprovError_('Improv session cancelled');
+    }
+  }
+
+  attach(owner: symbol, cancel: () => void, done: Promise<void>): void {
+    this.assertNotCancelled();
+    this.active = { owner, cancel, done };
+  }
+
+  detach(owner: symbol): void {
+    if (this.active?.owner === owner) {
+      this.active = undefined;
+    }
   }
 }
 
@@ -433,8 +463,11 @@ export async function withImprovSession<T>(
   transport: ImprovTransport,
   timeoutMs: number,
   fn: (engine: ImprovEngine) => Promise<T>,
+  cancellation?: ImprovSessionCancellation,
 ): Promise<T> {
-  if (!transport.isConnected) {
+  cancellation?.assertNotCancelled();
+  const connectionIdentity = transport.connectionIdentity;
+  if (!transport.isConnected || connectionIdentity === undefined) {
     throw new ImprovError_('Serial port not connected');
   }
   const previous = improvSessionQueues.get(transport) ?? Promise.resolve();
@@ -445,28 +478,41 @@ export async function withImprovSession<T>(
   improvSessionQueues.set(transport, previous.then(() => queueEntry));
   await previous;
 
-  if (!transport.isConnected) {
+  try {
+    cancellation?.assertNotCancelled();
+    if (!transport.isConnected || transport.connectionIdentity !== connectionIdentity) {
+      throw new ImprovError_('Serial connection changed while waiting for Improv session');
+    }
+  } catch (err) {
     releaseQueue();
-    throw new ImprovError_('Serial port not connected');
+    throw err;
   }
   const engine = new ImprovEngine((data) => transport.writeBytes(data), timeoutMs);
   const owner = Symbol('Improv session');
   let finishSession!: () => void;
   const done = new Promise<void>((resolve) => { finishSession = resolve; });
-  activeImprovSessions.set(transport, { owner, cancel: () => engine.dispose(), done });
+  let connectionInvalidated = false;
+  const onConnectionChange = transport.onConnectionChange((connected) => {
+    if (!connected || transport.connectionIdentity !== connectionIdentity) {
+      connectionInvalidated = true;
+      engine.dispose();
+    }
+  });
   try {
+    cancellation?.attach(owner, () => engine.dispose(), done);
     transport.setRxInterceptor((data) => engine.feed(data));
-    return await fn(engine);
+    const result = await fn(engine);
+    if (connectionInvalidated || transport.connectionIdentity !== connectionIdentity) {
+      throw new ImprovError_('Serial connection changed during Improv session');
+    }
+    cancellation?.assertNotCancelled();
+    return result;
   } finally {
     try {
-      if (activeImprovSessions.get(transport)?.owner === owner) {
-        try {
-          transport.setRxInterceptor(null);
-        } finally {
-          activeImprovSessions.delete(transport);
-        }
-      }
+      onConnectionChange.dispose();
+      transport.setRxInterceptor(null);
     } finally {
+      cancellation?.detach(owner);
       engine.dispose();
       finishSession();
       releaseQueue();

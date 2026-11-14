@@ -22,6 +22,7 @@ export class SerialPortManager extends vscode.Disposable {
   private _selectedPath: string | undefined;
   private _baudRate: number;
   private _isConnected = false;
+  private _connectionIdentity: symbol | undefined;
   private readonly log: vscode.OutputChannel;
   private readonly ownsLog: boolean;
 
@@ -98,6 +99,11 @@ export class SerialPortManager extends vscode.Disposable {
 
   get isConnected(): boolean {
     return this._isConnected;
+  }
+
+  /** Unique identity for the currently open serial connection. */
+  get connectionIdentity(): symbol | undefined {
+    return this._connectionIdentity;
   }
 
   get uploadInProgress(): boolean {
@@ -429,6 +435,7 @@ export class SerialPortManager extends vscode.Disposable {
           this._onError.fire(disconnectError);
         }
       }
+      this._connectionIdentity = undefined;
       this.port = null;
       if (this._isConnected) {
         this._isConnected = false;
@@ -498,6 +505,7 @@ export class SerialPortManager extends vscode.Disposable {
               return;
             }
             this._isConnected = true;
+            this._connectionIdentity = Symbol('serial connection');
             if (this._isReconnecting) {
               this.clearStabilityTimer();
               this._stabilityTimer = setTimeout(() => {
@@ -613,6 +621,7 @@ export class SerialPortManager extends vscode.Disposable {
     return new Promise<void>((resolve, reject) => {
       if (!this.port || !this._isConnected) {
         this._isConnected = false;
+        this._connectionIdentity = undefined;
         this._userInitiatedDisconnect = false;
         this._onConnectionChange.fire(false);
         this._onDisconnect.fire({ userInitiated: true, suspended: false });
@@ -894,6 +903,7 @@ export class SerialPortManager extends vscode.Disposable {
 
   dispose(): void {
     this.cancelReconnect();
+    this._connectionIdentity = undefined;
     this._connectPromise = null;
     this._connectGeneration++;
     if (this.port && this._isConnected) {

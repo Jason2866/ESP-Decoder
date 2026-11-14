@@ -154,6 +154,22 @@ describe('EspDecoderWebviewPanel – PR #42 file opening', () => {
     });
   });
 
+  it('scopes Improv session IDs to their webview instance', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    internal.liveWebviewInstances.add(10);
+    internal.liveWebviewInstances.add(11);
+
+    await internal.handleImprovStart(10, 1);
+    await internal.handleImprovStart(10, 1);
+    await internal.handleImprovStart(11, 1);
+
+    expect(internal.improvGenerations.get(10)).toBe(1);
+    expect(internal.improvGenerations.get(11)).toBe(1);
+    internal.cancelImprovForWebview(10);
+    internal.cancelImprovForWebview(11);
+  });
+
   describe('resolveSourcePath', () => {
     it('returns absolute path as-is when file exists', async () => {
       const testDir = path.dirname(fileURLToPath(import.meta.url));

@@ -10,8 +10,8 @@ extension). The serial port, log buffer, and crash state are shared with the
 extension's webview — the user sees everything you do.
 
 If the tools are missing: the user must set `"esp-decoder.mcp.enabled": true`
-in VS Code and run
-`claude mcp add --transport http esp-decoder http://127.0.0.1:37373/mcp`.
+in VS Code, then use **ESP Decoder: Copy MCP Server URL** to get the configured
+endpoint for `claude mcp add --transport http esp-decoder <copied-url>`.
 
 ## Quick start
 
@@ -54,11 +54,17 @@ After editing firmware source:
 
 1. `upload_firmware {environment: "esp32dev"}` — omit `environment` when the
    project has exactly one; on an "ambiguous" error call `list_environments`.
-   The serial port is released and reconnected automatically; the build runs
+   Environment discovery requires a built ELF, so environments without one
+   are omitted; build a missing environment before selecting it. The serial
+   port is released and a reconnect is attempted after upload; the build runs
    as a visible VS Code task (can take minutes).
 2. On `success: false`, read `outputTail` for the compiler/flasher error.
-3. Verify: `read_serial` from the latest cursor and confirm the new boot log
-   (reset reason, app version) — then watch for the original crash to be gone.
+3. Check `get_status.connected`. If it is false, call `connect` before reading
+   serial output; a successful upload does not guarantee that the monitor
+   reconnected.
+4. Once connected, call `read_serial` and save its `next_cursor`, then call
+   `hard_reset` and read again from the saved cursor. Confirm the new boot log
+   (reset reason, app version), then watch for the original crash to be gone.
 
 ## Cautions
 
