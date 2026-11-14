@@ -1,0 +1,323 @@
+import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
+import { spawn, type ChildProcess } from 'child_process';
+import { core as pioCore } from 'pioarduino-node-helpers';
+import { findPioEnvironments } from './pioIntegration';
+import { findEspIdfBuilds } from './espIdfIntegration';
+import { SerialPortManager } from './serialPortManager';
+
+export interface UploadResult {
+  success: boolean;
+  exitCode: number | null;
+  durationMs: number;
+  /** Last ~8 KB of combined stdout/stderr from the upload tool. */
+  outputTail: string;
+}
+
+const UPLOAD_TIMEOUT_MS = 10 * 60_000;
+const TAIL_LIMIT_BYTES = 8 * 1024;
+
+/** Task definition type — must match the `taskDefinitions` contribution. */
+export const MCP_UPLOAD_TASK_TYPE = 'espDecoderMcpUpload';
+
+let uploadInFlight = false;
+
+/** Resolve the pio executable from the pioarduino penv, falling back to PATH. */
+function findPioBinary(): string {
+  try {
+    const binDir = pioCore.getEnvBinDir();
+    const candidate = path.join(binDir, process.platform === 'win32' ? 'pio.exe' : 'pio');
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  } catch {
+    // fall through to PATH lookup
+  }
+  return 'pio';
+}
+
+/** Resolve the esptool executable from PlatformIO's Python environment or PATH. */
+function findEsptoolBinary(): string {
+  const executableNames =
+    process.platform === 'win32' ? ['esptool.exe', 'esptool.py'] : ['esptool', 'esptool.py'];
+  try {
+    const binDir = pioCore.getEnvBinDir();
+    for (const name of executableNames) {
+      const candidate = path.join(binDir, name);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  } catch {
+    // fall through to PATH lookup
+  }
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+    for (const name of executableNames) {
+      const candidate = path.join(dir, name);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  throw new Error('esptool was not found in the PlatformIO environment or PATH');
+}
+
+/** Resolve an in-workspace merged image for direct esptool flashing. */
+function resolveFirmwareFileCommand(
+  workspaceFolder: string,
+  firmwarePath: string,
+  uploadPort: string | undefined
+): { command: string; args: string[]; label: string } {
+  if (!uploadPort) {
+    throw new Error('Connect to the board before uploading a prebuilt firmware image');
+  }
+
+  const workspaceRealPath = fs.realpathSync(workspaceFolder);
+  const imagePath = path.resolve(workspaceFolder, firmwarePath);
+  const realImagePath = fs.realpathSync(imagePath);
+  const relativeImagePath = path.relative(workspaceRealPath, realImagePath);
+  if (relativeImagePath === '..' || relativeImagePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativeImagePath)) {
+    throw new Error('Prebuilt firmware image must be inside the open workspace');
+  }
+  const imageStat = fs.statSync(realImagePath);
+  if (!imageStat.isFile() || imageStat.size === 0) {
+    throw new Error('Prebuilt firmware image must be a non-empty file');
+  }
+
+  const command = findEsptoolBinary();
+  const args = [
+    '--chip',
+    'auto',
+    '--port',
+    uploadPort,
+    '--baud',
+    '460800',
+    'write-flash',
+    '--flash-size',
+    'detect',
+    '0x0',
+    realImagePath,
+  ];
+  return { command, args, label: `esptool flash (${path.basename(realImagePath)})` };
+}
+
+/**
+ * Resolve the upload command for the workspace: PlatformIO if platformio.ini
+ * environments exist, otherwise ESP-IDF (idf.py flash).
+ */
+async function resolveUploadCommand(
+  workspaceFolder: string,
+  environment: string | undefined,
+  uploadPort: string | undefined
+): Promise<{ command: string; args: string[]; label: string }> {
+  const pioEnvs = await findPioEnvironments(workspaceFolder);
+  if (pioEnvs.length > 0) {
+    const environments = [...new Set(pioEnvs.map((env) => env.environmentName))];
+    let env = environment;
+    if (!env) {
+      if (environments.length === 1) {
+        env = environments[0];
+      } else {
+        throw new Error(
+          `Multiple PlatformIO environments found — specify one of: ${environments.join(', ')}`
+        );
+      }
+    } else if (!environments.includes(env)) {
+      throw new Error(
+        `Unknown PlatformIO environment '${env}' — available: ${environments.join(', ')}`
+      );
+    }
+    const args = ['run', '-e', env, '-t', 'upload'];
+    if (uploadPort) {
+      args.push('--upload-port', uploadPort);
+    }
+    return { command: findPioBinary(), args, label: `pio upload (${env})` };
+  }
+
+  const idfBuilds = await findEspIdfBuilds(workspaceFolder);
+  if (idfBuilds.length > 0) {
+    // idf.py must be on PATH (exported IDF environment).
+    const args = ['flash'];
+    if (uploadPort) {
+      args.push('-p', uploadPort);
+    }
+    return { command: 'idf.py', args, label: 'idf.py flash' };
+  }
+
+  throw new Error(
+    'No PlatformIO environments or ESP-IDF builds found in the workspace — build the project first'
+  );
+}
+
+/**
+ * Run the upload tool as a VS Code task whose Pseudoterminal wraps our own
+ * child process: output is visible in the terminal UI *and* captured for the
+ * tool result (a plain ShellExecution exposes no output programmatically).
+ */
+function executeUploadTask(
+  command: string,
+  args: string[],
+  cwd: string,
+  label: string
+): Promise<{ exitCode: number | null; outputTail: string }> {
+  return new Promise((resolve, reject) => {
+    const writeEmitter = new vscode.EventEmitter<string>();
+    const closeEmitter = new vscode.EventEmitter<number>();
+    let child: ChildProcess | undefined;
+    let tail = '';
+    let settled = false;
+    let timeoutTimer: NodeJS.Timeout | undefined;
+
+    const settle = (exitCode: number | null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+      }
+      closeEmitter.fire(exitCode ?? 1);
+      resolve({ exitCode, outputTail: tail });
+    };
+
+    const appendOutput = (chunk: Buffer) => {
+      const text = chunk.toString('utf8');
+      // Pseudoterminals require CRLF line endings.
+      writeEmitter.fire(text.replace(/\r?\n/g, '\r\n'));
+      tail = (tail + text).slice(-TAIL_LIMIT_BYTES);
+    };
+
+    const pty: vscode.Pseudoterminal = {
+      onDidWrite: writeEmitter.event,
+      onDidClose: closeEmitter.event,
+      open: () => {
+        writeEmitter.fire(`${command} ${args.join(' ')}\r\n`);
+        try {
+          child = spawn(command, args, { cwd });
+        } catch (err) {
+          settled = true;
+          reject(err);
+          closeEmitter.fire(1);
+          return;
+        }
+        child.stdout?.on('data', appendOutput);
+        child.stderr?.on('data', appendOutput);
+        child.on('error', (err) => {
+          if (!settled) {
+            settled = true;
+            closeEmitter.fire(1);
+            reject(err);
+          }
+        });
+        child.on('close', (code) => settle(code));
+        timeoutTimer = setTimeout(() => {
+          tail += '\n[ESP Decoder] Upload timed out — killing process';
+          child?.kill();
+          settle(null);
+        }, UPLOAD_TIMEOUT_MS);
+      },
+      close: () => {
+        // Terminal closed by the user — kill the child; 'close' settles.
+        child?.kill();
+      },
+    };
+
+    const task = new vscode.Task(
+      { type: MCP_UPLOAD_TASK_TYPE },
+      vscode.TaskScope.Workspace,
+      label,
+      'ESP Decoder',
+      new vscode.CustomExecution(async () => pty)
+    );
+    task.presentationOptions = {
+      reveal: vscode.TaskRevealKind.Always,
+      clear: true,
+    };
+
+    vscode.tasks.executeTask(task).then(undefined, (err) => {
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
+  });
+}
+
+/**
+ * Upload firmware via PlatformIO or ESP-IDF, releasing the serial port for
+ * the duration and reacquiring it afterwards (same flow as pioarduino's
+ * onWillUpload/onDidUpload integration).
+ */
+export async function runUpload(
+  serial: SerialPortManager,
+  workspaceFolder: string,
+  environment: string | undefined,
+  firmwarePath: string | undefined,
+  log: vscode.OutputChannel
+): Promise<UploadResult> {
+  if (uploadInFlight) {
+    throw new Error('An upload is already in progress');
+  }
+  uploadInFlight = true;
+  const start = Date.now();
+  let uploadOwnership: ReturnType<SerialPortManager['acquireUploadOwnership']> | undefined;
+  try {
+    uploadOwnership = serial.acquireUploadOwnership();
+    if (firmwarePath && environment) {
+      throw new Error('Choose either a PlatformIO environment or a prebuilt firmware image');
+    }
+    const { command, args, label } = firmwarePath
+      ? resolveFirmwareFileCommand(workspaceFolder, firmwarePath, serial.selectedPath)
+      : await resolveUploadCommand(workspaceFolder, environment, serial.selectedPath);
+
+    log.appendLine(`[ESP Decoder] MCP upload: releasing serial port for ${label}`);
+    await serial.releasePort();
+    const { exitCode, outputTail } = await executeUploadTask(
+      command,
+      args,
+      workspaceFolder,
+      label
+    );
+    return {
+      success: exitCode === 0,
+      exitCode,
+      durationMs: Date.now() - start,
+      outputTail,
+    };
+  } finally {
+    try {
+      if (uploadOwnership) {
+        await reacquireWithRetry(serial, log, uploadOwnership.token);
+      }
+    } finally {
+      uploadOwnership?.release();
+      uploadInFlight = false;
+    }
+  }
+}
+
+/**
+ * Reconnect with a short back-off — the OS may still hold the USB device for
+ * a moment after the upload tool exits (mirrors extension.ts).
+ */
+async function reacquireWithRetry(
+  serial: SerialPortManager,
+  log: vscode.OutputChannel,
+  uploadToken?: symbol,
+  maxAttempts = 5,
+  baseDelayMs = 300
+): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await serial.reacquirePort(uploadToken);
+      return;
+    } catch (err) {
+      if (attempt === maxAttempts) {
+        log.appendLine(`[ESP Decoder] MCP upload: failed to reacquire port: ${err}`);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, baseDelayMs * attempt));
+    }
+  }
+}

@@ -10,6 +10,9 @@ import { CHIP_TARGET_MAP, RISCV_TARGETS } from './chipTargets';
  * Detected PlatformIO environment with ELF and tool paths.
  */
 export interface PioEnvironment {
+  /** Configured PlatformIO environment name (shared by its ELF variants). */
+  environmentName: string;
+  /** Display label used when selecting a specific ELF. */
   name: string;
   elfPath: string;
   toolPath?: string;
@@ -765,6 +768,7 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
       const displayName = i === 0 ? envName : `${envName}:${elfName}`;
       
       envs.push({
+        environmentName: envName,
         name: displayName,
         elfPath,
         toolPath,

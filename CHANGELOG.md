@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0] - 2026-11-xx
+
+### Added
+
+- **MCP server** — Added an opt-in localhost MCP endpoint for serial monitoring, crash decoding, firmware upload, and Improv WiFi provisioning.
+- **WiFi provisioning** — Added an Improv serial dialog to query the device, scan networks, and send credentials.
+
 ## [0.29.0] - 2026-11-13
 
 ### Fixed

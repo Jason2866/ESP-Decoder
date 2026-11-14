@@ -5,6 +5,8 @@ import { SerialPortManager } from './serialPortManager';
 import { EspDecoderWebviewPanel, SessionConfig } from './webviewPanel';
 import { findPioEnvironments, getPioBuildDir, selectElfFile, getMonitorBaudRate } from './pioIntegration';
 import { findEspIdfBuilds } from './espIdfIntegration';
+import { EspDecoderMcpHttpServer, McpServerDeps } from './mcpServer';
+import { runUpload } from './mcpUpload';
 
 /** Shape of the public API exported by the pioarduino IDE extension. */
 interface PioarduinoApi {
@@ -77,6 +79,8 @@ export function activate(context: vscode.ExtensionContext) {
       { webviewOptions: { retainContextWhenHidden: true } }
     )
   );
+
+  setupMcpServer(context, serialManager, viewProvider, outputChannel);
 
   // Register commands
   context.subscriptions.push(
@@ -868,6 +872,104 @@ function isEspIdfBuildElf(elfPath: string): boolean {
 
   const lower = elfPath.toLowerCase();
   return lower.endsWith('.elf') && !lower.endsWith('/bootloader.elf') && !lower.endsWith('/partition-table.elf') && !lower.endsWith('\\bootloader.elf') && !lower.endsWith('\\partition-table.elf');
+}
+
+/**
+ * MCP server lifecycle: started when esp-decoder.mcp.enabled is set,
+ * restarted on esp-decoder.mcp.* configuration changes, disposed with the
+ * extension. Localhost-only streamable-HTTP endpoint for AI agents.
+ */
+function setupMcpServer(
+  context: vscode.ExtensionContext,
+  serial: SerialPortManager,
+  panel: EspDecoderWebviewPanel,
+  log: vscode.OutputChannel
+): void {
+  let mcpServer: EspDecoderMcpHttpServer | undefined;
+  let startGeneration = 0;
+
+  const mcpConfig = () => vscode.workspace.getConfiguration('esp-decoder');
+  const isEnabled = () => mcpConfig().get<boolean>('mcp.enabled', false);
+  const getPort = () => mcpConfig().get<number>('mcp.port', 37373);
+  const getWorkspaceFolder = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+  const deps: McpServerDeps = {
+    serial,
+    data: panel,
+    getWorkspaceFolder,
+    log,
+    runUpload: (environment, firmwarePath) => {
+      const folder = getWorkspaceFolder();
+      if (!folder) {
+        return Promise.reject(new Error('No workspace folder open'));
+      }
+      return runUpload(serial, folder, environment, firmwarePath, log);
+    },
+  };
+
+  const start = async () => {
+    if (mcpServer || !isEnabled()) {
+      return;
+    }
+    const generation = ++startGeneration;
+    const port = getPort();
+    const server = new EspDecoderMcpHttpServer(deps);
+    try {
+      await server.start(port);
+      if (generation !== startGeneration || !isEnabled() || getPort() !== port) {
+        server.dispose();
+        return;
+      }
+      mcpServer = server;
+      log.appendLine(`[ESP Decoder] MCP server listening at ${server.url}`);
+      log.appendLine(
+        `[ESP Decoder] Add to Claude Code: claude mcp add --transport http esp-decoder ${server.url}`
+      );
+    } catch (err) {
+      server.dispose();
+      if (generation !== startGeneration || !isEnabled()) {
+        return;
+      }
+      const inUse = (err as NodeJS.ErrnoException)?.code === 'EADDRINUSE';
+      const msg = inUse
+        ? `port ${port} is already in use (another VS Code window?) — set "esp-decoder.mcp.port" as a workspace setting to a free port`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+      log.appendLine(`[ESP Decoder] MCP server failed to start: ${msg}`);
+      vscode.window.showWarningMessage(`ESP Decoder: MCP server failed to start: ${msg}`);
+    }
+  };
+
+  const stop = () => {
+    startGeneration++;
+    mcpServer?.dispose();
+    mcpServer = undefined;
+  };
+
+  if (isEnabled()) {
+    void start();
+  }
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('esp-decoder.mcp')) {
+        stop();
+        if (isEnabled()) {
+          void start();
+        }
+      }
+    }),
+    vscode.commands.registerCommand('esp-decoder.copyMcpUrl', async () => {
+      const url = mcpServer?.url ?? `http://127.0.0.1:${getPort()}/mcp`;
+      await vscode.env.clipboard.writeText(url);
+      const hint = isEnabled()
+        ? `Claude Code: claude mcp add --transport http esp-decoder ${url}`
+        : 'Note: enable "esp-decoder.mcp.enabled" to start the server.';
+      vscode.window.showInformationMessage(`ESP Decoder MCP URL copied. ${hint}`);
+    }),
+    new vscode.Disposable(stop)
+  );
 }
 
 export function deactivate(): void {

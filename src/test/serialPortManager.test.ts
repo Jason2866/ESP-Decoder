@@ -364,5 +364,32 @@ describe('SerialPortManager.filterPorts', () => {
       const second = await manager.connect();
       expect(second).toBe(true);
     });
+
+    it('rejects new connections while upload ownership is held', async () => {
+      const ownership = manager.acquireUploadOwnership();
+      expect(await manager.connect()).toBe(false);
+      ownership.release();
+    });
+  });
+
+  describe('writeBytes', () => {
+    it('drains the port instance captured when the write started', async () => {
+      const secondPort = { write: vi.fn(), drain: vi.fn() };
+      const firstPort = {
+        write: vi.fn((_data: Buffer, callback: (err?: Error | null) => void) => {
+          (manager as unknown as { port: unknown }).port = secondPort;
+          callback(null);
+        }),
+        drain: vi.fn((callback: (err?: Error | null) => void) => callback(null)),
+      };
+      (manager as unknown as { port: unknown }).port = firstPort;
+      (manager as unknown as { _isConnected: boolean })._isConnected = true;
+
+      await manager.writeBytes(Buffer.from([1, 2, 3]));
+
+      expect(firstPort.write).toHaveBeenCalledOnce();
+      expect(firstPort.drain).toHaveBeenCalledOnce();
+      expect(secondPort.drain).not.toHaveBeenCalled();
+    });
   });
 });
