@@ -298,7 +298,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "serialport": "^13.0.0",
-    "zod": "^3.25.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
