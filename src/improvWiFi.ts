@@ -330,16 +330,20 @@ export class ImprovEngine {
       this.pending = pending;
     });
     // Keep an immediate rejection handler attached while the write is in
-    // flight. The original promise is still returned when the write succeeds.
+    // flight. The response timeout remains active even if the write hangs.
     void promise.catch(() => {});
     try {
-      await this.write(encodeRPC(command, commandData));
+      void this.write(encodeRPC(command, commandData)).catch((err) => {
+        this.rejectPendingIfCurrent(
+          pending,
+          err instanceof Error ? err : new Error(String(err)),
+        );
+      });
     } catch (err) {
       this.rejectPendingIfCurrent(
         pending,
         err instanceof Error ? err : new Error(String(err)),
       );
-      throw err;
     }
     return promise;
   }

@@ -266,6 +266,25 @@ describe('command timeout', () => {
     await assertion;
     vi.useRealTimers();
   });
+
+  it('uses the response timeout while the serial write is still pending', async () => {
+    vi.useFakeTimers();
+    const engine = new ImprovEngine(() => new Promise<void>(() => {}), 2000);
+    const response = engine.requestInfo();
+    const assertion = expect(response).rejects.toThrow(/timed out/i);
+    await vi.advanceTimersByTimeAsync(2000);
+    await assertion;
+    vi.useRealTimers();
+  });
+
+  it('settles from the device response without waiting for the serial write', async () => {
+    let engine!: ImprovEngine;
+    engine = new ImprovEngine(() => new Promise<void>(() => {}), 1000);
+    const response = engine.requestInfo();
+    engine.feed(frame(ImprovType.RPCResult, rpcResult(ImprovRPCCommand.RequestDeviceInformation, 'fw', 'v', 'chip', 'name')));
+    await expect(response).resolves.toEqual({ firmware: 'fw', version: 'v', chipFamily: 'chip', name: 'name' });
+    engine.dispose();
+  });
 });
 
 // --- withImprovSession ----------------------------------------------------

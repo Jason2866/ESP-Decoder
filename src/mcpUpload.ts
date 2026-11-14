@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { core as pioCore } from 'pioarduino-node-helpers';
 import { findPioEnvironments } from './pioIntegration';
 import { findEspIdfBuilds } from './espIdfIntegration';
@@ -63,6 +63,18 @@ function findEsptoolBinary(): string {
   throw new Error('esptool was not found in the PlatformIO environment or PATH');
 }
 
+/** Resolve the installed esptool version before releasing the serial port. */
+function findEsptoolVersion(command: string): { major: number; version: string } {
+  const result = spawnSync(command, ['--version'], { encoding: 'utf8', timeout: 5000 });
+  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+  const match = output.match(/\bv?(\d+)\.(\d+)(?:\.(\d+))?/i);
+  if (result.error || result.status !== 0 || !match) {
+    const detail = result.error?.message ?? (output.trim() || `exit code ${result.status}`);
+    throw new Error(`Could not determine esptool version before upload: ${detail}`);
+  }
+  return { major: Number(match[1]), version: match[0] };
+}
+
 /** Resolve an in-workspace merged image for direct esptool flashing. */
 function resolveFirmwareFileCommand(
   workspaceFolder: string,
@@ -86,6 +98,9 @@ function resolveFirmwareFileCommand(
   }
 
   const command = findEsptoolBinary();
+  const { major, version } = findEsptoolVersion(command);
+  const writeFlashCommand = major >= 5 ? 'write-flash' : 'write_flash';
+  const flashSizeOption = major >= 5 ? '--flash-size' : '--flash_size';
   const args = [
     '--chip',
     'auto',
@@ -93,13 +108,13 @@ function resolveFirmwareFileCommand(
     uploadPort,
     '--baud',
     '460800',
-    'write-flash',
-    '--flash-size',
+    writeFlashCommand,
+    flashSizeOption,
     'detect',
     '0x0',
     realImagePath,
   ];
-  return { command, args, label: `esptool flash (${path.basename(realImagePath)})` };
+  return { command, args, label: `esptool ${version} flash (${path.basename(realImagePath)})` };
 }
 
 /**

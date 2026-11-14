@@ -62,9 +62,10 @@ After editing firmware source:
 3. Check `get_status.connected`. If it is false, call `connect` before reading
    serial output; a successful upload does not guarantee that the monitor
    reconnected.
-4. Once connected, call `read_serial` and save its `next_cursor`, then call
-   `hard_reset` and read again from the saved cursor. Confirm the new boot log
-   (reset reason, app version), then watch for the original crash to be gone.
+4. Once connected, call `get_status` and save `latestCursor`, then call
+   `hard_reset` and read with `read_serial {after_cursor: latestCursor}`.
+   Confirm the new boot log (reset reason, app version), then watch for the
+   original crash to be gone.
 
 ## Cautions
 

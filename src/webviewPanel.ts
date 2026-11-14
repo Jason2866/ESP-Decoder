@@ -38,6 +38,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   private readonly improvGenerations = new Map<number, number>();
   private readonly activeImprovSessions = new Map<number, number>();
   private readonly improvCancellations = new Map<number, { sessionId: number; cancellation: ImprovSessionCancellation }>();
+  private readonly improvConnectionIdentities = new Map<number, symbol>();
 
   // Batch serial data before posting to the webview to prevent message-queue flooding.
   // Without batching, a device sending data at 921600 baud can produce thousands of
@@ -93,6 +94,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       this.serialManager.onConnectionChange(async (connected) => {
         this.log.appendLine(`[ConnectionChange] connected=${connected}`);
         if (!connected) {
+          this.improvConnectionIdentities.clear();
           this.cancelSerialFlush();
           // Suspend active log session: close the file but remember settings
           if (this.logStream) {
@@ -385,6 +387,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     this.liveWebviewInstances.delete(webviewInstanceId);
     this.activeImprovSessions.delete(webviewInstanceId);
     this.improvGenerations.delete(webviewInstanceId);
+    this.improvConnectionIdentities.delete(webviewInstanceId);
     const current = this.improvCancellations.get(webviewInstanceId);
     this.improvCancellations.delete(webviewInstanceId);
     void current?.cancellation.cancel();
@@ -404,18 +407,24 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     }
     this.improvGenerations.set(webviewInstanceId, sessionId);
     this.activeImprovSessions.set(webviewInstanceId, sessionId);
+    this.improvConnectionIdentities.delete(webviewInstanceId);
     const cancellation = new ImprovSessionCancellation();
     this.improvCancellations.set(webviewInstanceId, { sessionId, cancellation });
-    if (!this.serialManager.isConnected) {
+    const connectionIdentity = this.serialManager.connectionIdentity;
+    if (!this.serialManager.isConnected || connectionIdentity === undefined) {
       this.postImprovMessage(webviewInstanceId, { type: 'improvError', sessionId, message: 'Connect to a serial port first.' });
       return;
     }
+    this.improvConnectionIdentities.set(webviewInstanceId, connectionIdentity);
     this.postImprovMessage(webviewInstanceId, { type: 'improvProgress', sessionId, message: 'Querying device…' });
     const scanTimeoutMs = Math.max(120000, this.improvTimeoutMs);
     try {
       const result = await withImprovSession(this.serialManager, scanTimeoutMs, async (engine) => {
         if (!this.isActiveImprovSession(webviewInstanceId, sessionId)) {
           throw new Error('Improv discovery was cancelled');
+        }
+        if (this.serialManager.connectionIdentity !== connectionIdentity) {
+          throw new Error('Serial connection changed. Scan again before provisioning.');
         }
         const info = await engine.requestInfo(this.improvTimeoutMs);
         if (!this.isActiveImprovSession(webviewInstanceId, sessionId)) {
@@ -445,6 +454,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       if (!this.isActiveImprovSession(webviewInstanceId, sessionId)) {
         return;
       }
+      if (this.serialManager.connectionIdentity !== connectionIdentity) {
+        this.improvConnectionIdentities.delete(webviewInstanceId);
+        throw new Error('Serial connection changed. Scan again before provisioning.');
+      }
       this.postImprovMessage(webviewInstanceId, {
         type: 'improvScan',
         sessionId,
@@ -473,8 +486,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     if (!cancellation || cancellation.sessionId !== sessionId) {
       return;
     }
-    if (!this.serialManager.isConnected) {
-      this.postImprovMessage(webviewInstanceId, { type: 'improvError', sessionId, message: 'Connect to a serial port first.' });
+    const discoveryIdentity = this.improvConnectionIdentities.get(webviewInstanceId);
+    if (!discoveryIdentity || !this.serialManager.isConnected || discoveryIdentity !== this.serialManager.connectionIdentity) {
+      this.improvConnectionIdentities.delete(webviewInstanceId);
+      this.postImprovMessage(webviewInstanceId, { type: 'improvError', sessionId, message: 'Serial connection changed since discovery. Scan again before provisioning.' });
       return;
     }
     if (!ssid) {
@@ -487,11 +502,15 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         if (!this.isActiveImprovSession(webviewInstanceId, sessionId)) {
           throw new Error('Improv provisioning was cancelled');
         }
+        if (this.serialManager.connectionIdentity !== discoveryIdentity) {
+          throw new Error('Serial connection changed since discovery. Scan again before provisioning.');
+        }
         return engine.provision(ssid, password ?? '');
       }, cancellation.cancellation);
       if (!this.isActiveImprovSession(webviewInstanceId, sessionId)) {
         return;
       }
+      this.improvConnectionIdentities.delete(webviewInstanceId);
       this.postImprovMessage(webviewInstanceId, { type: 'improvResult', sessionId, provisioned: true, nextUrl });
     } catch (err) {
       if (!this.isActiveImprovSession(webviewInstanceId, sessionId)) {
@@ -699,6 +718,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           if (this.isActiveImprovSession(webviewInstanceId, message.sessionId)) {
             this.activeImprovSessions.delete(webviewInstanceId);
           }
+          this.improvConnectionIdentities.delete(webviewInstanceId);
           await current.cancellation.cancel();
           if (this.improvCancellations.get(webviewInstanceId) === current) {
             this.improvCancellations.delete(webviewInstanceId);
