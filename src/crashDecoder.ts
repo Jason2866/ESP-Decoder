@@ -19,6 +19,7 @@ import {
   isParsedGDBLine,
   isGDBLine,
   createCapturer,
+  parseESP32PanicOutput,
 } from './panic';
 import type {
   Capturer,
@@ -26,6 +27,7 @@ import type {
   DecodeOptions,
   DecodeParams,
   DecodeTarget,
+  PanicInfoWithBacktrace,
 } from './panic';
 import { findPioGdbToolPath, getPioPackagesDir } from './pioIntegration';
 import { chipArch, KNOWN_CHIPS } from './chipTargets';
@@ -266,15 +268,25 @@ export async function decodeCrash(
     // ">>>stack>>>" hex dump format (no Backtrace: lines).
     if (crashEvent.kind === 'xtensa') {
       const isEsp8266Stack = />>>stack>>>/.test(crashEvent.rawText) && !/Backtrace:/i.test(crashEvent.rawText);
+      // ESP32-family dumps can contain a register dump per core; select the
+      // panicking core's registers and backtrace so another core's dump
+      // (e.g. core 0 printed before core 1) cannot leak into the result.
+      const xtensaParsed = isEsp8266Stack
+        ? undefined
+        : parseESP32PanicOutput(crashEvent.rawText);
       const candidateAddrs = isEsp8266Stack
         ? extractEsp8266StackAddresses(crashEvent.rawText)
-        : extractXtensaBacktraceAddresses(crashEvent.rawText);
+        : (xtensaParsed?.backtraceAddrs ?? []).map((a) => `0x${a.toString(16)}`);
 
       if (candidateAddrs.length > 0) {
         const addr2linePath = deriveAddr2linePath(toolPath!, log);
         if (addr2linePath) {
-          const faultInfo = parseXtensaFaultInfo(crashEvent.rawText);
-          const regs = parseRegisters(crashEvent.rawText);
+          const faultInfo = isEsp8266Stack
+            ? parseXtensaFaultInfo(crashEvent.rawText)
+            : parseXtensaFaultInfoForCore(crashEvent.rawText, xtensaParsed);
+          const regs = isEsp8266Stack
+            ? parseRegisters(crashEvent.rawText)
+            : (xtensaParsed?.regs ?? {});
           const hasRegs = Object.keys(regs).length > 0;
 
           // Resolve frames and register annotations in parallel
@@ -1512,18 +1524,43 @@ function extractEsp8266StackAddresses(text: string): string[] {
  * Extract PC addresses from Xtensa-style backtrace lines.
  * Format: "Backtrace: 0xPC:0xSP 0xPC:0xSP ..."
  */
-function extractXtensaBacktraceAddresses(text: string): string[] {
-  const btMatch = text.match(/Backtrace:\s*((?:0x[0-9a-fA-F]+:0x[0-9a-fA-F]+\s*)+)/i);
-  if (!btMatch) { return []; }
-  const pairs = btMatch[1].trim().split(/\s+/);
-  const addresses: string[] = [];
-  for (const pair of pairs) {
-    const pc = pair.split(':')[0];
-    if (pc && /^0x[0-9a-fA-F]+$/i.test(pc)) {
-      addresses.push(pc.toLowerCase());
+/**
+ * Xtensa fault info for the panic core: the panic header supplies the
+ * message, while PC/fault fields come from the selected core's registers
+ * (parseESP32PanicOutput already resolves multi-core dumps).
+ */
+function parseXtensaFaultInfoForCore(
+  text: string,
+  parsed: PanicInfoWithBacktrace | undefined,
+): DecodedCrash['faultInfo'] | undefined {
+  const guruMatch = text.match(/Core\s+(\d+)\s+panic'ed\s+\(([^)]+)\)/i);
+  let faultMessage = guruMatch?.[2];
+  const faultCode = parsed?.faultCode;
+
+  if (faultCode !== undefined && faultCode < XTENSA_EXCEPTIONS.length) {
+    const desc = XTENSA_EXCEPTIONS[faultCode];
+    if (desc) {
+      faultMessage = faultMessage
+        ? `${faultMessage} (Exception ${faultCode}: ${desc})`
+        : `Exception ${faultCode}: ${desc}`;
     }
   }
-  return addresses;
+
+  const programCounter =
+    parsed?.programCounter !== undefined ? `0x${parsed.programCounter.toString(16)}` : undefined;
+  const faultAddr =
+    parsed?.faultAddr !== undefined ? `0x${parsed.faultAddr.toString(16)}` : undefined;
+
+  if (faultMessage || programCounter) {
+    return {
+      coreId: parsed?.coreId ?? 0,
+      programCounter,
+      faultAddr,
+      faultCode,
+      faultMessage,
+    };
+  }
+  return undefined;
 }
 
 /**

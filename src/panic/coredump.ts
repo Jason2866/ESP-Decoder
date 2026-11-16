@@ -47,8 +47,8 @@ async function tryRawElfFallback(
       const elfBuffer = raw.subarray(offset, offset + elfTotalSize);
       const tmpDirPath = await fs.mkdtemp(path.join(os.tmpdir(), 'panic-decoder-'));
       const extractedElfPath = path.join(tmpDirPath, 'extracted.elf');
-      await fs.writeFile(extractedElfPath, elfBuffer);
       try {
+        await fs.writeFile(extractedElfPath, elfBuffer);
         return await decodeCoredumpFile(params, extractedElfPath, options, false);
       } finally {
         await fs

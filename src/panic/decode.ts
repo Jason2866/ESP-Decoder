@@ -139,11 +139,35 @@ function equalsGDBLine(left: GDBLine | ParsedGDBLine, right: GDBLine | ParsedGDB
       left.regAddr === right.regAddr &&
       left.lineNumber === right.lineNumber &&
       left.file === right.file &&
-      left.method === right.method
+      left.method === right.method &&
+      frameArgsEqual(left.args, right.args)
     );
   }
 
   return left.regAddr === right.regAddr && left.lineNumber === right.lineNumber;
+}
+
+/**
+ * Frame args distinguish otherwise identical frames (e.g. recursive calls
+ * at the same address with different arguments), so they participate in
+ * dedup equality.
+ */
+function frameArgsEqual(
+  left: ParsedGDBLine['args'],
+  right: ParsedGDBLine['args'],
+): boolean {
+  if (!left?.length && !right?.length) {
+    return true;
+  }
+  if (!left || !right || left.length !== right.length) {
+    return false;
+  }
+  return left.every(
+    (arg, i) =>
+      arg.name === right[i].name &&
+      arg.value === right[i].value &&
+      arg.type === right[i].type,
+  );
 }
 
 function filterFreeRTOSStackLines(result: DecodeResult): DecodeResult {

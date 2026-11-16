@@ -2,6 +2,9 @@ import net from 'node:net';
 import type { Debug, PanicInfoWithStackData } from './types';
 import { gdbRegsInfoRiscvIlp32 } from './panicParse';
 
+/** Upper bound for a single 'm' memory-read packet (64 KiB). */
+const MAX_MEM_READ_SIZE = 0x10000;
+
 export class AbortError extends Error {
   readonly code = 'ABORT_ERR';
   constructor() {
@@ -170,6 +173,12 @@ export class GdbStubServer {
         .slice(1)
         .split(',')
         .map((v) => parseInt(v, 16));
+      if (!Number.isFinite(size) || size > MAX_MEM_READ_SIZE || !Number.isFinite(addr)) {
+        // GDB remote-protocol error reply (E + errno); reject oversized or
+        // malformed reads instead of looping per byte.
+        this.respond('E01', socket);
+        return;
+      }
       this.respondMem(addr, size, socket);
     } else if (command.startsWith('vKill') || command === 'k') {
       // Quit

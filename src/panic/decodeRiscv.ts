@@ -277,16 +277,38 @@ export async function decodeRiscv(
     faultCode: panicInfo.faultCode,
   });
 
-  const [stacktraceLines, [programCounter, faultAddr]] = await Promise.all([
-    fetchStacktraceWithMi(params, panicInfo, options, log),
-    addr2line(params, [panicInfo.programCounter, panicInfo.faultAddr], options),
-  ]);
-  log('addr2line done', { programCounter, faultAddr });
-  stacktraceLines.forEach((line, index) => {
-    log('stacktrace line', index, line);
-  });
+  // Run the MI backtrace and the addr2line lookups under one decode-scoped
+  // abort signal: if either fails, abort the sibling so its GDB processes
+  // shut down instead of lingering until the outer timeout.
+  const decodeAbort = new AbortController();
+  const onOuterAbort = () => decodeAbort.abort();
+  options.signal?.addEventListener('abort', onOuterAbort, { once: true });
+  if (options.signal?.aborted) {
+    decodeAbort.abort();
+  }
+  const childOptions: DecodeOptions = { ...options, signal: decodeAbort.signal };
 
-  return createDecodeResult(panicInfo, programCounter, faultAddr, stacktraceLines);
+  const tasks = [
+    fetchStacktraceWithMi(params, panicInfo, childOptions, log),
+    addr2line(params, [panicInfo.programCounter, panicInfo.faultAddr], childOptions),
+  ] as const;
+
+  try {
+    const [stacktraceLines, [programCounter, faultAddr]] = await Promise.all(tasks);
+    log('addr2line done', { programCounter, faultAddr });
+    stacktraceLines.forEach((line, index) => {
+      log('stacktrace line', index, line);
+    });
+
+    return createDecodeResult(panicInfo, programCounter, faultAddr, stacktraceLines);
+  } catch (err) {
+    decodeAbort.abort();
+    // Let the sibling settle so its GDB child processes exit cleanly.
+    await Promise.allSettled(tasks);
+    throw err;
+  } finally {
+    options.signal?.removeEventListener('abort', onOuterAbort);
+  }
 }
 
 // Re-exported for tests / callers that need the raw parsers.

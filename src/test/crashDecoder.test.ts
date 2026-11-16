@@ -742,6 +742,89 @@ done
   });
 });
 
+// ---------------------------------------------------------------------------
+// Dual-core Xtensa fast-path: the panic core's backtrace/regs must win
+// ---------------------------------------------------------------------------
+describe.skipIf(isWindows)('decodeCrash – dual-core Xtensa fast-path', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-dualcore-'));
+  const binDir = path.join(tmpDir, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+
+  const fakeGdbPath = path.join(binDir, 'xtensa-esp32-elf-gdb');
+  const fakeAddr2linePath = path.join(binDir, 'xtensa-esp32-elf-addr2line');
+
+  // Echo the resolved address into the function name so tests can tell
+  // which core's backtrace addresses were actually resolved.
+  const addr2lineScript = `#!/bin/sh
+for addr in "$@"; do
+  case "$addr" in
+    -* | /* ) continue ;;
+    0x*)
+      echo "$addr"
+      echo "func_$addr"
+      echo "/home/user/project/main.cpp:42"
+      ;;
+  esac
+done
+`;
+
+  fs.writeFileSync(fakeGdbPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  fs.writeFileSync(fakeAddr2linePath, addr2lineScript, { mode: 0o755 });
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const DUAL_CORE_CRASH = [
+    'Guru Meditation Error: Core  1 panic\'ed (LoadProhibited). Exception was unhandled.',
+    '',
+    'Core  0 register dump:',
+    'PC      : 0x40000001  PS      : 0x00060030  A0      : 0x3ffb0001  A1      : 0x3ffb0002',
+    'EXCVADDR: 0x00000000  EXCCAUSE: 0x00000000',
+    '',
+    // Core 0's backtrace appears first but belongs to the non-panicking core.
+    'Backtrace: 0x40000001:0x3ffb0001 0x40000009:0x3ffb0009',
+    '',
+    'Core  1 register dump:',
+    'PC      : 0x40000002  PS      : 0x00060030  A0      : 0x3ffb0002  A1      : 0x3ffb0003',
+    'EXCVADDR: 0x3ffb0004  EXCCAUSE: 0x0000000c',
+    '',
+    'Backtrace: 0x40000002:0x3ffb0002 0x40000003:0x3ffb0003',
+  ].join('\n');
+
+  function makeCrashEvent(): CrashEvent {
+    return {
+      id: 'test-dualcore-001',
+      kind: 'xtensa',
+      lines: DUAL_CORE_CRASH.split('\n').filter((l) => l.trim().length > 0),
+      rawText: DUAL_CORE_CRASH,
+      timestamp: Date.now(),
+    };
+  }
+
+  it('resolves only the panicking core\'s backtrace when core 0 prints first', async () => {
+    const decoded = await decodeCrash(makeCrashEvent(), '/nonexistent/firmware.elf', fakeGdbPath, 'xtensa');
+
+    expect(decoded.toolsMissing).toBeFalsy();
+    const addresses = decoded.stacktrace.map((f) => f.address.toLowerCase());
+    // Core 1's PCs only — core 0's backtrace must not leak in.
+    expect(addresses).toContain('0x40000002');
+    expect(addresses).toContain('0x40000003');
+    expect(addresses).not.toContain('0x40000001');
+    expect(addresses).not.toContain('0x40000009');
+  });
+
+  it('reports the panicking core\'s registers and fault fields', async () => {
+    const decoded = await decodeCrash(makeCrashEvent(), '/nonexistent/firmware.elf', fakeGdbPath, 'xtensa');
+
+    expect(decoded.regs?.['PC']).toBe(0x40000002);
+    expect(decoded.faultInfo?.coreId).toBe(1);
+    expect(decoded.faultInfo?.programCounter).toBe('0x40000002');
+    expect(decoded.faultInfo?.faultAddr).toBe('0x3ffb0004');
+    expect(decoded.faultInfo?.faultCode).toBe(0xc);
+  });
+});
+
 describe('decodeCoredumpElf', () => {
   it('exports as a function', () => {
     expect(typeof decodeCoredumpElf).toBe('function');
