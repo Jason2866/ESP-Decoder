@@ -485,6 +485,59 @@ describe('CrashCapturer – quiet period with unterminated line', () => {
     expect(events[0].rawText).toContain('assert failed: unterminated_tail');
     expect(events[0].rawText).toContain('Rebooting...');
   });
+
+  it('preserves the block when the stream ends mid-UTF-8-sequence', async () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    // 'assert failed' line is complete, then only the first byte (0xC3) of a
+    // two-byte UTF-8 sequence arrives — invisible to a decoded-text check.
+    capturer.pushData(
+      Buffer.concat([
+        Buffer.from('assert failed: split_utf8\n', 'utf8'),
+        Buffer.from([0xc3]),
+      ]),
+    );
+    // Beyond the quiet period the framer must not drop the assert block.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(events.length).toBe(0);
+
+    // Rest of the sequence ('é' = C3 A9) + newline, then the backtrace.
+    capturer.pushData(
+      Buffer.concat([
+        Buffer.from([0xa9, 0x0a]),
+        Buffer.from(
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002\nRebooting...\n',
+          'utf8',
+        ),
+      ]),
+    );
+    capturer.flush();
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('assert failed: split_utf8');
+    expect(events[0].rawText).toContain('Backtrace:');
+  });
+
+  it('preserves an unterminated Backtrace line until flush', async () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    // Crash ends with a Backtrace line that has no trailing newline.
+    capturer.pushData(
+      Buffer.from(
+        'assert failed: unterminated_bt\n' +
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002',
+        'utf8',
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(events.length).toBe(0);
+
+    capturer.flush();
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('assert failed: unterminated_bt');
+    expect(events[0].rawText).toContain('Backtrace: 0x42000001');
+  });
 });
 
 describe('CrashCapturer – signature dedup vs. backtrace divergence', () => {
