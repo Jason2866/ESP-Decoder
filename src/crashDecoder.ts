@@ -23,7 +23,8 @@ import type {
   DecodeOptions,
   DecodeParams,
 } from './vendor/trbr';
-import { getPioPackagesDir } from './pioIntegration';
+import { findPioGdbToolPath, getPioPackagesDir } from './pioIntegration';
+import { CHIP_TARGET_MAP } from './chipTargets';
 import { Addr2linePool } from './addr2lineResolver';
 
 // Re-export for consumers
@@ -259,53 +260,25 @@ export async function decodeCrash(
     // Resolve target architecture to a value trbr understands
     const resolvedArch = resolveTargetArch(targetArch, crashEvent.kind);
 
-    // === Xtensa fast-path: resolve backtrace addresses directly via addr2line ===
-    if (crashEvent.kind === 'xtensa' && /Backtrace:/i.test(crashEvent.rawText)) {
-      const addr2linePath = deriveAddr2linePath(toolPath!, log);
-      if (addr2linePath) {
-        const btAddrs = extractXtensaBacktraceAddresses(crashEvent.rawText);
-        if (btAddrs.length > 0) {
+    // === Xtensa fast-path: resolve stack/backtrace addresses directly via addr2line ===
+    // Covers both the "Backtrace: 0xPC:0xSP ..." format and the ESP8266
+    // ">>>stack>>>" hex dump format (no Backtrace: lines).
+    if (crashEvent.kind === 'xtensa') {
+      const isEsp8266Stack = />>>stack>>>/.test(crashEvent.rawText) && !/Backtrace:/i.test(crashEvent.rawText);
+      const candidateAddrs = isEsp8266Stack
+        ? extractEsp8266StackAddresses(crashEvent.rawText)
+        : extractXtensaBacktraceAddresses(crashEvent.rawText);
+
+      if (candidateAddrs.length > 0) {
+        const addr2linePath = deriveAddr2linePath(toolPath!, log);
+        if (addr2linePath) {
           const faultInfo = parseXtensaFaultInfo(crashEvent.rawText);
           const regs = parseRegisters(crashEvent.rawText);
           const hasRegs = Object.keys(regs).length > 0;
 
-          // Resolve backtrace frames and register annotations in parallel
+          // Resolve frames and register annotations in parallel
           const [frames, regAnnotations] = await Promise.all([
-            resolveAddressesViaAddr2line(btAddrs, elfPath, addr2linePath, log, romElfPath, addr2linePool),
-            hasRegs
-              ? resolveRegisterAddresses(regs, elfPath, addr2linePath, log, romElfPath)
-              : Promise.resolve(undefined),
-          ]);
-
-          if (frames.length > 0) {
-            return {
-              faultInfo,
-              stacktrace: frames,
-              regs: hasRegs ? regs : undefined,
-              regAnnotations,
-              rawOutput: '',
-            };
-          }
-        }
-      }
-    }
-
-    // === ESP8266 fast-path: resolve stack addresses via addr2line ===
-    // Same pattern as the Xtensa Backtrace fast-path above, but for ESP8266's
-    // >>>stack>>> hex dump format. trbr's decode() would go through GDB which
-    // is heavier; addr2line is faster and sufficient for stack address resolution.
-    // ESP8266 crashes use >>>stack>>> / <<<stack<<< format without Backtrace: lines
-    if (crashEvent.kind === 'xtensa' && />>>stack>>>/.test(crashEvent.rawText) && !/Backtrace:/i.test(crashEvent.rawText)) {
-      const addr2linePath = deriveAddr2linePath(toolPath!, log);
-      if (addr2linePath) {
-        const stackAddrs = extractEsp8266StackAddresses(crashEvent.rawText);
-        if (stackAddrs.length > 0) {
-          const faultInfo = parseXtensaFaultInfo(crashEvent.rawText);
-          const regs = parseRegisters(crashEvent.rawText);
-          const hasRegs = Object.keys(regs).length > 0;
-
-          const [frames, regAnnotations] = await Promise.all([
-            resolveAddressesViaAddr2line(stackAddrs, elfPath, addr2linePath, log, romElfPath, addr2linePool),
+            resolveAddressesViaAddr2line(candidateAddrs, elfPath, addr2linePath, log, romElfPath, addr2linePool),
             hasRegs
               ? resolveRegisterAddresses(regs, elfPath, addr2linePath, log, romElfPath)
               : Promise.resolve(undefined),
@@ -632,7 +605,7 @@ async function decodeCoredumpElfInternal(
   let chosenArch: 'xtensa' | 'riscv' | 'unknown' = crashKind;
   if (!toolPath) {
     // Use the detected architecture to pick the right GDB
-    const primaryKind = crashKind === 'xtensa' ? 'xtensa' : crashKind === 'riscv' ? 'riscv' : 'riscv';
+    const primaryKind = crashKind === 'xtensa' ? 'xtensa' : 'riscv';
     const fallbackKind = primaryKind === 'riscv' ? 'xtensa' : 'riscv';
     toolPath = autoDetectPioToolPath(primaryKind, log);
     if (toolPath) {
@@ -730,20 +703,15 @@ async function decodeCoredumpElfInternal(
 /**
  * Try to auto-detect a GDB binary from the local PlatformIO packages directory.
  * This is used as a fallback when no toolPath is configured in the extension settings.
- *
- * RISC-V (ESP32-C2/C3/C6/C61/H2/H4/P4):
- *   ~/.platformio/packages/tool-riscv32-esp-elf-gdb/bin/riscv32-esp-elf-gdb
- *
- * Xtensa (ESP32/ESP32-S2/ESP32-S3/ESP8266):
- *   ~/.platformio/packages/toolchain-xtensa-esp<variant>/bin/xtensa-esp<variant>-elf-gdb
- *   or the new unified: toolchain-xtensa-esp-elf
+ * Delegates to pioIntegration's findPioGdbToolPath, which covers both
+ * RISC-V (riscv32-esp-elf-gdb) and Xtensa (xtensa-*-elf-gdb, incl. ESP8266 lx106)
+ * tool packages.
  */
 function autoDetectPioToolPath(
   crashKind: 'xtensa' | 'riscv' | 'unknown',
   log?: DecodeLogger,
   chip?: string,
 ): string | undefined {
-  const ext = process.platform === 'win32' ? '.exe' : '';
   const pioPackagesDir = getPioPackagesDir();
 
   if (!pioPackagesDir) {
@@ -751,65 +719,21 @@ function autoDetectPioToolPath(
     return undefined;
   }
 
-  if (crashKind === 'riscv') {
-    // Prefer the dedicated GDB package, fall back to the toolchain package
-    const candidates = [
-      path.join(pioPackagesDir, 'tool-riscv32-esp-elf-gdb', 'bin', `riscv32-esp-elf-gdb${ext}`),
-      path.join(pioPackagesDir, 'toolchain-riscv32-esp', 'bin', `riscv32-esp-elf-gdb${ext}`),
-    ];
-    for (const c of candidates) {
-      if (fs.existsSync(c)) { return c; }
-    }
-    log?.appendLine('[ESP Decoder] RISC-V GDB not found in PlatformIO packages');
-    return undefined;
+  const arch = crashKind === 'riscv' ? 'riscv' : 'xtensa';
+  const toolPath = findPioGdbToolPath(pioPackagesDir, arch, chip);
+  if (!toolPath) {
+    log?.appendLine(`[ESP Decoder] ${arch} GDB not found in PlatformIO packages`);
   }
-
-  // Xtensa — try common variants (ESP32/S2/S3 + ESP8266 lx106)
-  const lx106Entry = { pkg: 'toolchain-xtensa', bin: `xtensa-lx106-elf-gdb${ext}` };
-  const esp32Variants = [
-    { pkg: 'tool-xtensa-esp-elf-gdb',     bin: `xtensa-esp32-elf-gdb${ext}` },
-    { pkg: 'tool-xtensa-esp-elf-gdb',     bin: `xtensa-esp32s3-elf-gdb${ext}` },
-    { pkg: 'tool-xtensa-esp-elf-gdb',     bin: `xtensa-esp32s2-elf-gdb${ext}` },
-    { pkg: 'toolchain-xtensa-esp-elf',    bin: `xtensa-esp-elf-gdb${ext}` },
-    { pkg: 'toolchain-xtensa-esp32s3-elf', bin: `xtensa-esp32s3-elf-gdb${ext}` },
-    { pkg: 'toolchain-xtensa-esp32-elf',   bin: `xtensa-esp32-elf-gdb${ext}` },
-    { pkg: 'toolchain-xtensa-esp32s2-elf', bin: `xtensa-esp32s2-elf-gdb${ext}` },
-  ];
-  const isLx106 = chip && /esp8266|lx106/i.test(chip);
-  const xtensaVariants = isLx106
-    ? [lx106Entry, ...esp32Variants]
-    : [...esp32Variants, lx106Entry];
-  for (const { pkg, bin } of xtensaVariants) {
-    const c = path.join(pioPackagesDir, pkg, 'bin', bin);
-    if (fs.existsSync(c)) { return c; }
-  }
-
-  // Also scan for any tool-xtensa-*-gdb package (handles future variants)
-  try {
-    for (const entry of fs.readdirSync(pioPackagesDir)) {
-      if (entry.startsWith('tool-xtensa') && entry.includes('-gdb')) {
-        const binDir = path.join(pioPackagesDir, entry, 'bin');
-        try {
-          for (const bin of fs.readdirSync(binDir)) {
-            if (bin.match(/^xtensa-.*-elf-gdb(\.exe)?$/)) {
-              const c = path.join(binDir, bin);
-              if (fs.existsSync(c)) { return c; }
-            }
-          }
-        } catch { /* bin dir unreadable */ }
-      }
-    }
-  } catch { /* ignore */ }
-
-  log?.appendLine('[ESP Decoder] Xtensa GDB not found in PlatformIO packages');
-  return undefined;
+  return toolPath;
 }
 
 /**
- * Valid trbr target architectures.
+ * trbr requires a concrete target arch, but all RISC-V chips share the same
+ * ILP32 register layout and decoder (mirroring esp-idf-panic-decoder's single
+ * 'default' target), so any RISC-V chip resolves to one canonical target.
  */
-const VALID_TRBR_TARGETS = ['xtensa', 'esp32c2', 'esp32c3', 'esp32c5', 'esp32c6', 'esp32h2', 'esp32h4', 'esp32p4', 'esp32s31'] as const;
-type TrbrTarget = (typeof VALID_TRBR_TARGETS)[number];
+const DEFAULT_RISCV_TARGET = 'esp32c3';
+type TrbrTarget = 'xtensa' | typeof DEFAULT_RISCV_TARGET;
 
 /** ELF e_machine values for ESP chip families */
 const ELF_MACHINE_XTENSA = 0x5e; // 94
@@ -852,32 +776,24 @@ async function detectElfArch(
 
 /**
  * Resolve the target architecture from config and crash kind.
- * Must return a value from trbr's supported arches:
- *   'xtensa' | 'esp32c2' | 'esp32c3' | 'esp32c6' | 'esp32h2' | 'esp32h4' | 'esp32p4'
+ * Accepts 'xtensa' / 'riscv' family names, legacy aliases ('riscv32',
+ * 'esp32c3', ...) and 'auto'. All RISC-V values map to DEFAULT_RISCV_TARGET.
  */
 function resolveTargetArch(
   configArch: string | undefined,
   crashKind: 'xtensa' | 'riscv' | 'unknown'
 ): TrbrTarget {
   if (configArch && configArch !== 'auto') {
-    // Map legacy 'riscv32' to a concrete trbr target (default esp32c3)
-    if (configArch === 'riscv32') {
-      return 'esp32c3';
+    const family = CHIP_TARGET_MAP[configArch];
+    if (family === 'xtensa' || configArch === 'xtensa') {
+      return 'xtensa';
     }
-    // Pass through if it's already a valid trbr target
-    if ((VALID_TRBR_TARGETS as readonly string[]).includes(configArch)) {
-      return configArch as TrbrTarget;
+    if (family === 'riscv' || configArch === 'riscv' || configArch === 'riscv32') {
+      return DEFAULT_RISCV_TARGET;
     }
     // Unknown arch, fall through to auto-detect
   }
-  switch (crashKind) {
-    case 'riscv':
-      return 'esp32c3'; // default RISC-V target
-    case 'xtensa':
-      return 'xtensa';
-    default:
-      return 'xtensa';
-  }
+  return crashKind === 'riscv' ? DEFAULT_RISCV_TARGET : 'xtensa';
 }
 
 /**
@@ -993,44 +909,6 @@ function extractAllCandidateAddresses(crashText: string): string[] {
   while ((match = re.exec(crashText)) !== null) {
     addresses.push(`0x${match[0].toLowerCase()}`);
   }
-  return addresses;
-}
-
-/**
- * Extract candidate return addresses from a RISC-V Stack memory hex dump.
- * Returns addresses (preserving duplicates) that fall within ESP code space (0x40000000–0x4FFFFFFF).
- * Used by createRawDecode fallback when no addr2line is available.
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function extractStackCandidateAddresses(crashText: string): string[] {
-  const addresses: string[] = [];
-  const lines = crashText.split('\n');
-  let inStackMemory = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (/^Stack memory:/i.test(trimmed)) {
-      inStackMemory = true;
-      continue;
-    }
-    if (inStackMemory) {
-      // Stack memory lines: "3fcc3460: 0x00000001 0x420529d0 0x3fcc3490 ..."
-      const hexMatch = trimmed.match(/^[0-9a-fA-F]+:\s*((?:0x[0-9a-fA-F]+\s*)+)/);
-      if (hexMatch) {
-        const words = hexMatch[1].trim().split(/\s+/);
-        for (const word of words) {
-          const val = parseInt(word, 16);
-          // Code space: 0x40000000–0x4FFFFFFF (covers flash-mapped code on all ESP chips)
-          if (val >= 0x40000000 && val < 0x50000000) {
-            addresses.push(`0x${val.toString(16).padStart(8, '0')}`);
-          }
-        }
-      } else {
-        inStackMemory = false;
-      }
-    }
-  }
-
   return addresses;
 }
 

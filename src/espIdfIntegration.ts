@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { CHIP_TARGET_MAP, XTENSA_CHIPS } from './chipTargets';
+import { CHIP_TARGET_MAP, ChipArch } from './chipTargets';
 
 export interface EspIdfBuild {
   name: string;
@@ -52,30 +52,6 @@ function readProjectName(workspaceFolder: string): string | undefined {
   return undefined;
 }
 
-function findExecutableInPath(names: string[]): string | undefined {
-  const pathEnv = process.env.PATH;
-  if (!pathEnv) {
-    return undefined;
-  }
-
-  const ext = process.platform === 'win32' ? '.exe' : '';
-  const dirs = pathEnv.split(path.delimiter);
-
-  for (const dir of dirs) {
-    if (!dir) {
-      continue;
-    }
-    for (const name of names) {
-      const candidate = path.join(dir, name + ext);
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-  }
-
-  return undefined;
-}
-
 function gatherToolRoots(): string[] {
   const roots: string[] = [];
 
@@ -104,54 +80,121 @@ function findNewestVersionDir(parentDir: string): string | undefined {
   }
 }
 
-function findGdbFromIdfTools(chipTarget: string | undefined): string | undefined {
+/**
+ * GDB binary name patterns per architecture family, mirroring how
+ * esp-idf-panic-decoder resolves the toolchain prefix: only the arch family
+ * matters, not the specific MCU.
+ */
+function gdbMatcher(arch: ChipArch): { names: string[]; pattern: RegExp } {
   const ext = process.platform === 'win32' ? '.exe' : '';
-  const isXtensa = chipTarget ? XTENSA_CHIPS.has(chipTarget) : true;
+  if (arch === 'riscv') {
+    return {
+      names: [`riscv32-esp-elf-gdb${ext}`],
+      pattern: /^riscv32-esp-elf-gdb(\.exe)?$/,
+    };
+  }
+  return {
+    names: [`xtensa-esp-elf-gdb${ext}`],
+    pattern: /^xtensa-[a-z0-9]+-elf-gdb(\.exe)?$/,
+  };
+}
 
-  const preferredNames = isXtensa
-    ? chipTarget === 'esp8266'
-      ? ['xtensa-lx106-elf-gdb', 'xtensa-esp-elf-gdb', 'xtensa-esp32-elf-gdb', 'xtensa-esp32s2-elf-gdb', 'xtensa-esp32s3-elf-gdb']
-      : ['xtensa-esp-elf-gdb', 'xtensa-esp32-elf-gdb', 'xtensa-esp32s2-elf-gdb', 'xtensa-esp32s3-elf-gdb', 'xtensa-lx106-elf-gdb']
-    : ['riscv32-esp-elf-gdb'];
+/**
+ * Find a GDB binary in a list of directories. Preferred names are tried
+ * first across all dirs, then any name matching the arch pattern.
+ */
+function findGdbInDirs(dirs: string[], names: string[], pattern: RegExp): string | undefined {
+  for (const dir of dirs) {
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  for (const dir of dirs) {
+    try {
+      const match = fs
+        .readdirSync(dir)
+        .filter((entry) => pattern.test(entry))
+        .sort()[0];
+      if (match) {
+        return path.join(dir, match);
+      }
+    } catch {
+      // dir missing or unreadable
+    }
+  }
+  return undefined;
+}
 
-  const fromPath = findExecutableInPath(preferredNames);
-  if (fromPath) {
-    return fromPath;
+/**
+ * Collect bin directories inside an ESP-IDF tool version directory.
+ * Layouts vary: <ver>/bin/<tool>, <ver>/<tool>/bin/<tool>, or deeper nesting.
+ */
+function toolVersionBinDirs(versionDir: string): string[] {
+  const dirs = [path.join(versionDir, 'bin')];
+  try {
+    for (const entry of fs.readdirSync(versionDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        dirs.push(path.join(versionDir, entry.name, 'bin'));
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return dirs;
+}
+
+function findGdbFromIdfTools(arch: ChipArch, chipTarget: string | undefined): string | undefined {
+  const { names, pattern } = gdbMatcher(arch);
+
+  // 1. Search PATH
+  const pathEnv = process.env.PATH;
+  if (pathEnv) {
+    const dirs = pathEnv.split(path.delimiter).filter(Boolean);
+    const fromPath = findGdbInDirs(dirs, names, pattern);
+    if (fromPath) {
+      return fromPath;
+    }
   }
 
-  const roots = gatherToolRoots();
-  for (const toolsRoot of roots) {
+  // 2. Search ESP-IDF tool directories (~/.espressif/tools, $IDF_TOOLS_PATH/tools)
+  const toolPrefix = arch === 'riscv' ? 'riscv32-esp-elf' : 'xtensa-';
+  // Prefer the tool dir matching the chip (esp32s3 -> xtensa-esp32s3-elf,
+  // esp8266 -> xtensa-lx106-elf), then most specific match first.
+  const chipHint = chipTarget === 'esp8266' ? 'lx106' : chipTarget;
+  const scoreTool = (name: string): number => {
+    if (!chipHint) {
+      return 0;
+    }
+    return name.includes(`${chipHint}-`) || name.includes(`-${chipHint}`) ? 0 : 1;
+  };
+
+  for (const toolsRoot of gatherToolRoots()) {
     if (!fs.existsSync(toolsRoot)) {
       continue;
     }
 
-    const toolPrefixes = isXtensa
-      ? chipTarget === 'esp8266'
-        ? ['xtensa-lx106-elf', 'xtensa-esp-elf', 'xtensa-esp32-elf', 'xtensa-esp32s2-elf', 'xtensa-esp32s3-elf']
-        : ['xtensa-esp-elf', 'xtensa-esp32-elf', 'xtensa-esp32s2-elf', 'xtensa-esp32s3-elf', 'xtensa-lx106-elf']
-      : ['riscv32-esp-elf'];
+    let toolDirs: string[];
+    try {
+      toolDirs = fs
+        .readdirSync(toolsRoot, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && d.name.startsWith(toolPrefix))
+        .map((d) => d.name)
+        .sort((a, b) => scoreTool(a) - scoreTool(b) || a.localeCompare(b));
+    } catch {
+      continue;
+    }
 
-    for (const prefix of toolPrefixes) {
-      const toolDir = path.join(toolsRoot, prefix);
-      if (!fs.existsSync(toolDir)) {
+    for (const toolName of toolDirs) {
+      const versionDir = findNewestVersionDir(path.join(toolsRoot, toolName));
+      if (!versionDir) {
         continue;
       }
-
-      const newestVersionDir = findNewestVersionDir(toolDir);
-      if (!newestVersionDir) {
-        continue;
-      }
-
-      for (const name of preferredNames) {
-        const directBin = path.join(newestVersionDir, 'bin', `${name}${ext}`);
-        if (fs.existsSync(directBin)) {
-          return directBin;
-        }
-
-        const nestedBin = path.join(newestVersionDir, prefix, 'bin', `${name}${ext}`);
-        if (fs.existsSync(nestedBin)) {
-          return nestedBin;
-        }
+      const gdb = findGdbInDirs(toolVersionBinDirs(versionDir), names, pattern);
+      if (gdb) {
+        return gdb;
       }
     }
   }
@@ -196,8 +239,8 @@ export async function findEspIdfBuilds(workspaceFolder: string): Promise<EspIdfB
   const buildDir = path.join(workspaceFolder, 'build');
   const projectName = readProjectName(workspaceFolder);
   const idfTarget = parseIdfTarget(workspaceFolder);
-  const targetArch = idfTarget ? CHIP_TARGET_MAP[idfTarget] : undefined;
-  const toolPath = findGdbFromIdfTools(idfTarget);
+  const targetArch = (idfTarget && CHIP_TARGET_MAP[idfTarget]) || undefined;
+  const toolPath = findGdbFromIdfTools(targetArch ?? 'xtensa', idfTarget);
 
   const elfCandidates = findElfCandidates(buildDir, projectName);
   return elfCandidates.map((elfPath, index) => ({

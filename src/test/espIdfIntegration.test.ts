@@ -70,7 +70,7 @@ describe('findEspIdfBuilds', () => {
 
     const builds = await findEspIdfBuilds(workspace);
     expect(builds.length).toBeGreaterThan(0);
-    expect(builds[0].targetArch).toBe('esp32c6');
+    expect(builds[0].targetArch).toBe('riscv');
     expect(builds[0].toolPath).toBe(path.join(toolBinDir, `riscv32-esp-elf-gdb${exe}`));
   });
 
@@ -88,7 +88,7 @@ describe('findEspIdfBuilds', () => {
 
     const builds = await findEspIdfBuilds(workspace);
     expect(builds.length).toBeGreaterThan(0);
-    expect(builds[0].targetArch).toBe('esp32s31');
+    expect(builds[0].targetArch).toBe('riscv');
     expect(builds[0].toolPath).toBe(path.join(toolBinDir, `riscv32-esp-elf-gdb${exe}`));
   });
 });

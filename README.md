@@ -68,7 +68,7 @@ message) if the firmware does not speak Improv.
 | `esp-decoder.autoDetectElf` | `true` | Auto-detect ELF from PlatformIO and ESP-IDF builds |
 | `esp-decoder.elfPath` | `""` | Manual ELF file path |
 | `esp-decoder.toolPath` | `""` | Manual GDB/addr2line path |
-| `esp-decoder.targetArch` | `auto` | Target architecture (`auto`, `xtensa`, `riscv32`) |
+| `esp-decoder.targetArch` | `auto` | Target architecture (`auto`, `xtensa`, `riscv`) |
 | `esp-decoder.serialMonitor.maxLines` | `5000` | Max lines in serial output |
 | `esp-decoder.serialMonitor.autoscroll` | `true` | Auto-scroll on new data |
 | `esp-decoder.logDirectory` | `logs` | Directory for Log2File output (relative to workspace by default) |

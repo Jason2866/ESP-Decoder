@@ -1,32 +1,11 @@
 /**
- * Unit tests for chipTargets.ts — verifies every chip is correctly classified
- * and that ESP32-S31 is fully registered as a RISC-V target.
+ * Unit tests for chipTargets.ts — verifies every chip is classified into the
+ * correct architecture family (xtensa | riscv). Like esp-idf-panic-decoder,
+ * decoding only depends on the arch family, not the specific MCU.
  */
 
 import { describe, it, expect } from 'vitest';
-import { CHIP_TARGET_MAP, RISCV_TARGETS, XTENSA_CHIPS } from '../chipTargets.js';
-
-// ---------------------------------------------------------------------------
-// ESP32-S31 registration
-// ---------------------------------------------------------------------------
-
-describe('chipTargets – ESP32-S31', () => {
-  it('maps esp32s31 to the esp32s31 trbr target', () => {
-    expect(CHIP_TARGET_MAP['esp32s31']).toBe('esp32s31');
-  });
-
-  it('includes esp32s31 in RISCV_TARGETS', () => {
-    expect(RISCV_TARGETS.has('esp32s31')).toBe(true);
-  });
-
-  it('does not include esp32s31 in XTENSA_CHIPS', () => {
-    expect(XTENSA_CHIPS.has('esp32s31')).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Xtensa chips
-// ---------------------------------------------------------------------------
+import { CHIP_TARGET_MAP, ChipArch } from '../chipTargets.js';
 
 describe('chipTargets – Xtensa chips', () => {
   const xtensaChips = ['esp32', 'esp32s2', 'esp32s3', 'esp8266'];
@@ -35,80 +14,42 @@ describe('chipTargets – Xtensa chips', () => {
     it(`maps ${chip} to xtensa`, () => {
       expect(CHIP_TARGET_MAP[chip]).toBe('xtensa');
     });
-
-    it(`includes ${chip} in XTENSA_CHIPS`, () => {
-      expect(XTENSA_CHIPS.has(chip)).toBe(true);
-    });
-
-    it(`does not include ${chip} in RISCV_TARGETS`, () => {
-      expect(RISCV_TARGETS.has(chip)).toBe(false);
-    });
   }
 });
-
-// ---------------------------------------------------------------------------
-// RISC-V chips
-// ---------------------------------------------------------------------------
 
 describe('chipTargets – RISC-V chips', () => {
-  const riscvChips: Array<{ chip: string; expectedTarget: string }> = [
-    { chip: 'esp32c2',  expectedTarget: 'esp32c2'  },
-    { chip: 'esp32c3',  expectedTarget: 'esp32c3'  },
-    { chip: 'esp32c5',  expectedTarget: 'esp32c5'  },
-    { chip: 'esp32c6',  expectedTarget: 'esp32c6'  },
-    { chip: 'esp32h2',  expectedTarget: 'esp32h2'  },
-    { chip: 'esp32h4',  expectedTarget: 'esp32h4'  },
-    { chip: 'esp32p4',  expectedTarget: 'esp32p4'  },
-    { chip: 'esp32s31', expectedTarget: 'esp32s31' },
+  const riscvChips = [
+    'esp32c2',
+    'esp32c3',
+    'esp32c5',
+    'esp32c6',
+    'esp32c61',
+    'esp32h2',
+    'esp32h4',
+    'esp32p4',
+    'esp32s31',
   ];
 
-  for (const { chip, expectedTarget } of riscvChips) {
-    it(`maps ${chip} to ${expectedTarget}`, () => {
-      expect(CHIP_TARGET_MAP[chip]).toBe(expectedTarget);
-    });
-
-    it(`includes ${chip} in RISCV_TARGETS`, () => {
-      expect(RISCV_TARGETS.has(chip)).toBe(true);
-    });
-
-    it(`does not include ${chip} in XTENSA_CHIPS`, () => {
-      expect(XTENSA_CHIPS.has(chip)).toBe(false);
+  for (const chip of riscvChips) {
+    it(`maps ${chip} to riscv`, () => {
+      expect(CHIP_TARGET_MAP[chip]).toBe('riscv');
     });
   }
 });
 
-// ---------------------------------------------------------------------------
-// Completeness: every CHIP_TARGET_MAP entry is classified in exactly one set
-// ---------------------------------------------------------------------------
-
-describe('chipTargets – classification completeness', () => {
-  it('every chip in CHIP_TARGET_MAP is in either XTENSA_CHIPS or RISCV_TARGETS (never both)', () => {
-    for (const chip of Object.keys(CHIP_TARGET_MAP)) {
-      const isXtensa = XTENSA_CHIPS.has(chip);
-      const isRiscv = RISCV_TARGETS.has(chip);
-      // Exactly one must be true
+describe('chipTargets – map completeness', () => {
+  it('every entry maps to a valid arch family', () => {
+    for (const [chip, arch] of Object.entries(CHIP_TARGET_MAP)) {
       expect(
-        isXtensa !== isRiscv,
-        `${chip} should be in exactly one of XTENSA_CHIPS or RISCV_TARGETS`,
+        arch === 'xtensa' || arch === 'riscv',
+        `${chip} has invalid arch '${arch}'`,
       ).toBe(true);
     }
   });
 
-  it('every chip in RISCV_TARGETS has an entry in CHIP_TARGET_MAP', () => {
-    for (const chip of RISCV_TARGETS) {
-      expect(
-        CHIP_TARGET_MAP[chip],
-        `${chip} is in RISCV_TARGETS but missing from CHIP_TARGET_MAP`,
-      ).toBeDefined();
-    }
-  });
-
-  it('every chip in XTENSA_CHIPS has an entry in CHIP_TARGET_MAP', () => {
-    for (const chip of XTENSA_CHIPS) {
-      expect(
-        CHIP_TARGET_MAP[chip],
-        `${chip} is in XTENSA_CHIPS but missing from CHIP_TARGET_MAP`,
-      ).toBeDefined();
-    }
+  it('all values are ChipArch', () => {
+    const values: ChipArch[] = Object.values(CHIP_TARGET_MAP);
+    expect(values.length).toBeGreaterThan(0);
+    expect(values.every((v) => v === 'xtensa' || v === 'riscv')).toBe(true);
   });
 });
