@@ -286,7 +286,8 @@
     "test": "vitest run"
   },
   "overrides": {
-    "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.5"
+    "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.5",
+    "minimatch": "11.0.5"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -296,10 +297,10 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/vscode": "^1.85.0",
-    "@typescript-eslint/eslint-plugin": "^8.72.1",
+    "@typescript-eslint/eslint-plugin": "^8.72.2",
     "@typescript-eslint/parser": "^8.72.1",
     "esbuild": "^0.28.2",
-    "eslint": "^10.14.0",
+    "eslint": "^10.15.0",
     "pioarduino-node-helpers": "^12.7.1",
     "typescript": "6.0.3",
     "vitest": "^5.1.0"
