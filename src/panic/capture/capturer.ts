@@ -160,8 +160,12 @@ export class Capturer {
 
     const exact = this.findRecentBySignature(candidate);
     if (exact) {
-      this.mergeIntoExisting(exact, candidate, shouldPreferCandidate(exact, candidate));
-      return;
+      // Signature only covers the first few backtrace frames; a matching
+      // signature with a conflicting backtrace is a different crash.
+      if (backtracesCompatible(exact.lightweight.backtraceAddrs, candidate.lightweight.backtraceAddrs)) {
+        this.mergeIntoExisting(exact, candidate, shouldPreferCandidate(exact, candidate));
+        return;
+      }
     }
 
     const byContainment = this.findRecentContainmentMatch(candidate);

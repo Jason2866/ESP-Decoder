@@ -37,6 +37,7 @@ export class GdbMiClient {
   private readonly commandQueue: QueuedCommand[] = [];
   private stdoutBuffer = '';
   private handshakeSettled = false;
+  private handshakeResolve: (() => void) | null = null;
   private handshakeReject: ((err: Error) => void) | null = null;
 
   constructor(gdbPath: string, args: string[], options: GdbMiOptions = {}) {
@@ -75,9 +76,11 @@ export class GdbMiClient {
     this.error = err;
     this.log('failure', err);
     if (!this.handshakeSettled && this.handshakeReject) {
-      this.handshakeReject(err);
+      const reject = this.handshakeReject;
       this.handshakeSettled = true;
+      this.handshakeResolve = null;
       this.handshakeReject = null;
+      reject(err);
     }
     this.commandQueue.forEach((executor) => executor.reject(err));
     this.commandQueue.length = 0;
@@ -107,17 +110,31 @@ export class GdbMiClient {
     }
 
     this.stdoutBuffer += chunk;
-    if (/\(gdb\)\s*$/m.test(this.stdoutBuffer)) {
-      const output = this.stdoutBuffer;
-      this.stdoutBuffer = '';
-      const executor = this.commandQueue.shift();
-      if (executor) {
-        const elapsed = Date.now() - executor.startedAt;
-        this.log('recv', `${executor.command} (${elapsed}ms)`, preview(output));
-      } else {
-        this.log('recv without queued command', preview(output));
-      }
-      executor?.resolve(output);
+    if (!/\(gdb\)\s*$/m.test(this.stdoutBuffer)) {
+      return;
+    }
+    const output = this.stdoutBuffer;
+    this.stdoutBuffer = '';
+
+    // The startup banner ends at the first prompt; it is handshake output,
+    // not a command result.
+    if (!this.handshakeSettled) {
+      this.handshakeSettled = true;
+      const resolve = this.handshakeResolve;
+      this.handshakeResolve = null;
+      this.handshakeReject = null;
+      this.log('handshake done', preview(output));
+      resolve?.();
+      return;
+    }
+
+    const executor = this.commandQueue.shift();
+    if (executor) {
+      const elapsed = Date.now() - executor.startedAt;
+      this.log('recv', `${executor.command} (${elapsed}ms)`, preview(output));
+      executor.resolve(output);
+    } else {
+      this.log('recv without queued command', preview(output));
     }
   }
 
@@ -132,32 +149,18 @@ export class GdbMiClient {
     if (this.error) {
       return Promise.reject(this.error);
     }
+    if (this.handshakeSettled) {
+      return;
+    }
+    // Wait on the shared stdout buffer via onData(); attaching a second
+    // 'data' listener would double-append chunks and race on the prompt.
     return new Promise((resolve, reject) => {
-      const startedAt = Date.now();
-      const onData = (chunk: string) => {
-        if (this.error) {
-          this.cp.stdout!.off('data', onData);
-          this.log('handshake error', this.error);
-          reject(this.error);
-          this.handshakeSettled = true;
-          this.handshakeReject = null;
-          return;
-        }
-        this.stdoutBuffer += chunk;
-        if (/\(gdb\)\s*$/m.test(this.stdoutBuffer)) {
-          this.cp.stdout!.off('data', onData);
-          this.stdoutBuffer = '';
-          this.handshakeSettled = true;
-          this.handshakeReject = null;
-          this.log('handshake done', `${Date.now() - startedAt}ms`);
-          resolve();
-        }
-      };
+      this.handshakeResolve = resolve;
       this.handshakeReject = (err) => {
-        this.cp.stdout!.off('data', onData);
+        this.handshakeResolve = null;
+        this.handshakeReject = null;
         reject(err);
       };
-      this.cp.stdout!.on('data', onData);
     });
   }
 }

@@ -25,6 +25,7 @@ class GDBSession {
   private readonly queue: CommandQueueItem[] = [];
   private current: { resolve: (r: string) => void; reject: (e: unknown) => void } | null = null;
   private startReject: ((err: Error) => void) | null = null;
+  private startCleanup: (() => void) | null = null;
 
   constructor({ toolPath, elfPath }: Pick<DecodeParams, 'elfPath' | 'toolPath'>, options: DecodeOptions = {}) {
     this.toolPath = toolPath;
@@ -60,6 +61,8 @@ class GDBSession {
     }
     this.startReject?.(this.error);
     this.startReject = null;
+    this.startCleanup?.();
+    this.startCleanup = null;
     if (this.current) {
       const { reject } = this.current;
       this.current = null;
@@ -100,13 +103,24 @@ class GDBSession {
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.startReject = reject;
+      // Translate spawn errors (e.g. ENOENT) into the friendly startup error;
+      // terminate() may reject through this path before onError runs.
+      this.startReject = (err: Error) => {
+        const errno = err as NodeJS.ErrnoException;
+        reject(
+          errno.code === 'ENOENT'
+            ? new Error(`GDB tool not found at ${this.toolPath}`)
+            : err,
+        );
+      };
       const cleanup = () => {
         this.startReject = null;
+        this.startCleanup = null;
         this.gdb.off('error', onError);
         this.gdb.stdout!.off('data', onData);
         this.gdb.stderr!.off('data', onData);
       };
+      this.startCleanup = cleanup;
 
       const onError = (error: Error & { code?: string }) => {
         let userError: Error = error;
