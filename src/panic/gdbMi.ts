@@ -131,34 +131,52 @@ export class GdbMiClient {
     }
 
     this.stdoutBuffer += chunk;
-    if (!/\(gdb\)\s*$/m.test(this.stdoutBuffer)) {
-      return;
-    }
-    const output = this.stdoutBuffer;
-    this.stdoutBuffer = '';
+    this.drainResponses();
+  }
 
-    // The startup banner ends at the first prompt; it is handshake output,
-    // not a command result.
-    if (!this.handshakeSettled) {
-      this.handshakeSettled = true;
-      const resolve = this.handshakeResolve;
-      this.handshakeResolve = null;
-      this.handshakeReject = null;
-      this.log('handshake done', preview(output));
-      resolve?.();
-      return;
-    }
+  /**
+   * A command response ends at a '(gdb)' prompt on its own line; anything
+   * after it stays buffered for the next response. Asynchronous records
+   * ('*', '=', '+') are separated out so they are neither dropped nor
+   * attributed to a command — they are logged and excluded from output.
+   */
+  private drainResponses(): void {
+    for (;;) {
+      const promptMatch = /(?:^|\n)\(gdb\)[^\S\n]*(?=\n|$)/.exec(this.stdoutBuffer);
+      if (!promptMatch) {
+        return;
+      }
+      const end = promptMatch.index + promptMatch[0].length;
+      const raw = this.stdoutBuffer.slice(0, end);
+      this.stdoutBuffer = this.stdoutBuffer.slice(end).replace(/^\n/, '');
+      const { output, asyncRecords } = splitAsyncRecords(raw);
+      for (const record of asyncRecords) {
+        this.log('async record', preview(record));
+      }
 
-    const executor = this.commandQueue.shift();
-    this.commandInFlight = false;
-    if (executor) {
-      const elapsed = Date.now() - executor.startedAt;
-      this.log('recv', `${executor.command} (${elapsed}ms)`, preview(output));
-      executor.resolve(output);
-    } else {
-      this.log('recv without queued command', preview(output));
+      // The startup banner ends at the first prompt; it is handshake output,
+      // not a command result.
+      if (!this.handshakeSettled) {
+        this.handshakeSettled = true;
+        const resolve = this.handshakeResolve;
+        this.handshakeResolve = null;
+        this.handshakeReject = null;
+        this.log('handshake done', preview(output));
+        resolve?.();
+        continue;
+      }
+
+      const executor = this.commandQueue.shift();
+      this.commandInFlight = false;
+      if (executor) {
+        const elapsed = Date.now() - executor.startedAt;
+        this.log('recv', `${executor.command} (${elapsed}ms)`, preview(output));
+        executor.resolve(output);
+      } else {
+        this.log('recv without queued command', preview(output));
+      }
+      this.pumpCommandQueue();
     }
-    this.pumpCommandQueue();
   }
 
   close(): void {
@@ -186,6 +204,24 @@ export class GdbMiClient {
       };
     });
   }
+}
+
+/**
+ * Split a raw MI response into command output and asynchronous records.
+ * Records starting with '*', '=' or '+' at a line boundary are async
+ * notifications, not part of the command's result output.
+ */
+function splitAsyncRecords(raw: string): { output: string; asyncRecords: string[] } {
+  const kept: string[] = [];
+  const asyncRecords: string[] = [];
+  for (const line of raw.split('\n')) {
+    if (/^[*=+]/.test(line)) {
+      asyncRecords.push(line);
+    } else {
+      kept.push(line);
+    }
+  }
+  return { output: kept.join('\n'), asyncRecords };
 }
 
 export function extractMiListContent(str: string, key: string): string | undefined {

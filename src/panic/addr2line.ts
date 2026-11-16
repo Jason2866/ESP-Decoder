@@ -99,8 +99,11 @@ class GDBSession {
   }
 
   private processQueue(): void {
+    if (this.current) {
+      return;
+    }
     const item = this.queue.shift();
-    if (this.current || !item) {
+    if (!item) {
       return;
     }
     const { cmd, resolve, reject } = item;

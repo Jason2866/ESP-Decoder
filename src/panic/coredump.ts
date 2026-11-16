@@ -185,6 +185,11 @@ function splitFrameArgEntries(content: string): string[] {
   return parts;
 }
 
+/** Returns the `^error` result record from MI output, if present. */
+function miErrorRecord(output: string): string | undefined {
+  return output.match(/(?:^|\n)\^error[^\n]*/)?.[0].trim();
+}
+
 function parseBacktrace(raw: string): Record<string, string>[] {
   const entries: Record<string, string>[] = [];
   const frameRe = /frame=\{((?:\\.|[^{}"\\]|"(?:\\.|[^"\\])*")*)\}/g;
@@ -310,14 +315,23 @@ export async function decodeCoredumpFile(
         programCounter !== undefined ? toHexString(programCounter) : '??';
 
       const btOut = await client.sendCommand('-stack-list-frames');
+      const btError = miErrorRecord(btOut);
+      if (btError) {
+        throw new Error(`GDB -stack-list-frames failed for thread ${tid}: ${btError}`);
+      }
       log('stack frames raw length', btOut.length);
 
       const argsOut = await client.sendCommand(
         '-stack-list-arguments --simple-values 0 100',
       );
+      // Arguments are optional: an MI error keeps the frames, just without args.
+      const argsError = miErrorRecord(argsOut);
+      if (argsError) {
+        log('stack-list-arguments failed; continuing without args', argsError);
+      }
       log('stack args raw length', argsOut.length);
       // Parse frame arguments safely, splitting on top-level frame boundaries
-      const argsListMatch = argsOut.match(/stack-args=\[([\s\S]*)\]/);
+      const argsListMatch = argsError ? null : argsOut.match(/stack-args=\[([\s\S]*)\]/);
       const frameArgs: { level?: string; args: FrameArg[] }[] = [];
       if (argsListMatch) {
         const content = argsListMatch[1];

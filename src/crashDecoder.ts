@@ -28,7 +28,7 @@ import type {
   DecodeTarget,
 } from './panic';
 import { findPioGdbToolPath, getPioPackagesDir } from './pioIntegration';
-import { chipArch } from './chipTargets';
+import { chipArch, KNOWN_CHIPS } from './chipTargets';
 import { Addr2linePool } from './addr2lineResolver';
 
 // Re-export for consumers
@@ -764,16 +764,20 @@ function resolveTargetArch(
   configArch: string | undefined,
   crashKind: 'xtensa' | 'riscv' | 'unknown'
 ): DecodeTarget {
-  if (configArch && configArch !== 'auto') {
-    if (configArch === 'xtensa') {
+  const normalized = configArch?.trim().toLowerCase();
+  if (normalized && normalized !== 'auto') {
+    if (normalized === 'xtensa') {
       return 'xtensa';
     }
-    if (configArch === 'riscv' || configArch === 'riscv32') {
+    if (normalized === 'riscv' || normalized === 'riscv32') {
       return 'riscv';
     }
     // Chip / IDF target name: the four Xtensa chips are 'xtensa',
-    // everything else is 'riscv'.
-    return chipArch(configArch);
+    // everything else is 'riscv'. Unrecognized values (casing variants,
+    // unknown names) fall through to the crash-kind 'auto' behavior.
+    if (KNOWN_CHIPS.includes(normalized)) {
+      return chipArch(normalized);
+    }
   }
   return crashKind === 'riscv' ? 'riscv' : 'xtensa';
 }

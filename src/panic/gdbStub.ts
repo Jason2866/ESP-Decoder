@@ -198,7 +198,9 @@ export class GdbStubServer {
     for (const regName of gdbRegsInfoRiscvIlp32) {
       const regVal = this.panicInfo.regs[regName] || 0;
       const regBytes = Buffer.alloc(4);
-      regBytes.writeUInt32LE(regVal);
+      // Register values are serialized as 32-bit words; truncate wider
+      // values instead of letting writeUInt32LE throw out-of-range.
+      regBytes.writeUInt32LE(regVal >>> 0);
       response += regBytes.toString('hex');
     }
     this.debug(
