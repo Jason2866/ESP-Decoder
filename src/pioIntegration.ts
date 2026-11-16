@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { findEspIdfBuilds } from './espIdfIntegration';
 import { core as pioCore, installer as pioInstaller, project as pioProject } from 'pioarduino-node-helpers';
-import { CHIP_TARGET_MAP, ChipArch } from './chipTargets';
+import { KNOWN_CHIPS, chipArch, ChipArch } from './chipTargets';
 
 /**
  * Detected PlatformIO environment with ELF and tool paths.
@@ -264,7 +264,8 @@ function parseEnvironments(sections: Sections): ParsedEnv[] {
  * "esp32s3" matches before "esp32".
  */
 function getChipName(boardName: string | undefined, workspaceFolder?: string, coreDir?: string): string {
-  const sortedKeys = Object.keys(CHIP_TARGET_MAP).sort((a, b) => b.length - a.length);
+  // KNOWN_CHIPS is pre-sorted longest-first so 'esp32s31' matches before 'esp32s3'.
+  const sortedKeys = KNOWN_CHIPS;
 
   if (boardName) {
     const mcu = readBoardMcu(boardName, workspaceFolder, coreDir);
@@ -776,7 +777,7 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
     const board = parsed?.board;
 
     const chipName = getChipName(board || envName, workspaceFolder, coreDir);
-    const targetArch: ChipArch = CHIP_TARGET_MAP[chipName] ?? 'xtensa';
+    const targetArch: ChipArch = chipArch(chipName);
 
     const packagesDir = getPioPackagesDir(coreDir);
     let toolPath: string | undefined;

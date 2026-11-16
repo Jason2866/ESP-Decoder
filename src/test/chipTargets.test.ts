@@ -1,18 +1,17 @@
 /**
- * Unit tests for chipTargets.ts — verifies every chip is classified into the
+ * Unit tests for chipTargets.ts — verifies chip names are classified into the
  * correct architecture family (xtensa | riscv). Like esp-idf-panic-decoder,
- * decoding only depends on the arch family, not the specific MCU.
+ * decoding only depends on the arch family: the four Xtensa chips are a fixed
+ * set and everything else is RISC-V.
  */
 
 import { describe, it, expect } from 'vitest';
-import { CHIP_TARGET_MAP, ChipArch } from '../chipTargets.js';
+import { XTENSA_CHIPS, KNOWN_CHIPS, chipArch, ChipArch } from '../chipTargets.js';
 
 describe('chipTargets – Xtensa chips', () => {
-  const xtensaChips = ['esp32', 'esp32s2', 'esp32s3', 'esp8266'];
-
-  for (const chip of xtensaChips) {
+  for (const chip of XTENSA_CHIPS) {
     it(`maps ${chip} to xtensa`, () => {
-      expect(CHIP_TARGET_MAP[chip]).toBe('xtensa');
+      expect(chipArch(chip)).toBe('xtensa');
     });
   }
 });
@@ -32,24 +31,33 @@ describe('chipTargets – RISC-V chips', () => {
 
   for (const chip of riscvChips) {
     it(`maps ${chip} to riscv`, () => {
-      expect(CHIP_TARGET_MAP[chip]).toBe('riscv');
+      expect(chipArch(chip)).toBe('riscv');
     });
   }
+
+  it('maps unknown / future chips to riscv', () => {
+    expect(chipArch('esp32c9')).toBe('riscv');
+    expect(chipArch('esp32x1')).toBe('riscv');
+  });
 });
 
-describe('chipTargets – map completeness', () => {
-  it('every entry maps to a valid arch family', () => {
-    for (const [chip, arch] of Object.entries(CHIP_TARGET_MAP)) {
-      expect(
-        arch === 'xtensa' || arch === 'riscv',
-        `${chip} has invalid arch '${arch}'`,
-      ).toBe(true);
+describe('chipTargets – KNOWN_CHIPS', () => {
+  it('contains every Xtensa chip', () => {
+    for (const chip of XTENSA_CHIPS) {
+      expect(KNOWN_CHIPS).toContain(chip);
     }
   });
 
-  it('all values are ChipArch', () => {
-    const values: ChipArch[] = Object.values(CHIP_TARGET_MAP);
-    expect(values.length).toBeGreaterThan(0);
-    expect(values.every((v) => v === 'xtensa' || v === 'riscv')).toBe(true);
+  it('is sorted longest-first for substring matching', () => {
+    for (let i = 1; i < KNOWN_CHIPS.length; i++) {
+      expect(KNOWN_CHIPS[i - 1].length).toBeGreaterThanOrEqual(KNOWN_CHIPS[i].length);
+    }
+  });
+
+  it('every known chip resolves to a valid arch family', () => {
+    for (const chip of KNOWN_CHIPS) {
+      const arch: ChipArch = chipArch(chip);
+      expect(arch === 'xtensa' || arch === 'riscv', `${chip} has invalid arch '${arch}'`).toBe(true);
+    }
   });
 });

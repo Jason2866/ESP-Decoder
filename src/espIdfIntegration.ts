@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { CHIP_TARGET_MAP, ChipArch } from './chipTargets';
+import { chipArch, ChipArch } from './chipTargets';
 
 export interface EspIdfBuild {
   name: string;
@@ -236,16 +236,12 @@ function findElfCandidates(buildDir: string, projectName?: string): string[] {
 }
 
 /**
- * ESP-IDF's Xtensa targets are a closed set; any other esp32* IDF target is
- * RISC-V. Used when CHIP_TARGET_MAP has no entry for the sdkconfig target.
+ * Classify an IDF target into an arch family. chipArch() maps the four
+ * Xtensa targets to 'xtensa' and everything else (all RISC-V chips, known or
+ * not) to 'riscv'.
  */
-const XTENSA_IDF_TARGETS = new Set(['esp32', 'esp32s2', 'esp32s3', 'esp8266']);
-
 function idfTargetFamily(idfTarget: string | undefined): ChipArch | undefined {
-  if (!idfTarget) {
-    return undefined;
-  }
-  return CHIP_TARGET_MAP[idfTarget] ?? (XTENSA_IDF_TARGETS.has(idfTarget) ? 'xtensa' : 'riscv');
+  return idfTarget ? chipArch(idfTarget) : undefined;
 }
 
 export async function findEspIdfBuilds(workspaceFolder: string): Promise<EspIdfBuild[]> {

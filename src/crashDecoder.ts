@@ -25,7 +25,7 @@ import type {
   DecodeTarget,
 } from './panic';
 import { findPioGdbToolPath, getPioPackagesDir } from './pioIntegration';
-import { CHIP_TARGET_MAP } from './chipTargets';
+import { chipArch } from './chipTargets';
 import { Addr2linePool } from './addr2lineResolver';
 
 // Re-export for consumers
@@ -751,14 +751,15 @@ function resolveTargetArch(
   crashKind: 'xtensa' | 'riscv' | 'unknown'
 ): DecodeTarget {
   if (configArch && configArch !== 'auto') {
-    const family = CHIP_TARGET_MAP[configArch];
-    if (family === 'xtensa' || configArch === 'xtensa') {
+    if (configArch === 'xtensa') {
       return 'xtensa';
     }
-    if (family === 'riscv' || configArch === 'riscv' || configArch === 'riscv32') {
+    if (configArch === 'riscv' || configArch === 'riscv32') {
       return 'riscv';
     }
-    // Unknown arch, fall through to auto-detect
+    // Chip / IDF target name: the four Xtensa chips are 'xtensa',
+    // everything else is 'riscv'.
+    return chipArch(configArch);
   }
   return crashKind === 'riscv' ? 'riscv' : 'xtensa';
 }
