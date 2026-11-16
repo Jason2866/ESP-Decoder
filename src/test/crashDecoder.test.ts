@@ -431,6 +431,50 @@ describe('CrashCapturer – assert/abort continuation', () => {
     expect(event!.rawText).toContain('Backtrace:');
     expect(event!.lines.filter((l) => l.includes('assert failed:'))).toHaveLength(1);
   });
+
+  it('starts a new block when abort() arrives after a completed backtrace', () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    capturer.pushData(
+      Buffer.from(
+        [
+          'assert failed: first_crash',
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002',
+          'abort() was called at PC 0x42000003 on core 0',
+          'Backtrace: 0x42000004:0x3ffb0004 0x42000005:0x3ffb0005',
+          'Rebooting...',
+        ].join('\n'),
+        'utf8',
+      ),
+    );
+    capturer.flush();
+    // First block (assert + backtrace) and second block (abort + backtrace)
+    // must not be merged into one event.
+    expect(events.length).toBe(2);
+    expect(events[0].rawText).toContain('assert failed: first_crash');
+    expect(events[0].rawText).not.toContain('abort() was called');
+    expect(events[1].rawText).toContain('abort() was called');
+    expect(events[1].rawText).not.toContain('assert failed:');
+  });
+});
+
+describe('CrashCapturer – signature dedup vs. backtrace divergence', () => {
+  it('does not merge crashes that share the first frames but differ later', () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    const crash = (lastAddr: string) =>
+      [
+        'Guru Meditation Error: Core 0 panic\'ed (StoreProhibited)',
+        'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002 0x42000003:0x3ffb0003 0x42000004:0x3ffb0004 0x42000005:0x3ffb0005 0x42000006:0x3ffb0006 ' + lastAddr,
+        'Rebooting...',
+      ].join('\n');
+    capturer.pushData(Buffer.from(crash('0x4200000a:0x3ffb000a') + '\n' + crash('0x4200000b:0x3ffb000b'), 'utf8'));
+    capturer.flush();
+    expect(events.length).toBe(2);
+    expect(events[0].id).not.toBe(events[1].id);
+  });
 });
 
 // ---------------------------------------------------------------------------
