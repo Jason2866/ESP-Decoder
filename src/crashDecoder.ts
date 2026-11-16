@@ -8,21 +8,22 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 
-// Vendored trbr implementation (lives in ./vendor/trbr).
+// Panic decoding engine (modeled on esp-idf-panic-decoder's gdb_panic_server).
 import {
-  decode,
+  decodePanicText,
+  decodeCoredump,
   stringifyDecodeResult,
-  createDecodeParams,
   isParsedGDBLine,
   isGDBLine,
   createCapturer,
-} from './vendor/trbr';
+} from './panic';
 import type {
   Capturer,
   CapturerEvent,
   DecodeOptions,
   DecodeParams,
-} from './vendor/trbr';
+  DecodeTarget,
+} from './panic';
 import { findPioGdbToolPath, getPioPackagesDir } from './pioIntegration';
 import { CHIP_TARGET_MAP } from './chipTargets';
 import { Addr2linePool } from './addr2lineResolver';
@@ -135,17 +136,12 @@ export interface ThreadDecodedCrash {
 }
 
 /**
- * Wraps trbr's Capturer to detect crash events from raw serial byte chunks.
- * Uses trbr's proven crash framing logic (handles Stack memory, register dumps,
- * Backtrace lines, Rebooting... terminators, and all ESP-IDF crash formats).
- *
- * trbr now supports all crash patterns natively:
- * - Guru Meditation Error: / panic'ed (ESP32 classic)
- * - Exception (N): (ESP8266)
- * - assert failed: / abort() was called (all chips)
- * - Core N register dump: (RISC-V chips)
+ * Wraps the panic Capturer to detect crash events from raw serial byte chunks.
+ * The capturer handles line decoding, crash block framing (Stack memory,
+ * register dumps, Backtrace lines, Rebooting... terminators, and all
+ * ESP-IDF crash formats), lightweight parsing, and deduplication.
  */
-export class TrbrCrashCapturer {
+export class CrashCapturer {
   private capturer: Capturer;
   private readonly _onCrashDetected = new vscode.EventEmitter<CrashEvent>();
   readonly onCrashDetected = this._onCrashDetected.event;
@@ -160,7 +156,7 @@ export class TrbrCrashCapturer {
   }
 
   /**
-   * Feed raw serial bytes. trbr's capturer handles line decoding,
+   * Feed raw serial bytes. The capturer handles line decoding,
    * crash block framing (including Stack memory: sections), and
    * deduplication internally.
    */
@@ -193,7 +189,7 @@ export class TrbrCrashCapturer {
 }
 
 /**
- * Convert a trbr CapturerEvent to our CrashEvent interface.
+ * Convert a CapturerEvent to our CrashEvent interface.
  */
 function capturerEventToCrashEvent(ce: CapturerEvent): CrashEvent {
   return {
@@ -207,7 +203,7 @@ function capturerEventToCrashEvent(ce: CapturerEvent): CrashEvent {
 
 /**
  * Logger interface for structured decode logging.
- * When an OutputChannel is provided, all trbr debug output and decode
+ * When an OutputChannel is provided, all decoder debug output and decode
  * diagnostics are written there so users can inspect failures.
  */
 export interface DecodeLogger {
@@ -215,8 +211,8 @@ export interface DecodeLogger {
 }
 
 /**
- * Decode a crash event using the trbr library directly.
- * @param log - optional OutputChannel / logger; when provided, trbr's internal
+ * Decode a crash event into source-level information.
+ * @param log - optional OutputChannel / logger; when provided, decoder
  *              debug output and all decode diagnostics are streamed to it.
  */
 export async function decodeCrash(
@@ -257,7 +253,7 @@ export async function decodeCrash(
   }
 
   try {
-    // Resolve target architecture to a value trbr understands
+    // Resolve target architecture to a decode target ('xtensa' | 'riscv')
     const resolvedArch = resolveTargetArch(targetArch, crashEvent.kind);
 
     // === Xtensa fast-path: resolve stack/backtrace addresses directly via addr2line ===
@@ -297,33 +293,22 @@ export async function decodeCrash(
       }
     }
 
-    // Build DecodeParams via trbr's createDecodeParams
-    let params: DecodeParams;
-    try {
-      params = await createDecodeParams({
-        elfPath,
-        toolPath,
-        targetArch: resolvedArch,
-      });
-    } catch (e) {
-      write(`[ESP Decoder] createDecodeParams failed, using raw params: ${e instanceof Error ? e.message : String(e)}`);
-      params = { elfPath, toolPath: toolPath!, targetArch: resolvedArch };
-    }
+    const params: DecodeParams = { elfPath, toolPath, targetArch: resolvedArch };
 
     // Build decode options
     const decodeOptions: DecodeOptions = {
       signal: abortController.signal,
     };
 
-    const result = await decode(params, crashEvent.rawText, decodeOptions);
+    const result = await decodePanicText(params, crashEvent.rawText, decodeOptions);
 
     const decRes = Array.isArray(result) ? result[0]?.result ?? result[0] : result;
 
     if ((decRes?.stacktraceLines?.length ?? 0) === 0) {
-      write('[ESP Decoder] WARNING: trbr returned 0 stacktrace lines — check that toolPath points to a working GDB and the ELF matches the firmware.');
+      write('[ESP Decoder] WARNING: decoder returned 0 stacktrace lines — check that toolPath points to a working GDB and the ELF matches the firmware.');
     }
 
-    // Convert trbr's DecodeResult to our DecodedCrash format
+    // Convert the decoder's DecodeResult to our DecodedCrash format
     const decoded = convertDecodeResult(result, crashEvent.rawText);
 
     // Post-processing: heuristic stack enhancement (RISC-V) + register annotations.
@@ -331,7 +316,7 @@ export async function decodeCrash(
     const postProcessTasks: Promise<void>[] = [];
 
     // For RISC-V crashes: enhance with heuristic stack analysis when
-    // trbr's GDB-server-based unwinding yields few frames.
+    // the decoder's GDB-server-based unwinding yields few frames.
     if (
       crashEvent.kind === 'riscv' &&
       /Stack memory:/i.test(crashEvent.rawText) &&
@@ -373,10 +358,10 @@ export async function decodeCrash(
 }
 
 /**
- * Decode an ESP coredump file using trbr's coredump mode.
+ * Decode an ESP coredump file, producing per-thread backtraces.
  * Supports both ELF format and base64-encoded (b64) format.
- * For b64 files, the content is decoded to a temporary ELF file before passing
- * to trbr. The b64 format is used by ESP-IDF's esp-coredump tool and may
+ * For b64 files, the content is decoded to a temporary ELF file before decoding.
+ * The b64 format is used by ESP-IDF's esp-coredump tool and may
  * contain serial markers (CORE DUMP START / CORE DUMP END).
  *
  * @param coredumpPath - Path to the coredump file (ELF or b64)
@@ -418,7 +403,7 @@ export async function decodeCoredumpElf(
 /**
  * Decode a base64-encoded coredump from raw text content (e.g. pasted from serial).
  * Extracts the base64 payload (optionally between CORE DUMP START/END markers),
- * decodes it, and passes the resulting ELF to trbr's coredump decoder.
+ * decodes it, and passes the resulting ELF to the coredump decoder.
  *
  * @param b64Content - Base64-encoded coredump text (with or without markers)
  * @param elfPath - Path to the firmware ELF file (with debug symbols)
@@ -629,25 +614,11 @@ async function decodeCoredumpElfInternal(
   const resolvedArch = resolveTargetArch(targetArch, chosenArch);
 
   try {
-    // Create decode params with coredumpMode enabled
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let params: any;
-    try {
-      params = await createDecodeParams({
-        elfPath,
-        toolPath,
-        targetArch: resolvedArch,
-        coredumpMode: true,
-      });
-    } catch (e) {
-      write(`[ESP Decoder] createDecodeParams (coredump) failed: ${e instanceof Error ? e.message : String(e)}`);
-      params = { elfPath, toolPath, targetArch: resolvedArch, coredumpMode: true };
-    }
-
+    const params: DecodeParams = { elfPath, toolPath, targetArch: resolvedArch };
     const decodeOptions: DecodeOptions = {};
 
-    // Pass the coredump file path as DecodeInputFileSource
-    const result = await decode(params, { inputPath: coredumpPath }, decodeOptions);
+    // Pass the coredump file path to the coredump decoder
+    const result = await decodeCoredump(params, coredumpPath, decodeOptions);
 
     // Get stringified output for rawOutput
     let rawOutput: string;
@@ -727,14 +698,6 @@ function autoDetectPioToolPath(
   return toolPath;
 }
 
-/**
- * trbr requires a concrete target arch, but all RISC-V chips share the same
- * ILP32 register layout and decoder (mirroring esp-idf-panic-decoder's single
- * 'default' target), so any RISC-V chip resolves to one canonical target.
- */
-const DEFAULT_RISCV_TARGET = 'esp32c3';
-type TrbrTarget = 'xtensa' | typeof DEFAULT_RISCV_TARGET;
-
 /** ELF e_machine values for ESP chip families */
 const ELF_MACHINE_XTENSA = 0x5e; // 94
 const ELF_MACHINE_RISCV = 0xf3;  // 243
@@ -775,33 +738,35 @@ async function detectElfArch(
 }
 
 /**
- * Resolve the target architecture from config and crash kind.
+ * Resolve the decode target from config and crash kind.
  * Accepts 'xtensa' / 'riscv' family names, legacy aliases ('riscv32',
- * 'esp32c3', ...) and 'auto'. All RISC-V values map to DEFAULT_RISCV_TARGET.
+ * 'esp32c3', ...) and 'auto'. All RISC-V values map to the single 'riscv'
+ * decoder target — all RISC-V chips share the same generic ILP32 register
+ * layout and decoder (mirroring esp-idf-panic-decoder's single target).
  */
 function resolveTargetArch(
   configArch: string | undefined,
   crashKind: 'xtensa' | 'riscv' | 'unknown'
-): TrbrTarget {
+): DecodeTarget {
   if (configArch && configArch !== 'auto') {
     const family = CHIP_TARGET_MAP[configArch];
     if (family === 'xtensa' || configArch === 'xtensa') {
       return 'xtensa';
     }
     if (family === 'riscv' || configArch === 'riscv' || configArch === 'riscv32') {
-      return DEFAULT_RISCV_TARGET;
+      return 'riscv';
     }
     // Unknown arch, fall through to auto-detect
   }
-  return crashKind === 'riscv' ? DEFAULT_RISCV_TARGET : 'xtensa';
+  return crashKind === 'riscv' ? 'riscv' : 'xtensa';
 }
 
 /**
- * Convert trbr's DecodeResult (or CoredumpDecodeResult) to our DecodedCrash format.
+ * Convert the decoder's DecodeResult (or CoredumpDecodeResult) to our DecodedCrash format.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function convertDecodeResult(result: any, crashText: string): DecodedCrash {
-  // Get the stringified output from trbr for rawOutput
+  // Get the stringified output from the decoder for rawOutput
   let rawOutput: string;
   try {
     rawOutput = stringifyDecodeResult(result, { color: 'disable' });
@@ -835,7 +800,7 @@ function convertDecodeResult(result: any, crashText: string): DecodedCrash {
     };
   }
 
-  // Extract stack trace from trbr's stacktraceLines
+  // Extract stack trace from the decoder's stacktraceLines
   const stacktrace: StackFrame[] = [];
   const traceLines = decodeResult.stacktraceLines ?? [];
   for (const traceLine of traceLines) {
@@ -878,7 +843,7 @@ function convertDecodeResult(result: any, crashText: string): DecodedCrash {
 }
 
 /**
- * Stringify an addr location from trbr's types.
+ * Stringify an addr location from the decoder's types.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function stringifyAddrLocation(location: any): string {
@@ -976,7 +941,7 @@ const DISCRIMINATOR_RE = /\s*\(discriminator \d+\)/;
  * Uses the same `-fiaC` flags and output parsing as pioarduino/filter_exception_decoder.py's _decode_batch().
  * Addresses are passed directly (without decrement) which resolves raw addresses as-is.
  *
- * This is the heuristic fallback for RISC-V crashes where trbr's GDB-server-based
+ * This is the heuristic fallback for RISC-V crashes where the decoder's GDB-server-based
  * unwinding yields few frames (because the panic GDB server only serves stack RAM –
  * code/flash memory reads return 0x00, preventing prologue analysis).
  */
@@ -1589,7 +1554,7 @@ function parseXtensaFaultInfo(text: string): DecodedCrash['faultInfo'] | undefin
 }
 
 /**
- * Parse fault information from crash text (fallback when trbr can't decode).
+ * Parse fault information from crash text (fallback when the decoder cannot decode).
  */
 function parseFaultInfo(text: string): DecodedCrash['faultInfo'] | undefined {
   const lines = text.split('\n');

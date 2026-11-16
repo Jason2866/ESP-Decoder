@@ -46,11 +46,10 @@ vi.mock('vscode', () => {
 // ---------------------------------------------------------------------------
 // Import under test (after vscode mock is in place)
 // ---------------------------------------------------------------------------
-import { TrbrCrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
+import { CrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
 import type { CrashEvent } from '../crashDecoder.js';
 import { getPioPackagesDir } from '../pioIntegration.js';
-import { registerSets } from '../vendor/trbr/decode/regs.js';
-import { gdbRegsInfoRiscvIlp32 } from '../vendor/trbr/decode/riscvPanicParse.js';
+import { registerSets, gdbRegsInfoRiscvIlp32 } from '../panic/index.js';
 
 // ---------------------------------------------------------------------------
 // Fixture paths
@@ -122,7 +121,7 @@ const XTENSA_GDB_PATH = process.env.ESP_XTENSA_GDB ?? findPioGdb('xtensa');
  * Feed text into the capturer line-by-line and flush.
  * Returns the first detected CrashEvent (or undefined if none).
  */
-function feedCrashText(capturer: TrbrCrashCapturer, text: string): CrashEvent | undefined {
+function feedCrashText(capturer: CrashCapturer, text: string): CrashEvent | undefined {
   let detected: CrashEvent | undefined;
   capturer.onCrashDetected((e) => {
     if (!detected) { detected = e; }
@@ -136,11 +135,11 @@ function feedCrashText(capturer: TrbrCrashCapturer, text: string): CrashEvent | 
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('TrbrCrashCapturer – ESP32-C6 assert failure', () => {
-  let capturer: TrbrCrashCapturer;
+describe('CrashCapturer – ESP32-C6 assert failure', () => {
+  let capturer: CrashCapturer;
 
   beforeEach(() => {
-    capturer = new TrbrCrashCapturer();
+    capturer = new CrashCapturer();
   });
 
   it('detects the crash via the fallback detector', () => {
@@ -324,11 +323,11 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
 // ESP8266 crash detection
 // ---------------------------------------------------------------------------
 
-describe('TrbrCrashCapturer – ESP8266 exception crash', () => {
-  let capturer: TrbrCrashCapturer;
+describe('CrashCapturer – ESP8266 exception crash', () => {
+  let capturer: CrashCapturer;
 
   beforeEach(() => {
-    capturer = new TrbrCrashCapturer();
+    capturer = new CrashCapturer();
   });
 
   it('detects the crash', () => {
@@ -370,14 +369,14 @@ describe('TrbrCrashCapturer – ESP8266 exception crash', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Regression: ESP32 Guru Meditation captured via trbr native path
+// Regression: ESP32 Guru Meditation captured via the crash capturer
 // ---------------------------------------------------------------------------
 
-describe('TrbrCrashCapturer – ESP32 Guru Meditation (trbr native path)', () => {
-  let capturer: TrbrCrashCapturer;
+describe('CrashCapturer – ESP32 Guru Meditation (native capturer path)', () => {
+  let capturer: CrashCapturer;
 
   beforeEach(() => {
-    capturer = new TrbrCrashCapturer();
+    capturer = new CrashCapturer();
   });
 
   const GURU_CRASH = [
@@ -390,10 +389,10 @@ describe('TrbrCrashCapturer – ESP32 Guru Meditation (trbr native path)', () =>
     'Rebooting...',
   ].join('\n');
 
-  it('detects the crash via trbr (not fallback)', () => {
+  it('detects the crash via the capturer (not fallback)', () => {
     const event = feedCrashText(capturer, GURU_CRASH);
     expect(event).toBeDefined();
-    // trbr-native events have numeric IDs (e.g. "000001"), not "fallback-..." prefixed
+    // capturer events have numeric IDs (e.g. "000001"), not "fallback-..." prefixed
     expect(event!.id).not.toMatch(/^fallback-/);
   });
 
@@ -692,11 +691,11 @@ describe('decodeCoredumpBase64', () => {
 const ESP32S31_CRASH_TEXT_PATH = path.join(FIXTURES_DIR, 'esp32s31_crash.txt');
 const ESP32S31_CRASH_TEXT = fs.readFileSync(ESP32S31_CRASH_TEXT_PATH, 'utf8');
 
-describe('TrbrCrashCapturer – ESP32-S31 RISC-V crash', () => {
-  let capturer: TrbrCrashCapturer;
+describe('CrashCapturer – ESP32-S31 RISC-V crash', () => {
+  let capturer: CrashCapturer;
 
   beforeEach(() => {
-    capturer = new TrbrCrashCapturer();
+    capturer = new CrashCapturer();
   });
 
   it('detects the crash', () => {

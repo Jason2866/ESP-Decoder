@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
-import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
+import { CrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
 import { ImprovSessionCancellation, withImprovSession } from './improvWiFi';
 
 export interface SessionConfig {
@@ -21,7 +21,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   private panel: vscode.WebviewPanel | undefined;
   private readonly extensionUri: vscode.Uri;
   private readonly serialManager: SerialPortManager;
-  private readonly crashCapturer: TrbrCrashCapturer;
+  private readonly crashCapturer: CrashCapturer;
   private readonly addr2linePool: Addr2linePool;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly log: vscode.OutputChannel;
@@ -69,7 +69,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   ) {
     this.extensionUri = extensionUri;
     this.serialManager = serialManager;
-    this.crashCapturer = new TrbrCrashCapturer();
+    this.crashCapturer = new CrashCapturer();
     this.addr2linePool = new Addr2linePool();
     this.config = config || {};
     this.log = outputChannel || vscode.window.createOutputChannel('ESP Decoder');
@@ -144,7 +144,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       })
     );
 
-    // Listen to crash events from trbr's capturer
+    // Listen to crash events from the crash capturer
     this.disposables.push(
       this.crashCapturer.onCrashDetected(async (event) => {
         this.crashEvents.push(event);
@@ -549,8 +549,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       );
     }
 
-    // Feed raw bytes to trbr's capturer for crash detection.
-    // trbr handles line decoding, crash framing (including Stack memory:
+    // Feed raw bytes to the crash capturer for crash detection.
+    // The capturer handles line decoding, crash framing (including Stack memory:
     // sections for RISC-V), and deduplication internally.
     this.crashCapturer.pushData(data);
 
@@ -1082,7 +1082,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
   /**
    * Show a file picker to select a coredump ELF file, then decode it
-   * using trbr's coredump mode.
+   * using the coredump decoder.
    */
   private async handleDecodeCoredumpFile(): Promise<void> {
     if (!this.config.elfPath) {
@@ -3339,7 +3339,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         });
       }
 
-      // Show raw trbr output at the bottom
+      // Show raw decoded output at the bottom
       if (result.rawOutput) {
         html += '<div class="crash-section">';
         html += '<div class="crash-section-title">Decoded Output</div>';
@@ -3443,7 +3443,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         html += '</div>';
       }
 
-      // Show raw decoded output from trbr
+      // Show raw decoded output
       if (decoded.rawOutput) {
         html += '<div class="crash-section">';
         html += '<div class="crash-section-title">Decoded Output</div>';

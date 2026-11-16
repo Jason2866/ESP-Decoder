@@ -162,8 +162,7 @@ Or install from the Extensions sidebar: "Install from VSIX..."
 
 ## Credits
 
-[dankeboy](https://github.com/dankeboy36) for [TraceBreaker (trbr)](https://github.com/dankeboy36/trbr) code and 
-thx to [h2zero](https://github.com/h2zero) for contributing performance tweaks and testing.
+Crash decoding is modeled on [esp-idf-panic-decoder](https://github.com/espressif/esp-idf-panic-decoder) (GDB remote-protocol approach). Serial crash capture logic was originally derived from [TraceBreaker (trbr)](https://github.com/dankeboy36/trbr) by [dankeboy](https://github.com/dankeboy36), with performance tweaks and testing by [h2zero](https://github.com/h2zero).
 
 ## License
 
