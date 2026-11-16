@@ -38,8 +38,6 @@ export class CrashFramer {
   pushLine(line: string, atMs: number): FramedCrashBlock[] {
     const finalized: FramedCrashBlock[] = [];
 
-    this.finalizeIfQuiet(finalized, atMs);
-
     // `abort() was called` following an `assert failed:` line is part of the
     // same crash (ESP-IDF prints both before the backtrace), so it continues
     // the active block instead of starting a new one — but only while the

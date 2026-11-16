@@ -425,23 +425,40 @@ export function findPioGdbToolPath(
   const ext = process.platform === 'win32' ? '.exe' : '';
 
   let pkgDirs: string[] = [];
-  let binNames: string[] = [];
+  /** Chip-specific binary names, checked across all packages first. */
+  const preferredNames: string[] = [];
+  /** Generic binary names, checked in package-priority order. */
+  let genericNames: string[] = [];
+  /** Prefix used to prefer chip-matching gdb binaries in the fallback scan. */
+  let chipPrefix: string | undefined;
 
   if (arch === 'riscv') {
     pkgDirs = listPackageDirs(packagesDir, /riscv32/);
-    binNames = [`riscv32-esp-elf-gdb${ext}`];
+    genericNames = [`riscv32-esp-elf-gdb${ext}`];
   } else {
     pkgDirs = listPackageDirs(packagesDir, /^(tool|toolchain)-xtensa/);
     const chipHint = chipName === 'esp8266' ? 'lx106' : chipName;
-    binNames = [
-      ...(chipHint ? [`xtensa-${chipHint}-elf-gdb${ext}`] : []),
-      ...XTENSA_GDB_NAMES.map((n) => n + ext),
-    ];
+    if (chipHint) {
+      preferredNames.push(`xtensa-${chipHint}-elf-gdb${ext}`);
+      chipPrefix = `xtensa-${chipHint}-`;
+    }
+    genericNames = XTENSA_GDB_NAMES.map((n) => n + ext);
   }
 
+  // Chip-specific binaries take precedence across all matching packages.
+  for (const name of preferredNames) {
+    for (const pkgDir of pkgDirs) {
+      const candidate = path.join(packagesDir, pkgDir, 'bin', name);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  // Generic names keep the package priority (package dir outer, name inner).
   for (const pkgDir of pkgDirs) {
     const binDir = path.join(packagesDir, pkgDir, 'bin');
-    for (const name of binNames) {
+    for (const name of genericNames) {
       const candidate = path.join(binDir, name);
       if (fs.existsSync(candidate)) {
         return candidate;
@@ -449,22 +466,32 @@ export function findPioGdbToolPath(
     }
   }
 
-  // Fallback: scan bin dirs of matching packages for any arch-appropriate gdb
+  // Fallback: scan bin dirs of matching packages for any arch-appropriate gdb,
+  // applying the same ordering — chip-matching binaries before generic ones.
   const gdbPattern = arch === 'riscv'
     ? /^riscv32-.*-elf-gdb(\.exe)?$/
     : /^xtensa-.*-elf-gdb(\.exe)?$/;
-  for (const pkgDir of pkgDirs) {
-    const binDir = path.join(packagesDir, pkgDir, 'bin');
-    try {
-      for (const entry of fs.readdirSync(binDir)) {
-        if (gdbPattern.test(entry)) {
-          return path.join(binDir, entry);
+  const scan = (predicate: (entry: string) => boolean): string | undefined => {
+    for (const pkgDir of pkgDirs) {
+      const binDir = path.join(packagesDir, pkgDir, 'bin');
+      try {
+        for (const entry of fs.readdirSync(binDir)) {
+          if (predicate(entry)) {
+            return path.join(binDir, entry);
+          }
         }
-      }
-    } catch { /* bin dir missing or unreadable */ }
-  }
+      } catch { /* bin dir missing or unreadable */ }
+    }
+    return undefined;
+  };
 
-  return undefined;
+  if (chipPrefix) {
+    const chipMatch = scan((entry) => entry.startsWith(chipPrefix) && gdbPattern.test(entry));
+    if (chipMatch) {
+      return chipMatch;
+    }
+  }
+  return scan((entry) => gdbPattern.test(entry));
 }
 
 /**

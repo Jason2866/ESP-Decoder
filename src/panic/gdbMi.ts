@@ -242,18 +242,45 @@ function splitMiListItems(listContent: string): string[] {
 
 export function unescapeMiString(value: string): string {
   let result = '';
+  // MI octal escapes (\ooo) encode raw bytes; consecutive ones may form a
+  // multi-byte UTF-8 sequence, so they are buffered and decoded together.
+  let pendingBytes: number[] = [];
+  const flushBytes = () => {
+    if (pendingBytes.length) {
+      result += Buffer.from(pendingBytes).toString('utf8');
+      pendingBytes = [];
+    }
+  };
+
   for (let i = 0; i < value.length; i++) {
     const char = value[i];
     if (char !== '\\') {
+      flushBytes();
       result += char;
       continue;
     }
     const next = value[i + 1];
     if (!next) {
+      flushBytes();
       result += '\\';
       continue;
     }
     i++;
+    if (next >= '0' && next <= '7') {
+      // Octal escape: up to three octal digits encode a single byte.
+      let octal = next;
+      while (
+        octal.length < 3 &&
+        i + 1 < value.length &&
+        value[i + 1] >= '0' &&
+        value[i + 1] <= '7'
+      ) {
+        octal += value[++i];
+      }
+      pendingBytes.push(parseInt(octal, 8) & 0xff);
+      continue;
+    }
+    flushBytes();
     switch (next) {
       case '\\':
         result += '\\';
@@ -275,6 +302,7 @@ export function unescapeMiString(value: string): string {
         break;
     }
   }
+  flushBytes();
   return result;
 }
 

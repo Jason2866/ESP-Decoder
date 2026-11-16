@@ -299,12 +299,15 @@ export async function decodeCoredumpFile(
       const btParsed = parseBacktrace(btOut);
       const stacktraceLines = btParsed.map((frame, index) => {
         const args = frameArgs[index]?.args || [];
+        // Prefer GDB's resolved fullname (comp_dir + file) over the bare file.
+        const rawFile = frame.fullname || frame.file;
+        const sourceFile = rawFile && rawFile !== '??' ? rawFile : undefined;
         if (frame.func) {
           return {
             regAddr: frame.addr,
             lineNumber: frame.line ?? '??',
             method: frame.func,
-            file: frame.file ?? '??',
+            file: sourceFile ?? '??',
             args,
           };
         }

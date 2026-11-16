@@ -125,6 +125,13 @@ export class Capturer {
     }
     this.quietTimer = setTimeout(() => {
       this.quietTimer = undefined;
+      // Don't finalize while LineDecoder still holds an unterminated line:
+      // the framer would emit the block without it and the pending bytes
+      // (incl. split UTF-8 state) must survive until the line completes or
+      // flush() is called.
+      if (this.lineDecoder.hasPendingLine()) {
+        return;
+      }
       this.finalizeBlocks(this.framer.flush(this.options.now()));
     }, this.options.quietPeriodMs);
     this.quietTimer.unref?.();

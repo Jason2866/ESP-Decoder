@@ -13,6 +13,11 @@ export class LineDecoder {
     return this.drain(true);
   }
 
+  /** True while an unterminated line (or held-back CR) is still buffered. */
+  hasPendingLine(): boolean {
+    return this.buffer.length > 0;
+  }
+
   private drain(isFinal: boolean): string[] {
     const lines: string[] = [];
     let start = 0;

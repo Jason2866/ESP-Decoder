@@ -459,6 +459,34 @@ describe('CrashCapturer – assert/abort continuation', () => {
   });
 });
 
+describe('CrashCapturer – quiet period with unterminated line', () => {
+  it('does not finalize while a line lacks a newline; emits on explicit flush', async () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    // No trailing newline: the last line stays buffered in LineDecoder.
+    capturer.pushData(
+      Buffer.from(
+        [
+          'assert failed: unterminated_tail',
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002',
+          'Rebooting...',
+        ].join('\n'),
+        'utf8',
+      ),
+    );
+    // Wait beyond the 500 ms quiet period: the framer must not finalize
+    // while the unterminated line is still buffered.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(events.length).toBe(0);
+
+    capturer.flush();
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('assert failed: unterminated_tail');
+    expect(events[0].rawText).toContain('Rebooting...');
+  });
+});
+
 describe('CrashCapturer – signature dedup vs. backtrace divergence', () => {
   it('does not merge crashes that share the first frames but differ later', () => {
     const capturer = new CrashCapturer();
