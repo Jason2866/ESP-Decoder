@@ -48,7 +48,8 @@ export interface AllocInfo {
 }
 
 export interface FaultInfo {
-  coreId: number;
+  /** CPU core that crashed; absent when the source has no core metadata. */
+  coreId?: number;
   programCounter?: AddrLine;
   faultAddr?: AddrLine;
   faultCode?: number;

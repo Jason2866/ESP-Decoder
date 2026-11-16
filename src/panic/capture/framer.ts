@@ -40,7 +40,14 @@ export class CrashFramer {
 
     this.finalizeIfQuiet(finalized, atMs);
 
-    if (isStartLine(line)) {
+    // `abort() was called` following an `assert failed:` line is part of the
+    // same crash (ESP-IDF prints both before the backtrace), so it continues
+    // the active block instead of starting a new one.
+    const continuesAssertBlock =
+      isAbortCalledLine(line) &&
+      this.active?.lines.some((l) => /^assert failed:/i.test(l.trim())) === true;
+
+    if (isStartLine(line) && !continuesAssertBlock) {
       this.finalize(finalized);
       this.active = { lines: [], startedAt: atMs, lastAt: atMs, reasonLine: undefined };
     }
@@ -105,6 +112,10 @@ function isStartLine(line: string): boolean {
 
 function isReasonLine(line: string): boolean {
   return reasonPatterns.some((pattern) => pattern.test(line));
+}
+
+function isAbortCalledLine(line: string): boolean {
+  return /^abort\(\) was called/i.test(line.trim());
 }
 
 function isCompleteBlock(lines: string[]): boolean {

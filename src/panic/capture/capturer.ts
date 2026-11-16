@@ -66,6 +66,7 @@ export class Capturer {
   private readonly eventsById = new Map<string, CapturerEvent>();
   private readonly signatureIndex = new Map<string, string>();
   private nextId = 1;
+  private quietTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: CapturerOptions = {}) {
     this.options = {
@@ -82,11 +83,25 @@ export class Capturer {
       throw new TypeError('Expected a Uint8Array monitor chunk');
     }
     this.processLines(this.lineDecoder.push(chunk));
+    this.scheduleQuietFlush();
   }
 
   flush(): void {
+    if (this.quietTimer) {
+      clearTimeout(this.quietTimer);
+      this.quietTimer = undefined;
+    }
     this.processLines(this.lineDecoder.flush());
     this.finalizeBlocks(this.framer.flush(this.options.now()));
+  }
+
+  /** Cancel pending timers; the capturer emits no further events. */
+  dispose(): void {
+    if (this.quietTimer) {
+      clearTimeout(this.quietTimer);
+      this.quietTimer = undefined;
+    }
+    this.eventBus.removeAllListeners();
   }
 
   getEvents(): CapturerEvent[] {
@@ -98,6 +113,21 @@ export class Capturer {
     return () => {
       this.eventBus.off(eventName, listener);
     };
+  }
+
+  /**
+   * Finalize a pending crash block after the stream goes quiet, without
+   * waiting for the next chunk or an explicit flush.
+   */
+  private scheduleQuietFlush(): void {
+    if (this.quietTimer) {
+      clearTimeout(this.quietTimer);
+    }
+    this.quietTimer = setTimeout(() => {
+      this.quietTimer = undefined;
+      this.finalizeBlocks(this.framer.flush(this.options.now()));
+    }, this.options.quietPeriodMs);
+    this.quietTimer.unref?.();
   }
 
   private processLines(lines: string[]): void {
@@ -215,7 +245,13 @@ export class Capturer {
       if (!this.isWithinDedupWindow(existing, candidate.lastSeenAt)) {
         continue;
       }
-      if (createFingerprint(existing.kind, existing.lightweight) === candidateFingerprint) {
+      if (
+        createFingerprint(existing.kind, existing.lightweight) === candidateFingerprint &&
+        backtracesCompatible(
+          existing.lightweight.backtraceAddrs,
+          candidate.lightweight.backtraceAddrs,
+        )
+      ) {
         return existing;
       }
     }
@@ -475,6 +511,20 @@ function isLikelySameCrash(
   }
 
   return containsNormalizedText(existing.rawText, candidate.rawText);
+}
+
+/**
+ * Two backtrace captures are compatible when they agree on every shared
+ * frame; a shorter (partial) capture is compatible with a longer one.
+ */
+function backtracesCompatible(a: number[], b: number[]): boolean {
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function getPrimaryAddr(lightweight: CapturerLightweight): number | undefined {

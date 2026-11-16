@@ -195,8 +195,8 @@ function dedupeGDBLines(result: DecodeResult): DecodeResult {
   return {
     ...result,
     stacktraceLines: result.stacktraceLines.reduce(
-      (acc, currentLine, index) => {
-        const previousLine = acc[index - 1];
+      (acc, currentLine) => {
+        const previousLine = acc[acc.length - 1];
         if (previousLine && equalsGDBLine(previousLine, currentLine)) {
           return acc;
         }

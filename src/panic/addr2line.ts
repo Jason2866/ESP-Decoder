@@ -24,6 +24,7 @@ class GDBSession {
   private buffer = '';
   private readonly queue: CommandQueueItem[] = [];
   private current: { resolve: (r: string) => void; reject: (e: unknown) => void } | null = null;
+  private startReject: ((err: Error) => void) | null = null;
 
   constructor({ toolPath, elfPath }: Pick<DecodeParams, 'elfPath' | 'toolPath'>, options: DecodeOptions = {}) {
     this.toolPath = toolPath;
@@ -32,8 +33,10 @@ class GDBSession {
       stdio: 'pipe',
       signal: options.signal,
     });
-    this.gdb.stdout!.on('data', (chunk) => this.onData(chunk));
-    this.gdb.stderr!.on('data', (chunk) => this.onData(chunk));
+    this.gdb.stdout!.setEncoding('utf8');
+    this.gdb.stderr!.setEncoding('utf8');
+    this.gdb.stdout!.on('data', (chunk: string) => this.onData(chunk));
+    this.gdb.stderr!.on('data', (chunk: string) => this.onData(chunk));
     this.gdb.on('error', (err) =>
       this.terminate(err instanceof Error ? err : new Error(String(err))),
     );
@@ -44,6 +47,9 @@ class GDBSession {
         );
         console.warn(exitErr.message);
         this.terminate(exitErr);
+      } else if (!this.didExecuteFirstCommand) {
+        // Exited (even cleanly) before the startup prompt — fail start().
+        this.terminate(new Error(`GDB exited before startup completed (code=${code}, signal=${signal})`));
       }
     });
   }
@@ -52,6 +58,8 @@ class GDBSession {
     if (!this.error) {
       this.error = err;
     }
+    this.startReject?.(this.error);
+    this.startReject = null;
     if (this.current) {
       const { reject } = this.current;
       this.current = null;
@@ -63,8 +71,8 @@ class GDBSession {
     }
   }
 
-  private onData(chunk: Buffer): void {
-    this.buffer += chunk.toString();
+  private onData(chunk: string): void {
+    this.buffer += chunk;
     if (!this.current) {
       return;
     }
@@ -92,7 +100,9 @@ class GDBSession {
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
+      this.startReject = reject;
       const cleanup = () => {
+        this.startReject = null;
         this.gdb.off('error', onError);
         this.gdb.stdout!.off('data', onData);
         this.gdb.stderr!.off('data', onData);
@@ -143,6 +153,13 @@ class GDBSession {
           resolve();
         }
       };
+      // If the process already terminated, startReject was consumed by
+      // terminate(); reject immediately instead of waiting for data.
+      if (this.error) {
+        cleanup();
+        reject(this.error);
+        return;
+      }
       this.gdb.on('error', onError);
       this.gdb.stdout!.on('data', onData);
       this.gdb.stderr!.on('data', onData);
@@ -169,7 +186,7 @@ class GDBSession {
     if (!this.gdb.killed) {
       this.gdb.stdin?.end();
       this.gdb.kill('SIGTERM');
-      if (typeof this.gdb.exitCode !== 'number') {
+      if (this.gdb.exitCode === null && this.gdb.signalCode === null) {
         await new Promise((resolve) => this.gdb.once('exit', resolve));
       }
     }

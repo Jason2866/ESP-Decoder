@@ -235,11 +235,24 @@ function findElfCandidates(buildDir: string, projectName?: string): string[] {
   return candidates;
 }
 
+/**
+ * ESP-IDF's Xtensa targets are a closed set; any other esp32* IDF target is
+ * RISC-V. Used when CHIP_TARGET_MAP has no entry for the sdkconfig target.
+ */
+const XTENSA_IDF_TARGETS = new Set(['esp32', 'esp32s2', 'esp32s3', 'esp8266']);
+
+function idfTargetFamily(idfTarget: string | undefined): ChipArch | undefined {
+  if (!idfTarget) {
+    return undefined;
+  }
+  return CHIP_TARGET_MAP[idfTarget] ?? (XTENSA_IDF_TARGETS.has(idfTarget) ? 'xtensa' : 'riscv');
+}
+
 export async function findEspIdfBuilds(workspaceFolder: string): Promise<EspIdfBuild[]> {
   const buildDir = path.join(workspaceFolder, 'build');
   const projectName = readProjectName(workspaceFolder);
   const idfTarget = parseIdfTarget(workspaceFolder);
-  const targetArch = (idfTarget && CHIP_TARGET_MAP[idfTarget]) || undefined;
+  const targetArch = idfTargetFamily(idfTarget);
   const toolPath = findGdbFromIdfTools(targetArch ?? 'xtensa', idfTarget);
 
   const elfCandidates = findElfCandidates(buildDir, projectName);

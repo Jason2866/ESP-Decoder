@@ -72,7 +72,7 @@ export class GdbStubServer {
       server.on('listening', listeningHandler);
       listeners.push(() => server.removeListener('listening', listeningHandler));
 
-      server.listen(0);
+      server.listen(0, '127.0.0.1');
     });
 
     const address = server.address();

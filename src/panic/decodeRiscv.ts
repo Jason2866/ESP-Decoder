@@ -179,7 +179,7 @@ async function fetchStacktraceWithMi(
 
     client = new GdbMiClient(toolPath, ['--interpreter=mi2', '-n', elfPath], options);
     await client.drainHandshake();
-    const targetResult = await client.sendCommand(`-target-select remote :${port}`);
+    const targetResult = await client.sendCommand(`-target-select remote 127.0.0.1:${port}`);
     if (miErrorPattern.test(targetResult)) {
       throw new Error(`Failed to connect to GDB remote target: ${describeMiFailure(targetResult)}`);
     }

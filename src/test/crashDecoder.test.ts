@@ -410,6 +410,30 @@ describe('CrashCapturer – ESP32 Guru Meditation (native capturer path)', () =>
 });
 
 // ---------------------------------------------------------------------------
+// assert failed: + abort() was called continuation
+// ---------------------------------------------------------------------------
+
+describe('CrashCapturer – assert/abort continuation', () => {
+  it('keeps assert failed and abort() was called in a single crash block', () => {
+    const capturer = new CrashCapturer();
+    const event = feedCrashText(
+      capturer,
+      [
+        'assert failed: npl_freertos_event_init',
+        'abort() was called at PC 0x42001234 on core 0',
+        'Backtrace: 0x42001234:0x3ffb1234 0x42005678:0x3ffb5678',
+        'Rebooting...',
+      ].join('\n'),
+    );
+    expect(event).toBeDefined();
+    expect(event!.rawText).toContain('assert failed: npl_freertos_event_init');
+    expect(event!.rawText).toContain('abort() was called');
+    expect(event!.rawText).toContain('Backtrace:');
+    expect(event!.lines.filter((l) => l.includes('assert failed:'))).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ESP8266 crash decoding (raw decode fallback)
 // ---------------------------------------------------------------------------
 

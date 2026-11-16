@@ -36,6 +36,8 @@ export class GdbMiClient {
   private error: Error | undefined;
   private readonly commandQueue: QueuedCommand[] = [];
   private stdoutBuffer = '';
+  private handshakeSettled = false;
+  private handshakeReject: ((err: Error) => void) | null = null;
 
   constructor(gdbPath: string, args: string[], options: GdbMiOptions = {}) {
     this.cp = cp.spawn(gdbPath, args, { stdio: 'pipe', signal: options.signal });
@@ -43,27 +45,42 @@ export class GdbMiClient {
     this.log = createLogger(this.id, options.debug);
     this.log('spawn', gdbPath, args.join(' '));
 
-    if (options.signal) {
-      options.signal.addEventListener('abort', () => {
-        const abortErr = new AbortError();
-        this.error = abortErr;
-        this.log('abort signal received');
-        this.commandQueue.forEach((executor) => executor.reject(abortErr));
-        this.commandQueue.length = 0;
-      });
+    const onAbort = () => {
+      this.fail(new AbortError());
+    };
+    options.signal?.addEventListener('abort', onAbort);
+    if (options.signal?.aborted) {
+      onAbort();
     }
 
-    this.cp.stdout!.on('data', (chunk) => this.onData(chunk));
-    this.cp.stderr!.on('data', (chunk) => this.onData(chunk));
-    this.cp.on('error', (err) => {
-      this.error = err;
-      this.log('process error', err);
-      this.commandQueue.forEach((executor) => executor.reject(err));
-      this.commandQueue.length = 0;
-    });
+    this.cp.stdout!.setEncoding('utf8');
+    this.cp.stderr!.setEncoding('utf8');
+    this.cp.stdout!.on('data', (chunk: string) => this.onData(chunk));
+    this.cp.stderr!.on('data', (chunk: string) => this.onData(chunk));
+    this.cp.stdin!.on('error', (err) => this.fail(err instanceof Error ? err : new Error(String(err))));
+    this.cp.on('error', (err) => this.fail(err));
     this.cp.on('exit', (code, signal) => {
       this.log('process exit', { code, signal });
+      if (!this.cp.killed) {
+        this.fail(new Error(`GDB exited unexpectedly (code=${code}, signal=${signal})`));
+      }
     });
+  }
+
+  /** Record a terminal failure and reject all pending work exactly once. */
+  private fail(err: Error): void {
+    if (this.error) {
+      return;
+    }
+    this.error = err;
+    this.log('failure', err);
+    if (!this.handshakeSettled && this.handshakeReject) {
+      this.handshakeReject(err);
+      this.handshakeSettled = true;
+      this.handshakeReject = null;
+    }
+    this.commandQueue.forEach((executor) => executor.reject(err));
+    this.commandQueue.length = 0;
   }
 
   sendCommand(command: string): Promise<string> {
@@ -72,19 +89,24 @@ export class GdbMiClient {
     }
     this.log('send', command);
     return new Promise((resolve, reject) => {
-      this.commandQueue.push({ resolve, reject, command, startedAt: Date.now() });
-      this.cp.stdin!.write(`${command}\n`);
+      const executor: QueuedCommand = { resolve, reject, command, startedAt: Date.now() };
+      this.commandQueue.push(executor);
+      try {
+        this.cp.stdin!.write(`${command}\n`);
+      } catch (err) {
+        this.fail(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 
-  private onData(chunk: Buffer): void {
+  private onData(chunk: string): void {
     if (this.error) {
       const error = this.error;
       this.commandQueue.forEach((executor) => executor.reject(error));
       this.commandQueue.length = 0;
     }
 
-    this.stdoutBuffer += chunk.toString();
+    this.stdoutBuffer += chunk;
     if (/\(gdb\)\s*$/m.test(this.stdoutBuffer)) {
       const output = this.stdoutBuffer;
       this.stdoutBuffer = '';
@@ -107,22 +129,33 @@ export class GdbMiClient {
 
   async drainHandshake(): Promise<void> {
     this.log('handshake start');
+    if (this.error) {
+      return Promise.reject(this.error);
+    }
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
-      const onData = (chunk: Buffer) => {
+      const onData = (chunk: string) => {
         if (this.error) {
           this.cp.stdout!.off('data', onData);
           this.log('handshake error', this.error);
           reject(this.error);
+          this.handshakeSettled = true;
+          this.handshakeReject = null;
           return;
         }
-        this.stdoutBuffer += chunk.toString();
+        this.stdoutBuffer += chunk;
         if (/\(gdb\)\s*$/m.test(this.stdoutBuffer)) {
           this.cp.stdout!.off('data', onData);
           this.stdoutBuffer = '';
+          this.handshakeSettled = true;
+          this.handshakeReject = null;
           this.log('handshake done', `${Date.now() - startedAt}ms`);
           resolve();
         }
+      };
+      this.handshakeReject = (err) => {
+        this.cp.stdout!.off('data', onData);
+        reject(err);
       };
       this.cp.stdout!.on('data', onData);
     });
@@ -204,7 +237,7 @@ function splitMiListItems(listContent: string): string[] {
   return items;
 }
 
-function unescapeMiString(value: string): string {
+export function unescapeMiString(value: string): string {
   let result = '';
   for (let i = 0; i < value.length; i++) {
     const char = value[i];

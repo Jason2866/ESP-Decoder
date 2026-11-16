@@ -13,7 +13,7 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 - **ESP-IDF Integration** — Auto-detects app ELF and toolchain from `build/` and ESP-IDF tools
 - **Click-to-Navigate** — Click on decoded file:line references to open source files
 - **Register Display** — Shows CPU register values at the time of crash
-- **Multi-Arch Support** — Xtensa (ESP32/S2/S3/ESP8266) and RISC-V (ESP32-C2/C3/C5/C6/C61/H2/H4/P4/S31)
+- **Multi-Arch Support** — Xtensa (ESP32/S2/S3/ESP8266) and all RISC-V variants (ESP32-C2/C3/C5/C6/C61/H2/H4/P4/S31)
 - **WiFi Provisioning** — Hand WiFi credentials to the connected board over the [Improv serial protocol](https://www.improv-wifi.com/serial/) (no browser required)
 
 ## Quick Start
@@ -146,7 +146,7 @@ npm run package   # Creates .vsix file
 ## Installing
 
 ```bash
-code --install-extension esp-decoder-0.1.0.vsix
+code --install-extension esp-decoder-0.30.0.vsix
 ```
 
 Or install from the Extensions sidebar: "Install from VSIX..."
@@ -162,7 +162,7 @@ Or install from the Extensions sidebar: "Install from VSIX..."
 
 ## Credits
 
-Crash decoding is modeled on [esp-idf-panic-decoder](https://github.com/espressif/esp-idf-panic-decoder) (GDB remote-protocol approach). Serial crash capture logic was originally derived from [TraceBreaker (trbr)](https://github.com/dankeboy36/trbr) by [dankeboy](https://github.com/dankeboy36), with performance tweaks and testing by [h2zero](https://github.com/h2zero).
+Crash decoding is modeled on [esp-idf-panic-decoder](https://github.com/espressif/esp-idf-panic-decoder) (GDB remote-protocol approach). Performance tweaks and testing by [h2zero](https://github.com/h2zero).
 
 ## License
 

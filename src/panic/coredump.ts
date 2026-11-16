@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { GdbMiClient, extractMiListContent } from './gdbMi';
+import { GdbMiClient, extractMiListContent, unescapeMiString } from './gdbMi';
 import { toHexString } from './panicParse';
 import type {
   CoredumpDecodeResult,
@@ -89,15 +89,75 @@ function parseRegisters(regsRaw: string): Record<string, string> {
   return result;
 }
 
-function parseBacktrace(raw: string): Record<string, string>[] {
-  const entries = [...raw.matchAll(/frame=\{([^}]+)\}/g)].map((match) => {
-    const obj: Record<string, string> = {};
-    for (const pair of match[1].split(',')) {
-      const [key, val] = pair.split('=');
-      obj[key] = val?.startsWith('"') ? val.slice(1, -1) : val;
+/**
+ * Split MI tuple content on top-level commas, ignoring commas inside quoted
+ * strings (e.g. func="worker(int, int)").
+ */
+function splitMiFields(content: string): string[] {
+  const fields: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  let escape = false;
+  for (const ch of content) {
+    if (escape) {
+      current += ch;
+      escape = false;
+      continue;
     }
-    return obj;
-  });
+    if (inQuotes && ch === '\\') {
+      current += ch;
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      current += ch;
+      continue;
+    }
+    if (ch === ',' && !inQuotes) {
+      fields.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current) {
+    fields.push(current);
+  }
+  return fields;
+}
+
+/** Parse a `key="value"` (or `key=value`) MI field, unescaping quoted strings. */
+function parseMiField(field: string): [string, string] | undefined {
+  const idx = field.indexOf('=');
+  if (idx === -1) {
+    return undefined;
+  }
+  const key = field.slice(0, idx).trim();
+  let value = field.slice(idx + 1).trim();
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    value = unescapeMiString(value.slice(1, -1));
+  }
+  return [key, value];
+}
+
+/** Matches `{...}` MI tuples, allowing quoted strings to contain braces. */
+const MI_TUPLE_RE = /\{((?:\\.|[^{}"\\]|"(?:\\.|[^"\\])*")*)\}/g;
+
+function parseBacktrace(raw: string): Record<string, string>[] {
+  const entries: Record<string, string>[] = [];
+  const frameRe = /frame=\{((?:\\.|[^{}"\\]|"(?:\\.|[^"\\])*")*)\}/g;
+  for (const match of raw.matchAll(frameRe)) {
+    /** @type {Record<string, string>} */
+    const obj: Record<string, string> = {};
+    for (const field of splitMiFields(match[1])) {
+      const kv = parseMiField(field);
+      if (kv) {
+        obj[kv[0]] = kv[1];
+      }
+    }
+    entries.push(obj);
+  }
   return entries;
 }
 
@@ -219,10 +279,17 @@ export async function decodeCoredumpFile(
           const argsMatchInner = raw.match(/args=\[([\s\S]*)\]/);
           if (argsMatchInner && argsMatchInner[1].trim()) {
             const argsContent = argsMatchInner[1];
-            const argRegex = /\{name="([^"]+)",type="([^"]+)",value="([^"]+)"\}/g;
-            let m;
-            while ((m = argRegex.exec(argsContent))) {
-              obj.args.push({ name: m[1], type: m[2], value: m[3] });
+            for (const tupleMatch of argsContent.matchAll(MI_TUPLE_RE)) {
+              const fields: Record<string, string> = {};
+              for (const field of splitMiFields(tupleMatch[1])) {
+                const kv = parseMiField(field);
+                if (kv) {
+                  fields[kv[0]] = kv[1];
+                }
+              }
+              if (fields.name !== undefined) {
+                obj.args.push({ name: fields.name, type: fields.type, value: fields.value });
+              }
             }
           }
           frameArgs.push(obj);
@@ -232,19 +299,24 @@ export async function decodeCoredumpFile(
       const btParsed = parseBacktrace(btOut);
       const stacktraceLines = btParsed.map((frame, index) => {
         const args = frameArgs[index]?.args || [];
+        if (frame.func) {
+          return {
+            regAddr: frame.addr,
+            lineNumber: frame.line ?? '??',
+            method: frame.func,
+            file: frame.file ?? '??',
+            args,
+          };
+        }
         return {
           regAddr: frame.addr,
           lineNumber: frame.line ?? '??',
-          ...(frame.func && frame.file
-            ? { method: frame.func, file: frame.file, args }
-            : {}),
         };
       });
       log('stacktrace lines', tid, stacktraceLines.length);
 
       const threadResult: DecodeResult = {
         faultInfo: {
-          coreId: parseInt(tid, 10) || 0,
           programCounter: {
             addr: programCounterHex,
             location: stacktraceLines[0] ?? {

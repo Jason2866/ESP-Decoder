@@ -34,12 +34,15 @@ function stringifyCoredumpDecodeResult(result: CoredumpDecodeResult): string[] {
 function stringifySingleDecodeResult(result: DecodeResult): string[] {
   const lines: string[] = [];
   if (typeof result.faultInfo?.faultCode === 'number') {
-    let faultCodeLine = `${result.faultInfo.coreId}`;
-    if (result.faultInfo.faultMessage) {
-      faultCodeLine += ` | ${result.faultInfo.faultMessage}`;
+    const parts: string[] = [];
+    if (result.faultInfo.coreId !== undefined) {
+      parts.push(`${result.faultInfo.coreId}`);
     }
-    faultCodeLine += ` | ${result.faultInfo.faultCode}`;
-    lines.push(faultCodeLine);
+    if (result.faultInfo.faultMessage) {
+      parts.push(result.faultInfo.faultMessage);
+    }
+    parts.push(`${result.faultInfo.faultCode}`);
+    lines.push(parts.join(' | '));
   }
 
   const pc = result.faultInfo?.programCounter?.location;

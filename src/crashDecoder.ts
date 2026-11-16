@@ -93,7 +93,7 @@ export interface CrashEvent {
  */
 export interface DecodedCrash {
   faultInfo?: {
-    coreId: number;
+    coreId?: number;
     programCounter?: string;
     faultAddr?: string;
     faultCode?: number;
@@ -175,6 +175,7 @@ export class CrashCapturer {
   reset(): void {
     // Create a fresh capturer instance to reset all state
     this.unsubscribe?.();
+    this.capturer.dispose();
     this.capturer = createCapturer({ quietPeriodMs: 500 });
     this.unsubscribe = this.capturer.on('eventDetected', (capturerEvent: CapturerEvent) => {
       const event = capturerEventToCrashEvent(capturerEvent);
@@ -184,6 +185,7 @@ export class CrashCapturer {
 
   dispose(): void {
     this.unsubscribe?.();
+    this.capturer.dispose();
     this._onCrashDetected.dispose();
   }
 }
@@ -788,7 +790,7 @@ function convertDecodeResult(result: any, crashText: string): DecodedCrash {
   if (decodeResult.faultInfo) {
     const fi = decodeResult.faultInfo;
     faultInfo = {
-      coreId: fi.coreId ?? 0,
+      coreId: fi.coreId,
       programCounter: fi.programCounter
         ? stringifyAddrLocation(fi.programCounter.location ?? fi.programCounter)
         : undefined,
