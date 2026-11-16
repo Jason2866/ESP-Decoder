@@ -83,6 +83,8 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
       if (match) {
         currentRegDump = { coreId: parseInt(match[1], 10), regs: {} };
         regDumps.push(currentRegDump);
+        // A new dump ends the previous core's stack-memory section.
+        inStackMemory = false;
       }
     } else if (currentRegDump && !inStackMemory) {
       for (const match of line.matchAll(/([A-Z_0-9/]+)\s*:\s*(0x[0-9a-fA-F]+)/g)) {
@@ -294,21 +296,44 @@ export function parseESP8266PanicOutput(input: string): PanicInfoWithBacktrace {
  */
 export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
   const lines = input.split(/\r?\n|\r/);
-  const regs: Record<string, number> = {};
-  let coreId = 0;
-  const backtraceAddrs: number[] = [];
   const coreIdMatch = input.match(/Guru Meditation Error: Core\s+(\d+)/);
-  if (coreIdMatch) {
-    coreId = parseInt(coreIdMatch[1], 10);
+  const panicCoreId = coreIdMatch ? parseInt(coreIdMatch[1], 10) : undefined;
+
+  interface CoreSection {
+    regs: Record<string, number>;
+    backtraceAddrs: number[];
   }
+  const hasData = (s: CoreSection): boolean =>
+    Object.keys(s.regs).length > 0 || s.backtraceAddrs.length > 0;
+
+  // ESP-IDF can print a register dump per core; each 'Core N register
+  // dump:' header starts a new section so registers and backtraces of
+  // different cores never mix into one result.
+  const sections = new Map<number, CoreSection>();
+  const section = (core: number): CoreSection => {
+    let s = sections.get(core);
+    if (!s) {
+      s = { regs: {}, backtraceAddrs: [] };
+      sections.set(core, s);
+    }
+    return s;
+  };
+
+  // Lines before the first dump header belong to the panicking core.
+  let current = section(panicCoreId ?? 0);
 
   const regRegex = /([A-Z]+[0-9]*)\s*:\s*(0x[0-9a-fA-F]+)/g;
   for (const line of lines) {
+    const dumpMatch = line.match(/^Core\s+(\d+)\s+register dump:/);
+    if (dumpMatch) {
+      current = section(parseInt(dumpMatch[1], 10));
+    }
+
     for (const match of line.matchAll(regRegex)) {
       const [, regName, hexValue] = match;
       const value = parseInt(hexValue, 16);
       if (!Number.isNaN(value)) {
-        regs[regName] = value;
+        current.regs[regName] = value;
       }
     }
 
@@ -318,11 +343,24 @@ export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
       for (const match of line.matchAll(/(0x[0-9a-fA-F]{8}):0x[0-9a-fA-F]{8}/g)) {
         const addr = parseInt(match[1], 16);
         if (!Number.isNaN(addr)) {
-          backtraceAddrs.push(addr);
+          current.backtraceAddrs.push(addr);
         }
       }
     }
   }
+
+  // Prefer the section of the core named in the panic header; fall back to
+  // the first section that captured data, then to an empty result.
+  let selected: [number, CoreSection] | undefined;
+  if (panicCoreId !== undefined) {
+    const exact = sections.get(panicCoreId);
+    if (exact && hasData(exact)) {
+      selected = [panicCoreId, exact];
+    }
+  }
+  selected ??= [...sections.entries()].find(([, s]) => hasData(s));
+  const [coreId, { regs, backtraceAddrs }] =
+    selected ?? [panicCoreId ?? 0, { regs: {}, backtraceAddrs: [] }];
 
   return {
     coreId,

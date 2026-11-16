@@ -49,7 +49,12 @@ vi.mock('vscode', () => {
 import { CrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
 import type { CrashEvent } from '../crashDecoder.js';
 import { getPioPackagesDir } from '../pioIntegration.js';
-import { registerSets, gdbRegsInfoRiscvIlp32 } from '../panic/index.js';
+import {
+  registerSets,
+  gdbRegsInfoRiscvIlp32,
+  parseRiscvPanicDetailed,
+  parseESP32PanicOutput,
+} from '../panic/index.js';
 
 // ---------------------------------------------------------------------------
 // Fixture paths
@@ -966,5 +971,77 @@ describe('RISC-V register layout', () => {
   it('matches the expected GDB ILP32 register order', () => {
     // Use the canonical sequence from riscvPanicParse.js to avoid drift
     expect(registerSets.riscv).toEqual(gdbRegsInfoRiscvIlp32);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-core RISC-V register dump parsing
+// ---------------------------------------------------------------------------
+
+describe('parseRiscvPanicDetailed – multi-core dumps', () => {
+  it('parses registers of a core dumped after another core’s stack memory', () => {
+    const text = [
+      'Core  0 panic\'ed (Store access fault). Exception was unhandled.',
+      '',
+      'Core  0 register dump:',
+      'MEPC    : 0x42000001  RA      : 0x42000002  SP      : 0x3fc80000  GP      : 0x3fc80001',
+      'MCAUSE  : 0x00000007  MTVAL   : 0x3fc80002  MHARTID : 0x00000000',
+      '',
+      'Stack memory:',
+      '3fc80000: 0x00000000 0x00000000 0x00000000 0x00000000',
+      '',
+      'Core  1 register dump:',
+      'MEPC    : 0x42100001  RA      : 0x42100002  SP      : 0x3fc90000  GP      : 0x3fc90001',
+      'MCAUSE  : 0x0000000b  MTVAL   : 0x3fc90002  MHARTID : 0x00000001',
+      '',
+      'Stack memory:',
+      '3fc90000: 0x00000000 0x00000000 0x00000000 0x00000000',
+    ].join('\n');
+
+    const result = parseRiscvPanicDetailed(text);
+    expect(result.regDumps).toHaveLength(2);
+    expect(result.regDumps[0].regs.MEPC).toBe(0x42000001);
+    // Core 1's registers must be parsed even though core 0 ended in
+    // stack-memory mode.
+    expect(result.regDumps[1].regs.MEPC).toBe(0x42100001);
+    expect(result.regDumps[1].faultCode).toBe(0xb);
+    expect(result.regDumps[1].faultAddr).toBe(0x3fc90002);
+    // Stack segments stay attributed to their own core.
+    expect(result.stackDump.map((s) => s.coreId)).toEqual([0, 1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dual-core Xtensa panic parsing
+// ---------------------------------------------------------------------------
+
+describe('parseESP32PanicOutput – dual-core dumps', () => {
+  it('selects registers and backtrace of the core named in the panic header', () => {
+    const text = [
+      'Guru Meditation Error: Core  1 panic\'ed (LoadProhibited). Exception was unhandled.',
+      '',
+      'Core  0 register dump:',
+      'PC      : 0x40000001  PS      : 0x00060030  A0      : 0x3ffb0001  A1      : 0x3ffb0002',
+      'EXCVADDR: 0x00000000  EXCCAUSE: 0x00000000',
+      '',
+      'Backtrace: 0x40000001:0x3ffb0001 0x40000009:0x3ffb0009',
+      '',
+      'Core  1 register dump:',
+      'PC      : 0x40000002  PS      : 0x00060030  A0      : 0x3ffb0002  A1      : 0x3ffb0003',
+      'EXCVADDR: 0x3ffb0004  EXCCAUSE: 0x0000000c',
+      '',
+      'Backtrace: 0x40000002:0x3ffb0002 0x40000003:0x3ffb0003',
+    ].join('\n');
+
+    const parsed = parseESP32PanicOutput(text);
+    expect(parsed.coreId).toBe(1);
+    // Only core 1's registers — core 0's PC/EXCVADDR must not leak in.
+    expect(parsed.regs.PC).toBe(0x40000002);
+    expect(parsed.regs.EXCVADDR).toBe(0x3ffb0004);
+    expect(parsed.faultAddr).toBe(0x3ffb0004);
+    expect(parsed.faultCode).toBe(0xc);
+    expect(parsed.programCounter).toBe(0x40000002);
+    // Only core 1's backtrace PCs.
+    expect(parsed.backtraceAddrs).toEqual([0x40000002, 0x40000003]);
   });
 });
