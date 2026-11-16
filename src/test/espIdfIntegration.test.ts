@@ -74,6 +74,43 @@ describe('findEspIdfBuilds', () => {
     expect(builds[0].toolPath).toBe(path.join(toolBinDir, `riscv32-esp-elf-gdb${exe}`));
   });
 
+  it('falls back to the generic xtensa GDB on PATH for an Xtensa target', async () => {
+    const workspace = makeTempDir('esp-decoder-idf-workspace-');
+    const toolBinDir = makeTempDir('esp-decoder-idf-tools-');
+    tempDirs.push(workspace, toolBinDir);
+
+    touchFile(path.join(workspace, 'build', 'app.elf'));
+    fs.writeFileSync(path.join(workspace, 'sdkconfig'), 'CONFIG_IDF_TARGET="esp32s3"\n');
+    // Only the generic GDB is on PATH — no chip-specific xtensa-esp32s3-elf-gdb.
+    touchFile(path.join(toolBinDir, `xtensa-esp-elf-gdb${exe}`));
+
+    process.env.PATH = toolBinDir;
+    delete process.env.IDF_TOOLS_PATH;
+
+    const builds = await findEspIdfBuilds(workspace);
+    expect(builds.length).toBeGreaterThan(0);
+    expect(builds[0].targetArch).toBe('xtensa');
+    expect(builds[0].toolPath).toBe(path.join(toolBinDir, `xtensa-esp-elf-gdb${exe}`));
+  });
+
+  it('prefers the chip-specific xtensa GDB on PATH over the generic one', async () => {
+    const workspace = makeTempDir('esp-decoder-idf-workspace-');
+    const toolBinDir = makeTempDir('esp-decoder-idf-tools-');
+    tempDirs.push(workspace, toolBinDir);
+
+    touchFile(path.join(workspace, 'build', 'app.elf'));
+    fs.writeFileSync(path.join(workspace, 'sdkconfig'), 'CONFIG_IDF_TARGET="esp32s3"\n');
+    touchFile(path.join(toolBinDir, `xtensa-esp-elf-gdb${exe}`));
+    touchFile(path.join(toolBinDir, `xtensa-esp32s3-elf-gdb${exe}`));
+
+    process.env.PATH = toolBinDir;
+    delete process.env.IDF_TOOLS_PATH;
+
+    const builds = await findEspIdfBuilds(workspace);
+    expect(builds.length).toBeGreaterThan(0);
+    expect(builds[0].toolPath).toBe(path.join(toolBinDir, `xtensa-esp32s3-elf-gdb${exe}`));
+  });
+
   it('resolves esp32s31 sdkconfig target to riscv GDB', async () => {
     const workspace = makeTempDir('esp-decoder-idf-workspace-');
     const toolBinDir = makeTempDir('esp-decoder-idf-tools-');

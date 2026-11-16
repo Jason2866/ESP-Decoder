@@ -54,6 +54,13 @@ const defaultOptions = {
 } as const;
 
 /**
+ * Module-level event id allocator: capturer resets create fresh instances,
+ * so a per-instance counter would restart at event-000001 and collide with
+ * ids already emitted by a previous capturer.
+ */
+let nextEventId = 1;
+
+/**
  * Captures crash events from a raw serial byte stream: incremental line
  * decoding, crash-block framing, lightweight parse, and deduplication.
  */
@@ -65,7 +72,6 @@ export class Capturer {
   private events: CapturerEvent[] = [];
   private readonly eventsById = new Map<string, CapturerEvent>();
   private readonly signatureIndex = new Map<string, string>();
-  private nextId = 1;
   private quietTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: CapturerOptions = {}) {
@@ -190,7 +196,7 @@ export class Capturer {
     }
 
     const next: CapturerEvent = {
-      id: `event-${String(this.nextId).padStart(6, '0')}`,
+      id: `event-${String(nextEventId++).padStart(6, '0')}`,
       signature,
       kind,
       lines: [...block.lines],
@@ -200,7 +206,6 @@ export class Capturer {
       count: 1,
       lightweight,
     };
-    this.nextId++;
 
     this.events.push(next);
     this.eventsById.set(next.id, next);
@@ -349,6 +354,10 @@ function detectKind(lines: string[]): CapturerEventKind {
     /^assert failed:/i,
     /^abort\(\) was called/i,
     /^Exception\s+\(\d+\):?/i,
+    /^Abort called\b/i,
+    /^Panic\b/i,
+    />>>stack>>>/i, // ESP8266 stack dump marker
+    /<<<stack<<</i,
   ];
   if (lines.some((line) => xtensaHints.some((hint) => hint.test(line)))) {
     return 'xtensa';

@@ -11,7 +11,16 @@ const crashPatterns = [
   /^Exception\s+\(\d+\):?/i,
   /^assert failed:/i,
   /^abort\(\) was called/i,
+  // ESP8266 SDK crash headers (followed by the >>>stack>>> dump).
+  /^Abort called\b/i,
+  /^Panic\b/i,
 ];
+
+/**
+ * Upper bound for lines kept in a block that never reaches a completeness
+ * signal — guards against a start-marker false positive streaming forever.
+ */
+const MAX_INCOMPLETE_BLOCK_LINES = 500;
 
 const startPatterns = crashPatterns;
 const reasonPatterns = crashPatterns;
@@ -65,6 +74,16 @@ export class CrashFramer {
 
     if (isImmediateFinalizeLine(line)) {
       this.finalize(finalized);
+    }
+
+    // Bound memory for blocks that never complete; complete blocks are
+    // unaffected and still finalize via the quiet timer or flush().
+    if (
+      this.active &&
+      this.active.lines.length >= MAX_INCOMPLETE_BLOCK_LINES &&
+      !isCompleteBlock(this.active.lines)
+    ) {
+      this.active = undefined;
     }
 
     return finalized;

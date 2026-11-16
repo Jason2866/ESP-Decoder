@@ -156,19 +156,25 @@ function findGdbFromIdfTools(arch: ChipArch, chipTarget: string | undefined): st
   // esp8266 -> xtensa-lx106-elf), then most specific match first.
   const chipHint = chipTarget === 'esp8266' ? 'lx106' : chipTarget;
 
-  // 1. Search PATH. For Xtensa, only a chip-matching binary is acceptable —
-  //    a mismatched PATH GDB must not shadow the ESP-IDF tool directories.
+  // 1. Search PATH. For Xtensa, a chip-matching binary anywhere on PATH wins;
+  //    the generic xtensa-esp-elf-gdb is kept as a PATH fallback before the
+  //    ESP-IDF tool directories are searched.
   const pathEnv = process.env.PATH;
   if (pathEnv) {
     const dirs = pathEnv.split(path.delimiter).filter(Boolean);
     const ext = process.platform === 'win32' ? '.exe' : '';
-    const pathNames =
-      arch === 'xtensa' && chipHint ? [`xtensa-${chipHint}-elf-gdb${ext}`] : names;
-    const pathPattern =
-      arch === 'xtensa' && chipHint
-        ? new RegExp(`^xtensa-${escapeRegExp(chipHint)}-.*-gdb(\\.exe)?$`)
-        : pattern;
-    const fromPath = findGdbInDirs(dirs, pathNames, pathPattern);
+    let fromPath: string | undefined;
+    if (arch === 'xtensa' && chipHint) {
+      const chipPattern = new RegExp(
+        `^xtensa-${escapeRegExp(chipHint)}-.*-gdb(\\.exe)?$`,
+      );
+      fromPath =
+        findGdbInDirs(dirs, [`xtensa-${chipHint}-elf-gdb${ext}`], chipPattern) ??
+        // Exact-name fallback only; the pattern must not match other chips.
+        findGdbInDirs(dirs, [`xtensa-esp-elf-gdb${ext}`], /$^/);
+    } else {
+      fromPath = findGdbInDirs(dirs, names, pattern);
+    }
     if (fromPath) {
       return fromPath;
     }

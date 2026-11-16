@@ -57,6 +57,8 @@ export function parseLine(line: string, _debug?: Debug): GDBLine | ParsedGDBLine
     /(0x[0-9a-f]+)\s+is\s+at\s+(.+):(\d+)/i,
     // Method with file/line but no address
     /(?:#\d+\s+)?((?:[^()]|\((?:[^()]|\([^()]*\))*\))+)\s+at\s+(.+):(\d+)/,
+    // GDB `info line` response: Line 42 of "/path/file.cpp" starts at address 0x...
+    /Line\s+(\d+)\s+of\s+"((?:\\.|[^"\\])*)"\s+starts\s+at\s+address\s+(0x[0-9a-f]+)/i,
   ];
 
   for (const [i, pattern] of patterns.entries()) {
@@ -85,6 +87,15 @@ export function parseLine(line: string, _debug?: Debug): GDBLine | ParsedGDBLine
       if (i === 6) {
         const [, method, file, lineNumber] = match;
         return normalizeParsedLine({ regAddr: '??', method, file, lineNumber });
+      }
+      if (i === 7) {
+        const [, lineNumber, file, regAddr] = match;
+        return normalizeParsedLine({
+          regAddr,
+          method: '??',
+          file: file.replace(/\\(["\\])/g, '$1'),
+          lineNumber,
+        });
       }
     }
   }

@@ -144,6 +144,47 @@ function parseMiField(field: string): [string, string] | undefined {
 /** Matches `{...}` MI tuples, allowing quoted strings to contain braces. */
 const MI_TUPLE_RE = /\{((?:\\.|[^{}"\\]|"(?:\\.|[^"\\])*")*)\}/g;
 
+/**
+ * Split `-stack-list-arguments` frame content on `}, frame={` boundaries,
+ * ignoring delimiters inside quoted MI strings (e.g. args containing
+ * `"}, frame={"` as data).
+ */
+function splitFrameArgEntries(content: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let inQuotes = false;
+  let escape = false;
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inQuotes && ch === '\\') {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (inQuotes || ch !== '}') {
+      continue;
+    }
+    const boundary = /^},\s*frame=\{/.exec(content.slice(i));
+    if (!boundary) {
+      continue;
+    }
+    parts.push(content.slice(start, i) + '}');
+    // Next part begins at 'frame={' (the delimiter's tail).
+    start = i + boundary[0].length - 'frame={'.length;
+  }
+  if (start < content.length) {
+    parts.push(content.slice(start));
+  }
+  return parts;
+}
+
 function parseBacktrace(raw: string): Record<string, string>[] {
   const entries: Record<string, string>[] = [];
   const frameRe = /frame=\{((?:\\.|[^{}"\\]|"(?:\\.|[^"\\])*")*)\}/g;
@@ -194,8 +235,26 @@ export async function decodeCoredumpFile(
       const objs: string[] = [];
       let depth = 0;
       let objStart = -1;
+      let inQuotes = false;
+      let escape = false;
       for (let i = 0; i < threadsContent.length; i++) {
         const ch = threadsContent[i];
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (inQuotes && ch === '\\') {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') {
+          inQuotes = !inQuotes;
+          continue;
+        }
+        if (inQuotes) {
+          continue;
+        }
+        // Braces inside quoted MI strings are data, not tuple boundaries.
         if (ch === '{') {
           if (depth === 0) {
             objStart = i;
@@ -262,12 +321,7 @@ export async function decodeCoredumpFile(
       const frameArgs: { level?: string; args: FrameArg[] }[] = [];
       if (argsListMatch) {
         const content = argsListMatch[1];
-        const parts = content.split(/},\s*frame=\{/).map((part, idx) => {
-          if (idx === 0) {
-            return part + '}';
-          }
-          return 'frame={' + part + '}';
-        });
+        const parts = splitFrameArgEntries(content);
         for (const frameStr of parts) {
           const rawMatch = frameStr.match(/frame=\{([\s\S]*)\}/);
           const raw = rawMatch ? rawMatch[1] : '';

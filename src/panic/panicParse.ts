@@ -59,6 +59,8 @@ export interface RisvPanicParseResult {
   programCounter: number;
   faultCode?: number;
   faultAddr?: number;
+  /** Core named by the panic header ("Core N panic'ed"), if present. */
+  panicCoreId?: number;
 }
 
 const RISCV_REG_NAMES = new Set<string>(gdbRegsInfoRiscvIlp32);
@@ -72,6 +74,8 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
   let faultCode: number | undefined;
   let faultAddr: number | undefined;
   let programCounter = 0;
+  const panicCoreMatch = input.match(/Core\s+(\d+)\s+panic/i);
+  const panicCoreId = panicCoreMatch ? parseInt(panicCoreMatch[1], 10) : undefined;
 
   for (const line of lines) {
     if (line.startsWith('Core')) {
@@ -118,7 +122,21 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
     }
   }
 
-  return { regDumps, stackDump, programCounter, faultCode, faultAddr };
+  return { regDumps, stackDump, programCounter, faultCode, faultAddr, panicCoreId };
+}
+
+/**
+ * Pick the register dump belonging to the panicking core named in the
+ * panic header; fall back to the first dump when absent or unmatched.
+ */
+function selectActiveDump(result: RisvPanicParseResult): RegisterDump {
+  if (result.panicCoreId !== undefined) {
+    const match = result.regDumps.find((d) => d.coreId === result.panicCoreId);
+    if (match) {
+      return match;
+    }
+  }
+  return result.regDumps[0];
 }
 
 function getStackAddrAndData(stackDump: StackDumpSegment[]): {
@@ -162,19 +180,19 @@ function getStackAddrAndData(stackDump: StackDumpSegment[]): {
  * crashing core in ESP-IDF panic output).
  */
 export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
-  const { regDumps, stackDump, programCounter, faultAddr, faultCode } =
-    parseRiscvPanicDetailed(input);
+  const parsed = parseRiscvPanicDetailed(input);
+  const { regDumps, stackDump, programCounter, faultAddr, faultCode } = parsed;
   if (regDumps.length === 0) {
     throw new Error('No register dumps found');
   }
+  const active = selectActiveDump(parsed);
   if (regDumps.length > 1) {
     console.warn(
       `[panic-decoder] Multi-core dump detected (${regDumps.length} cores); ` +
-        `decoding core ${regDumps[0].coreId} (first)`,
+        `decoding core ${active.coreId}` +
+        (parsed.panicCoreId !== undefined ? ' (panic header)' : ' (first)'),
     );
   }
-
-  const active = regDumps[0];
   const { coreId, regs } = active;
   // Filter stack segments to only those belonging to the selected core
   // to avoid "Invalid base address" errors from non-contiguous segments.
@@ -197,12 +215,12 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
  * Throws when no register dump is present.
  */
 export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrace {
-  const { regDumps, programCounter, faultCode, faultAddr } =
-    parseRiscvPanicDetailed(input);
+  const parsed = parseRiscvPanicDetailed(input);
+  const { regDumps, programCounter, faultCode, faultAddr } = parsed;
   if (regDumps.length === 0) {
     throw new Error('No register dumps found');
   }
-  const active = regDumps[0];
+  const active = selectActiveDump(parsed);
   const { coreId, regs } = active;
   return {
     coreId,

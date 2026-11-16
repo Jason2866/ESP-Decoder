@@ -41,6 +41,9 @@ class GDBSession {
     this.gdb.on('error', (err) =>
       this.terminate(err instanceof Error ? err : new Error(String(err))),
     );
+    this.gdb.stdin!.on('error', (err) =>
+      this.terminate(err instanceof Error ? err : new Error(String(err))),
+    );
     this.gdb.on('exit', (code, signal) => {
       if (!this.didExecuteFirstCommand) {
         // Exited (even cleanly) before the startup prompt — fail start().

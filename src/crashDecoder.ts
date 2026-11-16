@@ -625,10 +625,16 @@ async function decodeCoredumpElfInternal(
 
   try {
     const params: DecodeParams = { elfPath, toolPath, targetArch: resolvedArch };
-    const decodeOptions: DecodeOptions = {};
+    // Same bound as the panic-text path: a stuck GDB must not hang the
+    // monitor; the AbortError is handled by the catch below.
+    const abortController = new AbortController();
+    const decodeTimeout = setTimeout(() => abortController.abort(), DECODE_TIMEOUT_MS);
+    decodeTimeout.unref?.();
+    const decodeOptions: DecodeOptions = { signal: abortController.signal };
 
     // Pass the coredump file path to the coredump decoder
-    const result = await decodeCoredump(params, coredumpPath, decodeOptions);
+    const result = await decodeCoredump(params, coredumpPath, decodeOptions)
+      .finally(() => clearTimeout(decodeTimeout));
 
     // Get stringified output for rawOutput
     let rawOutput: string;
