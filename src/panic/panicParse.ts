@@ -42,6 +42,9 @@ export function toHexString(n = 0): string {
 export interface RegisterDump {
   coreId: number;
   regs: Record<string, number>;
+  programCounter?: number;
+  faultCode?: number;
+  faultAddr?: number;
 }
 
 export interface StackDumpSegment {
@@ -89,11 +92,14 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
           currentRegDump.regs[regName] = regAddr;
           if (regName === 'MEPC') {
             programCounter = regAddr; // PC equivalent
+            currentRegDump.programCounter = regAddr;
           }
         } else if (regName === 'MCAUSE') {
           faultCode = regAddr; // EXCCAUSE equivalent
+          currentRegDump.faultCode = regAddr;
         } else if (regName === 'MTVAL') {
           faultAddr = regAddr; // EXCVADDR equivalent
+          currentRegDump.faultAddr = regAddr;
         }
       }
       if (line.trim() === 'Stack memory:') {
@@ -168,7 +174,8 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
     );
   }
 
-  const { coreId, regs } = regDumps[0];
+  const active = regDumps[0];
+  const { coreId, regs } = active;
   // Filter stack segments to only those belonging to the selected core
   // to avoid "Invalid base address" errors from non-contiguous segments.
   const filtered = stackDump.filter((seg) => seg.coreId === coreId);
@@ -176,9 +183,9 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
 
   return {
     coreId,
-    programCounter,
-    faultAddr,
-    faultCode,
+    programCounter: active.programCounter ?? programCounter,
+    faultAddr: active.faultAddr ?? faultAddr,
+    faultCode: active.faultCode ?? faultCode,
     regs,
     stackBaseAddr,
     stackData,
@@ -195,14 +202,17 @@ export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrac
   if (regDumps.length === 0) {
     throw new Error('No register dumps found');
   }
-  const { coreId, regs } = regDumps[0];
+  const active = regDumps[0];
+  const { coreId, regs } = active;
   return {
     coreId,
-    programCounter,
-    faultCode,
-    faultAddr,
+    programCounter: active.programCounter ?? programCounter,
+    faultCode: active.faultCode ?? faultCode,
+    faultAddr: active.faultAddr ?? faultAddr,
     regs,
-    backtraceAddrs: programCounter ? [programCounter] : [],
+    backtraceAddrs: (active.programCounter ?? programCounter)
+      ? [active.programCounter ?? programCounter]
+      : [],
   };
 }
 
@@ -285,8 +295,10 @@ export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
     }
 
     if (line.startsWith('Backtrace:')) {
-      for (const match of line.matchAll(/0x[0-9a-fA-F]{8}/g)) {
-        const addr = parseInt(match[0], 16);
+      // Entries are "0xPC:0xSP" pairs — only the PC is a code address;
+      // stack pointers must not be resolved as frames.
+      for (const match of line.matchAll(/(0x[0-9a-fA-F]{8}):0x[0-9a-fA-F]{8}/g)) {
+        const addr = parseInt(match[1], 16);
         if (!Number.isNaN(addr)) {
           backtraceAddrs.push(addr);
         }

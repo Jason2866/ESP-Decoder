@@ -4,6 +4,8 @@ export class LineDecoder {
   /** Raw bytes not yet decoded because they may end in an incomplete UTF-8 sequence. */
   private byteBuffer: number[] = [];
   private buffer = '';
+  /** Set when a trailing CR was already emitted; swallows a following LF (split CRLF). */
+  private skipLeadingLf = false;
 
   push(chunk: Uint8Array): string[] {
     for (const byte of chunk) {
@@ -63,18 +65,28 @@ export class LineDecoder {
     const lines: string[] = [];
     let start = 0;
 
+    if (this.skipLeadingLf) {
+      this.skipLeadingLf = false;
+      if (this.buffer.charCodeAt(0) === 10) {
+        this.buffer = this.buffer.slice(1);
+      }
+    }
+
     for (let i = 0; i < this.buffer.length; i++) {
       const ch = this.buffer.charCodeAt(i);
       if (ch !== 10 && ch !== 13) {
         continue;
       }
-      if (ch === 13 && i === this.buffer.length - 1 && !isFinal) {
-        break;
-      }
 
       lines.push(this.buffer.slice(start, i));
-      if (ch === 13 && this.buffer.charCodeAt(i + 1) === 10) {
-        i++;
+      if (ch === 13) {
+        if (this.buffer.charCodeAt(i + 1) === 10) {
+          i++;
+        } else if (i === this.buffer.length - 1 && !isFinal) {
+          // Trailing CR at a chunk boundary: emit the line now and skip a
+          // LF that may arrive in the next chunk (split CRLF).
+          this.skipLeadingLf = true;
+        }
       }
       start = i + 1;
     }

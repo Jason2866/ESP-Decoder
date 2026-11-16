@@ -133,7 +133,7 @@ export function isParsedGDBLine(arg: unknown): arg is ParsedGDBLine {
 }
 
 export function isAddrLine(arg: unknown): arg is AddrLine {
-  if (arg === null || typeof arg !== 'object' || !('addr' in arg) || !('location' in arg)) {
+  if (arg === null || typeof arg !== 'object' || !('location' in arg)) {
     return false;
   }
   const a = arg as AddrLine;

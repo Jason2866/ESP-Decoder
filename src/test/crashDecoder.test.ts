@@ -538,6 +538,25 @@ describe('CrashCapturer – quiet period with unterminated line', () => {
     expect(events[0].rawText).toContain('assert failed: unterminated_bt');
     expect(events[0].rawText).toContain('Backtrace: 0x42000001');
   });
+
+  it('emits a complete block after the quiet period without flush', async () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    // Complete block (Backtrace signal) but no immediate-finalize line, so
+    // only the quiet-period timer can emit it.
+    capturer.pushData(
+      Buffer.from(
+        'assert failed: quiet_timer\n' +
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002\n',
+        'utf8',
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('assert failed: quiet_timer');
+    expect(events[0].rawText).toContain('Backtrace:');
+  });
 });
 
 describe('CrashCapturer – signature dedup vs. backtrace divergence', () => {

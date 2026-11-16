@@ -132,7 +132,9 @@ export class Capturer {
       if (this.lineDecoder.hasPendingLine()) {
         return;
       }
-      this.finalizeBlocks(this.framer.flush(this.options.now()));
+      // Timer path emits only complete blocks; an incomplete block stays
+      // active so late-arriving backtrace lines can still join it.
+      this.finalizeBlocks(this.framer.flush(this.options.now(), true));
     }, this.options.quietPeriodMs);
     this.quietTimer.unref?.();
   }

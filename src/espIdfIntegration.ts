@@ -99,6 +99,10 @@ function gdbMatcher(arch: ChipArch): { names: string[]; pattern: RegExp } {
   };
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Find a GDB binary in a list of directories. Preferred names are tried
  * first across all dirs, then any name matching the arch pattern.
@@ -148,12 +152,23 @@ function toolVersionBinDirs(versionDir: string): string[] {
 
 function findGdbFromIdfTools(arch: ChipArch, chipTarget: string | undefined): string | undefined {
   const { names, pattern } = gdbMatcher(arch);
+  // Prefer the tool dir matching the chip (esp32s3 -> xtensa-esp32s3-elf,
+  // esp8266 -> xtensa-lx106-elf), then most specific match first.
+  const chipHint = chipTarget === 'esp8266' ? 'lx106' : chipTarget;
 
-  // 1. Search PATH
+  // 1. Search PATH. For Xtensa, only a chip-matching binary is acceptable —
+  //    a mismatched PATH GDB must not shadow the ESP-IDF tool directories.
   const pathEnv = process.env.PATH;
   if (pathEnv) {
     const dirs = pathEnv.split(path.delimiter).filter(Boolean);
-    const fromPath = findGdbInDirs(dirs, names, pattern);
+    const ext = process.platform === 'win32' ? '.exe' : '';
+    const pathNames =
+      arch === 'xtensa' && chipHint ? [`xtensa-${chipHint}-elf-gdb${ext}`] : names;
+    const pathPattern =
+      arch === 'xtensa' && chipHint
+        ? new RegExp(`^xtensa-${escapeRegExp(chipHint)}-.*-gdb(\\.exe)?$`)
+        : pattern;
+    const fromPath = findGdbInDirs(dirs, pathNames, pathPattern);
     if (fromPath) {
       return fromPath;
     }
@@ -161,9 +176,6 @@ function findGdbFromIdfTools(arch: ChipArch, chipTarget: string | undefined): st
 
   // 2. Search ESP-IDF tool directories (~/.espressif/tools, $IDF_TOOLS_PATH/tools)
   const toolPrefix = arch === 'riscv' ? 'riscv32-esp-elf' : 'xtensa-';
-  // Prefer the tool dir matching the chip (esp32s3 -> xtensa-esp32s3-elf,
-  // esp8266 -> xtensa-lx106-elf), then most specific match first.
-  const chipHint = chipTarget === 'esp8266' ? 'lx106' : chipTarget;
   const scoreTool = (name: string): number => {
     if (!chipHint) {
       return 0;

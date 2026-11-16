@@ -82,6 +82,7 @@ export class GdbStubServer {
     }
 
     server.on('connection', (socket) => {
+      socket.on('error', () => socket.destroy());
       let pending = '';
       socket.on('data', (data) => {
         pending = this.consumePackets(pending + data.toString(), socket);

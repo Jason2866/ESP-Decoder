@@ -70,13 +70,29 @@ export class CrashFramer {
     return finalized;
   }
 
-  flush(atMs: number): FramedCrashBlock[] {
+  /**
+   * @param onlyComplete Timer path: emit only blocks that already contain a
+   * completeness signal and leave incomplete blocks active for later lines.
+   * Explicit flushes keep discarding incomplete blocks.
+   */
+  flush(atMs: number, onlyComplete = false): FramedCrashBlock[] {
     const finalized: FramedCrashBlock[] = [];
+    if (onlyComplete) {
+      if (this.active && this.isCompleteActive()) {
+        this.finalize(finalized);
+      }
+      return finalized;
+    }
     this.finalizeIfQuiet(finalized, atMs);
     if (this.active) {
       this.finalize(finalized);
     }
     return finalized;
+  }
+
+  private isCompleteActive(): boolean {
+    const lines = this.active?.lines ?? [];
+    return lines.some(isStartLine) && lines.length > 0 && isCompleteBlock(lines);
   }
 
   private finalizeIfQuiet(finalized: FramedCrashBlock[], atMs: number): void {

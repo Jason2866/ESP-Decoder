@@ -46,17 +46,17 @@ export function parseLine(line: string, _debug?: Debug): GDBLine | ParsedGDBLine
     // GDB style with frame number and numeric file/line
     /#\d+\s+(0x[0-9a-f]+)\s+in\s+([^(]+\((?:"(?:\\.|[^"\\])*"|[^()])*?\))\s+at\s+(.+):(\d+)/i,
     // GDB style without frame number and numeric file/line
-    /(0x[0-9a-f]+)\s+in\s+([^(]+(?:\([^()]*\))?)\s+at\s+(.+):(\d+)/i,
+    /(0x[0-9a-f]+)\s+in\s+((?:[^()]|\((?:[^()]|\([^()]*\))*\))+)\s+at\s+(.+):(\d+)/i,
     // GDB style with frame number and ?? file/line
-    /(?:#\d+\s+)?(0x[0-9a-f]+)\s+in\s+([^(]+(?:\([^()]*\))?)\s+at\s+(\?+):(\?+)/i,
+    /(?:#\d+\s+)?(0x[0-9a-f]+)\s+in\s+((?:[^()]|\((?:[^()]|\([^()]*\))*\))+)\s+at\s+(\?+):(\?+)/i,
     // "is in" format with numeric file/line
-    /(0x[0-9a-f]+)\s+is\s+in\s+([^(]+(?:\([^()]*\))?)\s+\((.+):(\d+)\)/i,
+    /(0x[0-9a-f]+)\s+is\s+in\s+((?:[^()]|\((?:[^()]|\([^()]*\))*\))+)\s+\((.+):(\d+)\)/i,
     // "is in" format without line number
-    /(0x[0-9a-f]+)\s+is\s+in\s+([^(]+(?:\([^()]*\))?)\s+\(([^():]+)\)/i,
+    /(0x[0-9a-f]+)\s+is\s+in\s+((?:[^()]|\((?:[^()]|\([^()]*\))*\))+)\s+\(([^():]+)\)/i,
     // Address with "is at" and numeric file/line
     /(0x[0-9a-f]+)\s+is\s+at\s+(.+):(\d+)/i,
     // Method with file/line but no address
-    /(?:#\d+\s+)?([^(]+(?:\([^()]*\))?)\s+at\s+(.+):(\d+)/,
+    /(?:#\d+\s+)?((?:[^()]|\((?:[^()]|\([^()]*\))*\))+)\s+at\s+(.+):(\d+)/,
   ];
 
   for (const [i, pattern] of patterns.entries()) {
@@ -90,7 +90,7 @@ export function parseLine(line: string, _debug?: Debug): GDBLine | ParsedGDBLine
   }
   // Fallback for addresses without file/line info
   const fallbackMatch = line.match(
-    /(?:#\d+\s+)?(0x[0-9a-f]+)\s+(?:is\s+in|in)\s+([^(]+(?:\([^()]*\))?)/i,
+    /(?:#\d+\s+)?(0x[0-9a-f]+)\s+(?:is\s+in|in)\s+((?:[^()]|\((?:[^()]|\([^()]*\))*\))+)/i,
   );
   if (fallbackMatch) {
     const [, regAddr, method] = fallbackMatch;

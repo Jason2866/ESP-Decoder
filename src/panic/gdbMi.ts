@@ -35,6 +35,8 @@ export class GdbMiClient {
   private readonly log: (...args: unknown[]) => void;
   private error: Error | undefined;
   private readonly commandQueue: QueuedCommand[] = [];
+  /** True while a written command awaits its prompt-terminated response. */
+  private commandInFlight = false;
   private stdoutBuffer = '';
   private handshakeSettled = false;
   private handshakeResolve: (() => void) | null = null;
@@ -74,6 +76,7 @@ export class GdbMiClient {
       return;
     }
     this.error = err;
+    this.commandInFlight = false;
     this.log('failure', err);
     if (!this.handshakeSettled && this.handshakeReject) {
       const reject = this.handshakeReject;
@@ -92,19 +95,37 @@ export class GdbMiClient {
     }
     this.log('send', command);
     return new Promise((resolve, reject) => {
-      const executor: QueuedCommand = { resolve, reject, command, startedAt: Date.now() };
-      this.commandQueue.push(executor);
-      try {
-        this.cp.stdin!.write(`${command}\n`);
-      } catch (err) {
-        this.fail(err instanceof Error ? err : new Error(String(err)));
-      }
+      this.commandQueue.push({ resolve, reject, command, startedAt: Date.now() });
+      this.pumpCommandQueue();
     });
+  }
+
+  /**
+   * Write the next queued command only after the previous command's
+   * response has settled, so each prompt-terminated output stays paired
+   * with its command.
+   */
+  private pumpCommandQueue(): void {
+    if (this.commandInFlight || this.error) {
+      return;
+    }
+    const executor = this.commandQueue[0];
+    if (!executor) {
+      return;
+    }
+    this.commandInFlight = true;
+    try {
+      this.cp.stdin!.write(`${executor.command}\n`);
+    } catch (err) {
+      this.commandInFlight = false;
+      this.fail(err instanceof Error ? err : new Error(String(err)));
+    }
   }
 
   private onData(chunk: string): void {
     if (this.error) {
       const error = this.error;
+      this.commandInFlight = false;
       this.commandQueue.forEach((executor) => executor.reject(error));
       this.commandQueue.length = 0;
     }
@@ -129,6 +150,7 @@ export class GdbMiClient {
     }
 
     const executor = this.commandQueue.shift();
+    this.commandInFlight = false;
     if (executor) {
       const elapsed = Date.now() - executor.startedAt;
       this.log('recv', `${executor.command} (${elapsed}ms)`, preview(output));
@@ -136,6 +158,7 @@ export class GdbMiClient {
     } else {
       this.log('recv without queued command', preview(output));
     }
+    this.pumpCommandQueue();
   }
 
   close(): void {
@@ -176,8 +199,25 @@ export function extractMiListContent(str: string, key: string): string | undefin
     return undefined;
   }
   let depth = 0;
+  let inQuotes = false;
+  let escape = false;
   for (let i = start; i < str.length; i++) {
     const c = str[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inQuotes && c === '\\') {
+      escape = true;
+      continue;
+    }
+    if (c === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (inQuotes) {
+      continue;
+    }
     if (c === '[') {
       depth++;
     } else if (c === ']') {

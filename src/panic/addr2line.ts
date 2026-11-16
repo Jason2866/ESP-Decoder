@@ -42,16 +42,20 @@ class GDBSession {
       this.terminate(err instanceof Error ? err : new Error(String(err))),
     );
     this.gdb.on('exit', (code, signal) => {
-      if (code !== 0 && signal !== 'SIGTERM') {
-        const exitErr = new Error(
-          `GDB exited unexpectedly (code=${code}, signal=${signal})`,
-        );
-        console.warn(exitErr.message);
-        this.terminate(exitErr);
-      } else if (!this.didExecuteFirstCommand) {
+      if (!this.didExecuteFirstCommand) {
         // Exited (even cleanly) before the startup prompt — fail start().
-        this.terminate(new Error(`GDB exited before startup completed (code=${code}, signal=${signal})`));
+        this.terminate(
+          new Error(`GDB exited before startup completed (code=${code}, signal=${signal})`),
+        );
+        return;
       }
+      // Any exit after startup — including SIGTERM — must fail pending and
+      // queued commands instead of leaving exec() unsettled. An intentional
+      // close() has no queued work, so terminate() is a no-op then.
+      if (code !== 0 || signal !== null) {
+        console.warn(`GDB exited (code=${code}, signal=${signal})`);
+      }
+      this.terminate(new Error(`GDB exited (code=${code}, signal=${signal})`));
     });
   }
 

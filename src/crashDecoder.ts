@@ -8,6 +8,9 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 
+/** Upper bound for a single GDB-backed panic decode before aborting to raw decode. */
+const DECODE_TIMEOUT_MS = 120_000;
+
 // Panic decoding engine (modeled on esp-idf-panic-decoder's gdb_panic_server).
 import {
   decodePanicText,
@@ -302,7 +305,12 @@ export async function decodeCrash(
       signal: abortController.signal,
     };
 
-    const result = await decodePanicText(params, crashEvent.rawText, decodeOptions);
+    // Bound the GDB-backed decode so a stuck toolchain cannot hang the
+    // monitor; on timeout the AbortError falls through to the raw decode.
+    const decodeTimeout = setTimeout(() => abortController.abort(), DECODE_TIMEOUT_MS);
+    decodeTimeout.unref?.();
+    const result = await decodePanicText(params, crashEvent.rawText, decodeOptions)
+      .finally(() => clearTimeout(decodeTimeout));
 
     const decRes = Array.isArray(result) ? result[0]?.result ?? result[0] : result;
 
