@@ -82,12 +82,14 @@ class GDBSession {
   }
 
   /**
-   * Index of the '(gdb)' prompt, or -1. GDB separates consecutive prompts
-   * with spaces rather than newlines ('(gdb) (gdb) '), so the boundary is
-   * whitespace on both sides — never a bare substring inside filenames.
+   * Index of the '(gdb)' prompt that terminates the buffered response, or
+   * -1. GDB separates consecutive prompts with spaces rather than newlines
+   * ('(gdb) (gdb) '), and a '(gdb)' token inside source text must not
+   * complete the command early — only a prompt at the end of the buffer
+   * counts.
    */
   private promptBoundaryIndex(): number {
-    const match = /(?<!\S)\(gdb\)(?=\s|$)/.exec(this.buffer);
+    const match = /(?<!\S)\(gdb\)\s*$/.exec(this.buffer);
     return match ? match.index : -1;
   }
 

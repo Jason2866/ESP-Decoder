@@ -54,7 +54,11 @@ import {
   gdbRegsInfoRiscvIlp32,
   parseRiscvPanicDetailed,
   parseESP32PanicOutput,
+  addr2line,
+  isParsedGDBLine,
+  LineDecoder,
 } from '../panic/index.js';
+import type { ParsedGDBLine } from '../panic/index.js';
 
 // ---------------------------------------------------------------------------
 // Fixture paths
@@ -1192,4 +1196,99 @@ describe('parseESP32PanicOutput – dual-core dumps', () => {
     expect(parsed.regs.PC).toBe(0x40000002);
     expect(parsed.backtraceAddrs).toEqual([0x40000002, 0x40000003]);
   });
+});
+
+// ---------------------------------------------------------------------------
+// LineDecoder – focused chunk/UTF-8/CRLF coverage (no timers, no vscode)
+// ---------------------------------------------------------------------------
+
+describe('LineDecoder', () => {
+  const encode = (s: string) => new TextEncoder().encode(s);
+
+  it('decodes a 3-byte UTF-8 sequence split at each interior byte', () => {
+    // € = E2 82 AC
+    const full = Uint8Array.from([0xe2, 0x82, 0xac]);
+    for (const split of [1, 2]) {
+      const decoder = new LineDecoder();
+      expect(decoder.push(new Uint8Array([0x61, ...full.subarray(0, split)]))).toEqual([]);
+      expect(decoder.hasPendingLine()).toBe(true);
+      expect(decoder.push(new Uint8Array([...full.subarray(split), 0x0a]))).toEqual(['a€']);
+    }
+  });
+
+  it('decodes a 4-byte UTF-8 sequence split at each interior byte', () => {
+    // 😀 = F0 9F 98 80
+    const full = Uint8Array.from([0xf0, 0x9f, 0x98, 0x80]);
+    for (const split of [1, 2, 3]) {
+      const decoder = new LineDecoder();
+      expect(decoder.push(new Uint8Array([0x61, ...full.subarray(0, split)]))).toEqual([]);
+      expect(decoder.hasPendingLine()).toBe(true);
+      expect(decoder.push(new Uint8Array([...full.subarray(split), 0x0a]))).toEqual(['a😀']);
+    }
+  });
+
+  it('treats split CRLF as a single line ending', () => {
+    const decoder = new LineDecoder();
+    expect(decoder.push(encode('a\r'))).toEqual(['a']);
+    expect(decoder.push(encode('\nb'))).toEqual([]);
+    expect(decoder.flush()).toEqual(['b']);
+  });
+
+  it('supports CR-only line endings', () => {
+    const decoder = new LineDecoder();
+    expect(decoder.push(encode('a\rb\r'))).toEqual(['a', 'b']);
+    expect(decoder.flush()).toEqual([]);
+  });
+
+  it('produces exactly one empty line for "a\\r" followed by "\\r\\nb"', () => {
+    const decoder = new LineDecoder();
+    expect(decoder.push(encode('a\r'))).toEqual(['a']);
+    expect(decoder.push(encode('\r\nb'))).toEqual(['']);
+    expect(decoder.flush()).toEqual(['b']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// addr2line – '(gdb)' prompt must only match at the end of the response
+// ---------------------------------------------------------------------------
+
+describe.skipIf(isWindows)('addr2line – prompt boundary', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-a2l-'));
+  const fakeGdbPath = path.join(tmpDir, 'fake-gdb.cjs');
+
+  // Fake interactive GDB: emits a '(gdb) ' prompt after each command. The
+  // `list` response embeds a standalone '(gdb)' token mid-output — it must
+  // not terminate the command before the real source line arrives.
+  fs.writeFileSync(
+    fakeGdbPath,
+    `#!/usr/bin/env node
+const readline = require('readline');
+process.stdout.write('Fake GNU gdb\\n(gdb) ');
+readline.createInterface({ input: process.stdin }).on('line', (line) => {
+  if (line.startsWith('list ')) {
+    process.stdout.write('note: token (gdb) appears mid-output\\n0x40000000 is at /src/main.c:42\\n(gdb) ');
+  } else {
+    process.stdout.write('OK\\n(gdb) ');
+  }
+});
+`,
+    { mode: 0o755 },
+  );
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('does not terminate the response at a (gdb) token inside list output', async () => {
+    const [result] = await addr2line(
+      { elfPath: '/nonexistent/firmware.elf', toolPath: fakeGdbPath },
+      [0x40000000],
+    );
+
+    expect(result).toBeDefined();
+    expect(isParsedGDBLine(result?.location)).toBe(true);
+    const location = result!.location as ParsedGDBLine;
+    expect(location.file).toBe('/src/main.c');
+    expect(location.lineNumber).toBe('42');
+  }, 30_000);
 });
