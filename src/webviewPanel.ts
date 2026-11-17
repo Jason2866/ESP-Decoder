@@ -31,6 +31,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   // cursors stable across buffer trimming and clears.
   private lineSeqBase = 0;
   private crashEvents: CrashEvent[] = [];
+  // Per-event decode generation: a newer decode (auto re-decode after an
+  // eventUpdated merge, or a manual request) supersedes in-flight older ones
+  // so stale results cannot overwrite event.decoded or post late messages.
+  private readonly crashDecodeRevisions = new Map<string, number>();
   private lineBuffer = '';
   private config: SessionConfig = {};
   private webviewInstanceGeneration = 0;
@@ -181,8 +185,19 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     );
   }
 
+  private nextCrashDecodeRevision(eventId: string): number {
+    const rev = (this.crashDecodeRevisions.get(eventId) ?? 0) + 1;
+    this.crashDecodeRevisions.set(eventId, rev);
+    return rev;
+  }
+
+  private isCurrentCrashDecode(eventId: string, rev: number): boolean {
+    return this.crashDecodeRevisions.get(eventId) === rev;
+  }
+
   /** Auto-decode a crash event when an ELF is configured and post the result. */
   private async decodeCrashEvent(event: CrashEvent): Promise<void> {
+    const rev = this.nextCrashDecodeRevision(event.id);
     if (this.config.elfPath) {
       try {
         const decoded = await decodeCrash(
@@ -194,6 +209,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           this.config.romElfPath,
           this.addr2linePool
         );
+        if (!this.isCurrentCrashDecode(event.id, rev)) {
+          return;
+        }
         event.decoded = decoded;
         this.postMessage({
           type: 'crashDecoded',
@@ -206,6 +224,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           );
         }
       } catch (err) {
+        if (!this.isCurrentCrashDecode(event.id, rev)) {
+          return;
+        }
         this.log.appendLine(`[ESP Decoder] Decode error for ${event.id}: ${err instanceof Error ? err.message : String(err)}`);
         this.postMessage({
           type: 'crashDecodeError',
@@ -730,6 +751,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         this.lineSeqBase += this.serialLines.length;
         this.serialLines = [];
         this.crashEvents = [];
+        this.crashDecodeRevisions.clear();
         this.crashCapturer.reset();
         break;
       case 'improvStart':
@@ -774,6 +796,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       case 'decodeCrash': {
         const event = this.crashEvents.find((e) => e.id === message.eventId);
         if (event && this.config.elfPath) {
+          const rev = this.nextCrashDecodeRevision(event.id);
           try {
             const decoded = await decodeCrash(
               event,
@@ -784,6 +807,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
               this.config.romElfPath,
               this.addr2linePool
             );
+            if (!this.isCurrentCrashDecode(event.id, rev)) {
+              break;
+            }
             event.decoded = decoded;
             this.postMessage({
               type: 'crashDecoded',
@@ -796,6 +822,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
               );
             }
           } catch (err) {
+            if (!this.isCurrentCrashDecode(event.id, rev)) {
+              break;
+            }
             this.postMessage({
               type: 'crashDecodeError',
               eventId: event.id,
