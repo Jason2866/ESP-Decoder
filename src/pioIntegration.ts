@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { findEspIdfBuilds } from './espIdfIntegration';
 import { core as pioCore, installer as pioInstaller, project as pioProject } from 'pioarduino-node-helpers';
-import { CHIP_TARGET_MAP, RISCV_TARGETS } from './chipTargets';
+import { KNOWN_CHIPS, chipArch, ChipArch } from './chipTargets';
 
 /**
  * Detected PlatformIO environment with ELF and tool paths.
@@ -264,7 +264,8 @@ function parseEnvironments(sections: Sections): ParsedEnv[] {
  * "esp32s3" matches before "esp32".
  */
 function getChipName(boardName: string | undefined, workspaceFolder?: string, coreDir?: string): string {
-  const sortedKeys = Object.keys(CHIP_TARGET_MAP).sort((a, b) => b.length - a.length);
+  // KNOWN_CHIPS is pre-sorted longest-first so 'esp32s31' matches before 'esp32s3'.
+  const sortedKeys = KNOWN_CHIPS;
 
   if (boardName) {
     const mcu = readBoardMcu(boardName, workspaceFolder, coreDir);
@@ -392,69 +393,125 @@ function readBoardMcu(boardName: string, workspaceFolder?: string, projectCoreDi
 }
 
 /**
- * Check if a trbr target arch is RISC-V.
+ * Ordered Xtensa GDB binary names, most generic last. A chip-specific name
+ * (e.g. xtensa-esp32s3-elf-gdb) is tried before these.
  */
-function isRiscVArch(targetArch: string): boolean {
-  return RISCV_TARGETS.has(targetArch);
+const XTENSA_GDB_NAMES = [
+  'xtensa-esp-elf-gdb',
+  'xtensa-esp32-elf-gdb',
+  'xtensa-esp32s3-elf-gdb',
+  'xtensa-esp32s2-elf-gdb',
+  'xtensa-lx106-elf-gdb',
+];
+
+/**
+ * Find a GDB binary in PlatformIO/pioarduino package directories.
+ *
+ * RISC-V: any riscv32 toolchain package providing riscv32-esp-elf-gdb
+ *         (tool-riscv32-esp-elf-gdb, toolchain-riscv32-esp, ...).
+ * Xtensa:  any xtensa tool(-chain) package providing a xtensa-*-elf-gdb
+ *         binary (tool-xtensa-esp-elf-gdb, toolchain-xtensa-*, toolchain-xtensa
+ *         for ESP8266 lx106, ...). A chip-specific binary is preferred when
+ *         chipName is known.
+ *
+ * Shared by PlatformIO environment detection and crashDecoder's fallback
+ * auto-detection.
+ */
+export function findPioGdbToolPath(
+  packagesDir: string,
+  arch: ChipArch,
+  chipName?: string,
+): string | undefined {
+  const ext = process.platform === 'win32' ? '.exe' : '';
+
+  let pkgDirs: string[] = [];
+  /** Chip-specific binary names, checked across all packages first. */
+  const preferredNames: string[] = [];
+  /** Generic binary names, checked in package-priority order. */
+  let genericNames: string[] = [];
+  /** Prefix used to prefer chip-matching gdb binaries in the fallback scan. */
+  let chipPrefix: string | undefined;
+
+  if (arch === 'riscv') {
+    pkgDirs = listPackageDirs(packagesDir, /riscv32/);
+    genericNames = [`riscv32-esp-elf-gdb${ext}`];
+  } else {
+    pkgDirs = listPackageDirs(packagesDir, /^(tool|toolchain)-xtensa/);
+    const chipHint = chipName === 'esp8266' ? 'lx106' : chipName;
+    if (chipHint) {
+      preferredNames.push(`xtensa-${chipHint}-elf-gdb${ext}`);
+      chipPrefix = `xtensa-${chipHint}-`;
+    }
+    genericNames = XTENSA_GDB_NAMES.map((n) => n + ext);
+  }
+
+  // Chip-specific binaries take precedence across all matching packages.
+  for (const name of preferredNames) {
+    for (const pkgDir of pkgDirs) {
+      const candidate = path.join(packagesDir, pkgDir, 'bin', name);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  // Generic names keep the package priority (package dir outer, name inner).
+  for (const pkgDir of pkgDirs) {
+    const binDir = path.join(packagesDir, pkgDir, 'bin');
+    for (const name of genericNames) {
+      const candidate = path.join(binDir, name);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  // Fallback: scan bin dirs of matching packages for any arch-appropriate gdb,
+  // applying the same ordering — chip-matching binaries before generic ones.
+  const gdbPattern = arch === 'riscv'
+    ? /^riscv32-.*-elf-gdb(\.exe)?$/
+    : /^xtensa-.*-elf-gdb(\.exe)?$/;
+  const scan = (predicate: (entry: string) => boolean): string | undefined => {
+    for (const pkgDir of pkgDirs) {
+      const binDir = path.join(packagesDir, pkgDir, 'bin');
+      try {
+        for (const entry of fs.readdirSync(binDir)) {
+          if (predicate(entry)) {
+            return path.join(binDir, entry);
+          }
+        }
+      } catch { /* bin dir missing or unreadable */ }
+    }
+    return undefined;
+  };
+
+  if (chipPrefix) {
+    const chipMatch = scan((entry) => entry.startsWith(chipPrefix) && gdbPattern.test(entry));
+    if (chipMatch) {
+      return chipMatch;
+    }
+  }
+  return scan((entry) => gdbPattern.test(entry));
 }
 
 /**
- * Find GDB binary from PlatformIO tool packages.
- *
- * RISC-V: tool-riscv32-esp-elf-gdb/bin/riscv32-esp-elf-gdb
- * Xtensa: tool-xtensa-esp-elf-gdb/bin/xtensa-esp{32,32s2,32s3}-elf-gdb
- *         (chip-specific binaries inside the unified GDB package)
+ * List package directory names under packagesDir matching a pattern,
+ * with dedicated GDB packages preferred over full toolchains.
  */
-function findGdbPackage(packagesDir: string, isRiscV: boolean, chipName?: string): string | undefined {
-  const ext = process.platform === 'win32' ? '.exe' : '';
-
-  if (isRiscV) {
-    const gdbBin = path.join(packagesDir, 'tool-riscv32-esp-elf-gdb', 'bin', 'riscv32-esp-elf-gdb' + ext);
-    if (fs.existsSync(gdbBin)) {
-      return gdbBin;
-    }
-  } else {
-    const gdbDir = path.join(packagesDir, 'tool-xtensa-esp-elf-gdb', 'bin');
-
-    // Try chip-specific binary first (e.g. xtensa-esp32s3-elf-gdb)
-    if (chipName) {
-      const chipGdb = path.join(gdbDir, `xtensa-${chipName}-elf-gdb${ext}`);
-      if (fs.existsSync(chipGdb)) {
-        return chipGdb;
-      }
-    }
-
-    // Fall back to common variants in the dedicated GDB package
-    for (const chip of ['esp32', 'esp32s3', 'esp32s2']) {
-      const gdbBin = path.join(gdbDir, `xtensa-${chip}-elf-gdb${ext}`);
-      if (fs.existsSync(gdbBin)) {
-        return gdbBin;
-      }
-    }
-
-    // Generic binary (xtensa-esp-elf-gdb) in the dedicated GDB package
-    const genericGdb = path.join(gdbDir, `xtensa-esp-elf-gdb${ext}`);
-    if (fs.existsSync(genericGdb)) {
-      return genericGdb;
-    }
-
-    // Legacy: GDB bundled inside toolchain-xtensa-* packages
-    try {
-      for (const entry of fs.readdirSync(packagesDir)) {
-        if (!entry.startsWith('toolchain-xtensa-')) { continue; }
-        const binDir = path.join(packagesDir, entry, 'bin');
-        if (chipName) {
-          const c = path.join(binDir, `xtensa-${chipName}-elf-gdb${ext}`);
-          if (fs.existsSync(c)) { return c; }
-        }
-        for (const chip of ['esp32', 'esp32s3', 'esp32s2']) {
-          const c = path.join(binDir, `xtensa-${chip}-elf-gdb${ext}`);
-          if (fs.existsSync(c)) { return c; }
-        }
-      }
-    } catch { /* ignore */ }
+function listPackageDirs(packagesDir: string, pattern: RegExp): string[] {
+  try {
+    return fs
+      .readdirSync(packagesDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && pattern.test(d.name))
+      .map((d) => d.name)
+      .sort((a, b) => {
+        const aGdb = a.includes('gdb') ? 0 : 1;
+        const bGdb = b.includes('gdb') ? 0 : 1;
+        return aGdb - bGdb || a.localeCompare(b);
+      });
+  } catch {
+    return [];
   }
-  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -747,15 +804,14 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
     const board = parsed?.board;
 
     const chipName = getChipName(board || envName, workspaceFolder, coreDir);
-    const targetArch = CHIP_TARGET_MAP[chipName] ?? 'xtensa';
-    const isRiscV = isRiscVArch(targetArch);
+    const targetArch: ChipArch = chipArch(chipName);
 
     const packagesDir = getPioPackagesDir(coreDir);
     let toolPath: string | undefined;
     let romElfPath: string | undefined;
-    
+
     if (packagesDir) {
-      toolPath = findGdbPackage(packagesDir, isRiscV, chipName);
+      toolPath = findPioGdbToolPath(packagesDir, targetArch, chipName);
       romElfPath = findRomElf(packagesDir, chipName);
     }
 

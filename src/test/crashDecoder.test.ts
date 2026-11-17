@@ -46,11 +46,19 @@ vi.mock('vscode', () => {
 // ---------------------------------------------------------------------------
 // Import under test (after vscode mock is in place)
 // ---------------------------------------------------------------------------
-import { TrbrCrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
+import { CrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
 import type { CrashEvent } from '../crashDecoder.js';
 import { getPioPackagesDir } from '../pioIntegration.js';
-import { registerSets } from '../vendor/trbr/decode/regs.js';
-import { gdbRegsInfoRiscvIlp32 } from '../vendor/trbr/decode/riscvPanicParse.js';
+import {
+  registerSets,
+  gdbRegsInfoRiscvIlp32,
+  parseRiscvPanicDetailed,
+  parseESP32PanicOutput,
+  addr2line,
+  isParsedGDBLine,
+  LineDecoder,
+} from '../panic/index.js';
+import type { ParsedGDBLine } from '../panic/index.js';
 
 // ---------------------------------------------------------------------------
 // Fixture paths
@@ -122,7 +130,7 @@ const XTENSA_GDB_PATH = process.env.ESP_XTENSA_GDB ?? findPioGdb('xtensa');
  * Feed text into the capturer line-by-line and flush.
  * Returns the first detected CrashEvent (or undefined if none).
  */
-function feedCrashText(capturer: TrbrCrashCapturer, text: string): CrashEvent | undefined {
+function feedCrashText(capturer: CrashCapturer, text: string): CrashEvent | undefined {
   let detected: CrashEvent | undefined;
   capturer.onCrashDetected((e) => {
     if (!detected) { detected = e; }
@@ -136,11 +144,11 @@ function feedCrashText(capturer: TrbrCrashCapturer, text: string): CrashEvent | 
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('TrbrCrashCapturer – ESP32-C6 assert failure', () => {
-  let capturer: TrbrCrashCapturer;
+describe('CrashCapturer – ESP32-C6 assert failure', () => {
+  let capturer: CrashCapturer;
 
   beforeEach(() => {
-    capturer = new TrbrCrashCapturer();
+    capturer = new CrashCapturer();
   });
 
   it('detects the crash via the fallback detector', () => {
@@ -324,11 +332,11 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
 // ESP8266 crash detection
 // ---------------------------------------------------------------------------
 
-describe('TrbrCrashCapturer – ESP8266 exception crash', () => {
-  let capturer: TrbrCrashCapturer;
+describe('CrashCapturer – ESP8266 exception crash', () => {
+  let capturer: CrashCapturer;
 
   beforeEach(() => {
-    capturer = new TrbrCrashCapturer();
+    capturer = new CrashCapturer();
   });
 
   it('detects the crash', () => {
@@ -370,14 +378,14 @@ describe('TrbrCrashCapturer – ESP8266 exception crash', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Regression: ESP32 Guru Meditation captured via trbr native path
+// Regression: ESP32 Guru Meditation captured via the crash capturer
 // ---------------------------------------------------------------------------
 
-describe('TrbrCrashCapturer – ESP32 Guru Meditation (trbr native path)', () => {
-  let capturer: TrbrCrashCapturer;
+describe('CrashCapturer – ESP32 Guru Meditation (native capturer path)', () => {
+  let capturer: CrashCapturer;
 
   beforeEach(() => {
-    capturer = new TrbrCrashCapturer();
+    capturer = new CrashCapturer();
   });
 
   const GURU_CRASH = [
@@ -390,10 +398,10 @@ describe('TrbrCrashCapturer – ESP32 Guru Meditation (trbr native path)', () =>
     'Rebooting...',
   ].join('\n');
 
-  it('detects the crash via trbr (not fallback)', () => {
+  it('detects the crash via the capturer (not fallback)', () => {
     const event = feedCrashText(capturer, GURU_CRASH);
     expect(event).toBeDefined();
-    // trbr-native events have numeric IDs (e.g. "000001"), not "fallback-..." prefixed
+    // capturer events have numeric IDs (e.g. "000001"), not "fallback-..." prefixed
     expect(event!.id).not.toMatch(/^fallback-/);
   });
 
@@ -407,6 +415,219 @@ describe('TrbrCrashCapturer – ESP32 Guru Meditation (trbr native path)', () =>
     expect(event?.rawText).toContain('Backtrace:');
     expect(event?.rawText).toContain('EXCVADDR');
     expect(event?.rawText).toContain('EXCCAUSE');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// assert failed: + abort() was called continuation
+// ---------------------------------------------------------------------------
+
+describe('CrashCapturer – assert/abort continuation', () => {
+  it('keeps assert failed and abort() was called in a single crash block', () => {
+    const capturer = new CrashCapturer();
+    const event = feedCrashText(
+      capturer,
+      [
+        'assert failed: npl_freertos_event_init',
+        'abort() was called at PC 0x42001234 on core 0',
+        'Backtrace: 0x42001234:0x3ffb1234 0x42005678:0x3ffb5678',
+        'Rebooting...',
+      ].join('\n'),
+    );
+    expect(event).toBeDefined();
+    expect(event!.rawText).toContain('assert failed: npl_freertos_event_init');
+    expect(event!.rawText).toContain('abort() was called');
+    expect(event!.rawText).toContain('Backtrace:');
+    expect(event!.lines.filter((l) => l.includes('assert failed:'))).toHaveLength(1);
+  });
+
+  it('starts a new block when abort() arrives after a completed backtrace', () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    capturer.pushData(
+      Buffer.from(
+        [
+          'assert failed: first_crash',
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002',
+          'abort() was called at PC 0x42000003 on core 0',
+          'Backtrace: 0x42000004:0x3ffb0004 0x42000005:0x3ffb0005',
+          'Rebooting...',
+        ].join('\n'),
+        'utf8',
+      ),
+    );
+    capturer.flush();
+    // First block (assert + backtrace) and second block (abort + backtrace)
+    // must not be merged into one event.
+    expect(events.length).toBe(2);
+    expect(events[0].rawText).toContain('assert failed: first_crash');
+    expect(events[0].rawText).not.toContain('abort() was called');
+    expect(events[1].rawText).toContain('abort() was called');
+    expect(events[1].rawText).not.toContain('assert failed:');
+  });
+});
+
+describe('CrashCapturer – quiet period with unterminated line', () => {
+  it('does not finalize while a line lacks a newline; emits on explicit flush', async () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    // No trailing newline: the last line stays buffered in LineDecoder.
+    capturer.pushData(
+      Buffer.from(
+        [
+          'assert failed: unterminated_tail',
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002',
+          'Rebooting...',
+        ].join('\n'),
+        'utf8',
+      ),
+    );
+    // Wait beyond the 500 ms quiet period: the framer must not finalize
+    // while the unterminated line is still buffered.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(events.length).toBe(0);
+
+    capturer.flush();
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('assert failed: unterminated_tail');
+    expect(events[0].rawText).toContain('Rebooting...');
+  });
+
+  it('preserves the block when the stream ends mid-UTF-8-sequence', async () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    // 'assert failed' line is complete, then only the first byte (0xC3) of a
+    // two-byte UTF-8 sequence arrives — invisible to a decoded-text check.
+    capturer.pushData(
+      Buffer.concat([
+        Buffer.from('assert failed: split_utf8\n', 'utf8'),
+        Buffer.from([0xc3]),
+      ]),
+    );
+    // Beyond the quiet period the framer must not drop the assert block.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(events.length).toBe(0);
+
+    // Rest of the sequence ('é' = C3 A9) + newline, then the backtrace.
+    capturer.pushData(
+      Buffer.concat([
+        Buffer.from([0xa9, 0x0a]),
+        Buffer.from(
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002\nRebooting...\n',
+          'utf8',
+        ),
+      ]),
+    );
+    capturer.flush();
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('assert failed: split_utf8');
+    expect(events[0].rawText).toContain('Backtrace:');
+  });
+
+  it('preserves an unterminated Backtrace line until flush', async () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    // Crash ends with a Backtrace line that has no trailing newline.
+    capturer.pushData(
+      Buffer.from(
+        'assert failed: unterminated_bt\n' +
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002',
+        'utf8',
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(events.length).toBe(0);
+
+    capturer.flush();
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('assert failed: unterminated_bt');
+    expect(events[0].rawText).toContain('Backtrace: 0x42000001');
+  });
+
+  it('emits a complete block after the quiet period without flush', async () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    // Complete block (Backtrace signal) but no immediate-finalize line, so
+    // only the quiet-period timer can emit it.
+    capturer.pushData(
+      Buffer.from(
+        'assert failed: quiet_timer\n' +
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002\n',
+        'utf8',
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('assert failed: quiet_timer');
+    expect(events[0].rawText).toContain('Backtrace:');
+  });
+});
+
+describe('CrashCapturer – signature dedup vs. backtrace divergence', () => {
+  it('does not merge crashes that share the first frames but differ later', () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    const crash = (lastAddr: string) =>
+      [
+        'Guru Meditation Error: Core 0 panic\'ed (StoreProhibited)',
+        'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002 0x42000003:0x3ffb0003 0x42000004:0x3ffb0004 0x42000005:0x3ffb0005 0x42000006:0x3ffb0006 ' + lastAddr,
+        'Rebooting...',
+      ].join('\n');
+    capturer.pushData(Buffer.from(crash('0x4200000a:0x3ffb000a') + '\n' + crash('0x4200000b:0x3ffb000b'), 'utf8'));
+    capturer.flush();
+    expect(events.length).toBe(2);
+    expect(events[0].id).not.toBe(events[1].id);
+  });
+});
+
+describe('CrashCapturer – event updates', () => {
+  it('fires onCrashUpdated with the same id when a richer capture merges', () => {
+    const capturer = new CrashCapturer();
+    const detected: CrashEvent[] = [];
+    const updated: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => detected.push(e));
+    capturer.onCrashUpdated((e) => updated.push(e));
+
+    capturer.pushData(
+      Buffer.from('assert failed: merge_me\nBacktrace: 0x40000001:0x3ffb0001\n', 'utf8'),
+    );
+    capturer.flush();
+    capturer.pushData(
+      Buffer.from(
+        'assert failed: merge_me\nBacktrace: 0x40000001:0x3ffb0001\nRebooting...\n',
+        'utf8',
+      ),
+    );
+    capturer.flush();
+
+    expect(detected.length).toBe(1);
+    expect(updated.length).toBe(1);
+    expect(updated[0].id).toBe(detected[0].id);
+    expect(updated[0].rawText).toContain('Rebooting...');
+  });
+});
+
+describe('CrashFramer – complete block size cap', () => {
+  it('finalizes a complete block at the cap even without a quiet period', () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+
+    const parts = ['assert failed: flood\n', 'Backtrace: 0x40000001:0x3ffb0001\n'];
+    for (let i = 0; i < 2100; i++) {
+      parts.push(`filler line ${i}\n`);
+    }
+    capturer.pushData(Buffer.from(parts.join(''), 'utf8'));
+
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('assert failed: flood');
+    expect(events[0].rawText).toContain('Backtrace:');
   });
 });
 
@@ -570,6 +791,89 @@ done
   });
 });
 
+// ---------------------------------------------------------------------------
+// Dual-core Xtensa fast-path: the panic core's backtrace/regs must win
+// ---------------------------------------------------------------------------
+describe.skipIf(isWindows)('decodeCrash – dual-core Xtensa fast-path', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-dualcore-'));
+  const binDir = path.join(tmpDir, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+
+  const fakeGdbPath = path.join(binDir, 'xtensa-esp32-elf-gdb');
+  const fakeAddr2linePath = path.join(binDir, 'xtensa-esp32-elf-addr2line');
+
+  // Echo the resolved address into the function name so tests can tell
+  // which core's backtrace addresses were actually resolved.
+  const addr2lineScript = `#!/bin/sh
+for addr in "$@"; do
+  case "$addr" in
+    -* | /* ) continue ;;
+    0x*)
+      echo "$addr"
+      echo "func_$addr"
+      echo "/home/user/project/main.cpp:42"
+      ;;
+  esac
+done
+`;
+
+  fs.writeFileSync(fakeGdbPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  fs.writeFileSync(fakeAddr2linePath, addr2lineScript, { mode: 0o755 });
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const DUAL_CORE_CRASH = [
+    'Guru Meditation Error: Core  1 panic\'ed (LoadProhibited). Exception was unhandled.',
+    '',
+    'Core  0 register dump:',
+    'PC      : 0x40000001  PS      : 0x00060030  A0      : 0x3ffb0001  A1      : 0x3ffb0002',
+    'EXCVADDR: 0x00000000  EXCCAUSE: 0x00000000',
+    '',
+    // Core 0's backtrace appears first but belongs to the non-panicking core.
+    'Backtrace: 0x40000001:0x3ffb0001 0x40000009:0x3ffb0009',
+    '',
+    'Core  1 register dump:',
+    'PC      : 0x40000002  PS      : 0x00060030  A0      : 0x3ffb0002  A1      : 0x3ffb0003',
+    'EXCVADDR: 0x3ffb0004  EXCCAUSE: 0x0000000c',
+    '',
+    'Backtrace: 0x40000002:0x3ffb0002 0x40000003:0x3ffb0003',
+  ].join('\n');
+
+  function makeCrashEvent(): CrashEvent {
+    return {
+      id: 'test-dualcore-001',
+      kind: 'xtensa',
+      lines: DUAL_CORE_CRASH.split('\n').filter((l) => l.trim().length > 0),
+      rawText: DUAL_CORE_CRASH,
+      timestamp: Date.now(),
+    };
+  }
+
+  it('resolves only the panicking core\'s backtrace when core 0 prints first', async () => {
+    const decoded = await decodeCrash(makeCrashEvent(), '/nonexistent/firmware.elf', fakeGdbPath, 'xtensa');
+
+    expect(decoded.toolsMissing).toBeFalsy();
+    const addresses = decoded.stacktrace.map((f) => f.address.toLowerCase());
+    // Core 1's PCs only — core 0's backtrace must not leak in.
+    expect(addresses).toContain('0x40000002');
+    expect(addresses).toContain('0x40000003');
+    expect(addresses).not.toContain('0x40000001');
+    expect(addresses).not.toContain('0x40000009');
+  });
+
+  it('reports the panicking core\'s registers and fault fields', async () => {
+    const decoded = await decodeCrash(makeCrashEvent(), '/nonexistent/firmware.elf', fakeGdbPath, 'xtensa');
+
+    expect(decoded.regs?.['PC']).toBe(0x40000002);
+    expect(decoded.faultInfo?.coreId).toBe(1);
+    expect(decoded.faultInfo?.programCounter).toBe('0x40000002');
+    expect(decoded.faultInfo?.faultAddr).toBe('0x3ffb0004');
+    expect(decoded.faultInfo?.faultCode).toBe(0xc);
+  });
+});
+
 describe('decodeCoredumpElf', () => {
   it('exports as a function', () => {
     expect(typeof decodeCoredumpElf).toBe('function');
@@ -692,11 +996,11 @@ describe('decodeCoredumpBase64', () => {
 const ESP32S31_CRASH_TEXT_PATH = path.join(FIXTURES_DIR, 'esp32s31_crash.txt');
 const ESP32S31_CRASH_TEXT = fs.readFileSync(ESP32S31_CRASH_TEXT_PATH, 'utf8');
 
-describe('TrbrCrashCapturer – ESP32-S31 RISC-V crash', () => {
-  let capturer: TrbrCrashCapturer;
+describe('CrashCapturer – ESP32-S31 RISC-V crash', () => {
+  let capturer: CrashCapturer;
 
   beforeEach(() => {
-    capturer = new TrbrCrashCapturer();
+    capturer = new CrashCapturer();
   });
 
   it('detects the crash', () => {
@@ -800,4 +1104,191 @@ describe('RISC-V register layout', () => {
     // Use the canonical sequence from riscvPanicParse.js to avoid drift
     expect(registerSets.riscv).toEqual(gdbRegsInfoRiscvIlp32);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-core RISC-V register dump parsing
+// ---------------------------------------------------------------------------
+
+describe('parseRiscvPanicDetailed – multi-core dumps', () => {
+  it('parses registers of a core dumped after another core’s stack memory', () => {
+    const text = [
+      'Core  0 panic\'ed (Store access fault). Exception was unhandled.',
+      '',
+      'Core  0 register dump:',
+      'MEPC    : 0x42000001  RA      : 0x42000002  SP      : 0x3fc80000  GP      : 0x3fc80001',
+      'MCAUSE  : 0x00000007  MTVAL   : 0x3fc80002  MHARTID : 0x00000000',
+      '',
+      'Stack memory:',
+      '3fc80000: 0x00000000 0x00000000 0x00000000 0x00000000',
+      '',
+      'Core  1 register dump:',
+      'MEPC    : 0x42100001  RA      : 0x42100002  SP      : 0x3fc90000  GP      : 0x3fc90001',
+      'MCAUSE  : 0x0000000b  MTVAL   : 0x3fc90002  MHARTID : 0x00000001',
+      '',
+      'Stack memory:',
+      '3fc90000: 0x00000000 0x00000000 0x00000000 0x00000000',
+    ].join('\n');
+
+    const result = parseRiscvPanicDetailed(text);
+    expect(result.regDumps).toHaveLength(2);
+    expect(result.regDumps[0].regs.MEPC).toBe(0x42000001);
+    // Core 1's registers must be parsed even though core 0 ended in
+    // stack-memory mode.
+    expect(result.regDumps[1].regs.MEPC).toBe(0x42100001);
+    expect(result.regDumps[1].faultCode).toBe(0xb);
+    expect(result.regDumps[1].faultAddr).toBe(0x3fc90002);
+    // Stack segments stay attributed to their own core.
+    expect(result.stackDump.map((s) => s.coreId)).toEqual([0, 1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dual-core Xtensa panic parsing
+// ---------------------------------------------------------------------------
+
+describe('parseESP32PanicOutput – dual-core dumps', () => {
+  it('selects registers and backtrace of the core named in the panic header', () => {
+    const text = [
+      'Guru Meditation Error: Core  1 panic\'ed (LoadProhibited). Exception was unhandled.',
+      '',
+      'Core  0 register dump:',
+      'PC      : 0x40000001  PS      : 0x00060030  A0      : 0x3ffb0001  A1      : 0x3ffb0002',
+      'EXCVADDR: 0x00000000  EXCCAUSE: 0x00000000',
+      '',
+      'Backtrace: 0x40000001:0x3ffb0001 0x40000009:0x3ffb0009',
+      '',
+      'Core  1 register dump:',
+      'PC      : 0x40000002  PS      : 0x00060030  A0      : 0x3ffb0002  A1      : 0x3ffb0003',
+      'EXCVADDR: 0x3ffb0004  EXCCAUSE: 0x0000000c',
+      '',
+      'Backtrace: 0x40000002:0x3ffb0002 0x40000003:0x3ffb0003',
+    ].join('\n');
+
+    const parsed = parseESP32PanicOutput(text);
+    expect(parsed.coreId).toBe(1);
+    // Only core 1's registers — core 0's PC/EXCVADDR must not leak in.
+    expect(parsed.regs.PC).toBe(0x40000002);
+    expect(parsed.regs.EXCVADDR).toBe(0x3ffb0004);
+    expect(parsed.faultAddr).toBe(0x3ffb0004);
+    expect(parsed.faultCode).toBe(0xc);
+    expect(parsed.programCounter).toBe(0x40000002);
+    // Only core 1's backtrace PCs.
+    expect(parsed.backtraceAddrs).toEqual([0x40000002, 0x40000003]);
+  });
+
+  it('retains an indented Backtrace line during panic-core selection', () => {
+    const text = [
+      'Guru Meditation Error: Core  1 panic\'ed (LoadProhibited). Exception was unhandled.',
+      '',
+      'Core  0 register dump:',
+      'PC      : 0x40000001  PS      : 0x00060030',
+      '  Backtrace: 0x40000001:0x3ffb0001 0x40000009:0x3ffb0009',
+      '',
+      '  Core  1 register dump:',
+      'PC      : 0x40000002  PS      : 0x00060030',
+      'EXCVADDR: 0x3ffb0004  EXCCAUSE: 0x0000000c',
+      '  Backtrace: 0x40000002:0x3ffb0002 0x40000003:0x3ffb0003',
+    ].join('\n');
+
+    const parsed = parseESP32PanicOutput(text);
+    expect(parsed.coreId).toBe(1);
+    expect(parsed.regs.PC).toBe(0x40000002);
+    expect(parsed.backtraceAddrs).toEqual([0x40000002, 0x40000003]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LineDecoder – focused chunk/UTF-8/CRLF coverage (no timers, no vscode)
+// ---------------------------------------------------------------------------
+
+describe('LineDecoder', () => {
+  const encode = (s: string) => new TextEncoder().encode(s);
+
+  it('decodes a 3-byte UTF-8 sequence split at each interior byte', () => {
+    // € = E2 82 AC
+    const full = Uint8Array.from([0xe2, 0x82, 0xac]);
+    for (const split of [1, 2]) {
+      const decoder = new LineDecoder();
+      expect(decoder.push(new Uint8Array([0x61, ...full.subarray(0, split)]))).toEqual([]);
+      expect(decoder.hasPendingLine()).toBe(true);
+      expect(decoder.push(new Uint8Array([...full.subarray(split), 0x0a]))).toEqual(['a€']);
+    }
+  });
+
+  it('decodes a 4-byte UTF-8 sequence split at each interior byte', () => {
+    // 😀 = F0 9F 98 80
+    const full = Uint8Array.from([0xf0, 0x9f, 0x98, 0x80]);
+    for (const split of [1, 2, 3]) {
+      const decoder = new LineDecoder();
+      expect(decoder.push(new Uint8Array([0x61, ...full.subarray(0, split)]))).toEqual([]);
+      expect(decoder.hasPendingLine()).toBe(true);
+      expect(decoder.push(new Uint8Array([...full.subarray(split), 0x0a]))).toEqual(['a😀']);
+    }
+  });
+
+  it('treats split CRLF as a single line ending', () => {
+    const decoder = new LineDecoder();
+    expect(decoder.push(encode('a\r'))).toEqual(['a']);
+    expect(decoder.push(encode('\nb'))).toEqual([]);
+    expect(decoder.flush()).toEqual(['b']);
+  });
+
+  it('supports CR-only line endings', () => {
+    const decoder = new LineDecoder();
+    expect(decoder.push(encode('a\rb\r'))).toEqual(['a', 'b']);
+    expect(decoder.flush()).toEqual([]);
+  });
+
+  it('produces exactly one empty line for "a\\r" followed by "\\r\\nb"', () => {
+    const decoder = new LineDecoder();
+    expect(decoder.push(encode('a\r'))).toEqual(['a']);
+    expect(decoder.push(encode('\r\nb'))).toEqual(['']);
+    expect(decoder.flush()).toEqual(['b']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// addr2line – '(gdb)' prompt must only match at the end of the response
+// ---------------------------------------------------------------------------
+
+describe.skipIf(isWindows)('addr2line – prompt boundary', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-a2l-'));
+  const fakeGdbPath = path.join(tmpDir, 'fake-gdb.cjs');
+
+  // Fake interactive GDB: emits a '(gdb) ' prompt after each command. The
+  // `list` response embeds a standalone '(gdb)' token mid-output — it must
+  // not terminate the command before the real source line arrives.
+  fs.writeFileSync(
+    fakeGdbPath,
+    `#!/usr/bin/env node
+const readline = require('readline');
+process.stdout.write('Fake GNU gdb\\n(gdb) ');
+readline.createInterface({ input: process.stdin }).on('line', (line) => {
+  if (line.startsWith('list ')) {
+    process.stdout.write('note: token (gdb) appears mid-output\\n0x40000000 is at /src/main.c:42\\n(gdb) ');
+  } else {
+    process.stdout.write('OK\\n(gdb) ');
+  }
+});
+`,
+    { mode: 0o755 },
+  );
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('does not terminate the response at a (gdb) token inside list output', async () => {
+    const [result] = await addr2line(
+      { elfPath: '/nonexistent/firmware.elf', toolPath: fakeGdbPath },
+      [0x40000000],
+    );
+
+    expect(result).toBeDefined();
+    expect(isParsedGDBLine(result?.location)).toBe(true);
+    const location = result!.location as ParsedGDBLine;
+    expect(location.file).toBe('/src/main.c');
+    expect(location.lineNumber).toBe('42');
+  }, 30_000);
 });
