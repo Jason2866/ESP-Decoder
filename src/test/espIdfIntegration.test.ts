@@ -128,4 +128,33 @@ describe('findEspIdfBuilds', () => {
     expect(builds[0].targetArch).toBe('riscv');
     expect(builds[0].toolPath).toBe(path.join(toolBinDir, `riscv32-esp-elf-gdb${exe}`));
   });
+
+  it('prefers the chip-specific xtensa GDB inside an ESP-IDF tool directory', async () => {
+    const workspace = makeTempDir('esp-decoder-idf-workspace-');
+    const pathDir = makeTempDir('esp-decoder-idf-path-');
+    const toolsRoot = makeTempDir('esp-decoder-idf-tools-root-');
+    tempDirs.push(workspace, pathDir, toolsRoot);
+
+    touchFile(path.join(workspace, 'build', 'app.elf'));
+    fs.writeFileSync(path.join(workspace, 'sdkconfig'), 'CONFIG_IDF_TARGET="esp32s3"\n');
+
+    const binDir = path.join(
+      toolsRoot,
+      'tools',
+      'xtensa-esp32s3-elf',
+      '1.0',
+      'bin',
+    );
+    touchFile(path.join(binDir, `xtensa-esp32s3-elf-gdb${exe}`));
+    touchFile(path.join(binDir, `xtensa-esp-elf-gdb${exe}`));
+
+    // PATH must not shadow the tool-directory lookup.
+    process.env.PATH = pathDir;
+    process.env.IDF_TOOLS_PATH = toolsRoot;
+
+    const builds = await findEspIdfBuilds(workspace);
+    expect(builds.length).toBeGreaterThan(0);
+    expect(builds[0].targetArch).toBe('xtensa');
+    expect(builds[0].toolPath).toBe(path.join(binDir, `xtensa-esp32s3-elf-gdb${exe}`));
+  });
 });

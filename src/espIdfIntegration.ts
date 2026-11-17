@@ -160,16 +160,20 @@ function findGdbFromIdfTools(arch: ChipArch, chipTarget: string | undefined): st
   //    the generic xtensa-esp-elf-gdb is kept as a PATH fallback before the
   //    ESP-IDF tool directories are searched.
   const pathEnv = process.env.PATH;
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const chipGdb =
+    arch === 'xtensa' && chipHint
+      ? {
+          names: [`xtensa-${chipHint}-elf-gdb${ext}`],
+          pattern: new RegExp(`^xtensa-${escapeRegExp(chipHint)}-.*-gdb(\\.exe)?$`),
+        }
+      : undefined;
   if (pathEnv) {
     const dirs = pathEnv.split(path.delimiter).filter(Boolean);
-    const ext = process.platform === 'win32' ? '.exe' : '';
     let fromPath: string | undefined;
-    if (arch === 'xtensa' && chipHint) {
-      const chipPattern = new RegExp(
-        `^xtensa-${escapeRegExp(chipHint)}-.*-gdb(\\.exe)?$`,
-      );
+    if (chipGdb) {
       fromPath =
-        findGdbInDirs(dirs, [`xtensa-${chipHint}-elf-gdb${ext}`], chipPattern) ??
+        findGdbInDirs(dirs, chipGdb.names, chipGdb.pattern) ??
         // Exact-name fallback only; the pattern must not match other chips.
         findGdbInDirs(dirs, [`xtensa-esp-elf-gdb${ext}`], /$^/);
     } else {
@@ -210,7 +214,11 @@ function findGdbFromIdfTools(arch: ChipArch, chipTarget: string | undefined): st
       if (!versionDir) {
         continue;
       }
-      const gdb = findGdbInDirs(toolVersionBinDirs(versionDir), names, pattern);
+      const binDirs = toolVersionBinDirs(versionDir);
+      const gdb = chipGdb
+        ? findGdbInDirs(binDirs, chipGdb.names, chipGdb.pattern) ??
+          findGdbInDirs(binDirs, names, pattern)
+        : findGdbInDirs(binDirs, names, pattern);
       if (gdb) {
         return gdb;
       }

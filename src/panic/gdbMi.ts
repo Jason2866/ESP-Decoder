@@ -181,6 +181,10 @@ export class GdbMiClient {
 
   close(): void {
     this.log('close');
+    // Record the closed state so pending sendCommand() promises reject
+    // (kill() alone leaves cp.killed set, which skips fail() on exit) and
+    // later commands fail fast. fail() is idempotent.
+    this.fail(new Error('GDB client closed'));
     this.cp.stdin?.end();
     this.cp.kill();
   }

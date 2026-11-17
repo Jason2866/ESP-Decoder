@@ -7,7 +7,7 @@
  *   firmware.elf        – the matching firmware ELF with debug symbols
  */
 
-import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll, beforeAll } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -57,6 +57,7 @@ import {
   addr2line,
   isParsedGDBLine,
   LineDecoder,
+  GdbMiClient,
 } from '../panic/index.js';
 import type { ParsedGDBLine } from '../panic/index.js';
 
@@ -1291,4 +1292,62 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     expect(location.file).toBe('/src/main.c');
     expect(location.lineNumber).toBe('42');
   }, 30_000);
+});
+
+describe('CrashCapturer – pending tail quiet flush', () => {
+  it('finalizes a block whose last line never terminates after a longer silence', async () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    capturer.pushData(
+      Buffer.from(
+        'assert failed: pending_tail\n' +
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002\n' +
+          'Rebooting',
+        'utf8',
+      ),
+    );
+    // quietPeriod (500ms) passes but the pending line must survive it.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(events.length).toBe(0);
+    // After the extended silence the decoder flush emits the tail line and
+    // the complete block finalizes without flush() or new output.
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('assert failed: pending_tail');
+    expect(events[0].rawText).toContain('Rebooting');
+  }, 10_000);
+});
+
+describe('GdbMiClient – close()', () => {
+  const isWindows = process.platform === 'win32';
+  let tmpDir: string;
+  let fakeGdbPath: string;
+
+  beforeAll(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gdbmi-close-'));
+    fakeGdbPath = path.join(tmpDir, 'fake-gdb.sh');
+    fs.writeFileSync(
+      fakeGdbPath,
+      '#!/usr/bin/env node\nprocess.stdin.resume();\n',
+      { mode: 0o755 },
+    );
+  });
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(isWindows)(
+    'rejects pending and subsequent commands on close',
+    async () => {
+      const client = new GdbMiClient(fakeGdbPath, []);
+      const pending = client.sendCommand('-version');
+      const pendingAssertion = expect(pending).rejects.toThrow('GDB client closed');
+      client.close();
+      await pendingAssertion;
+      await expect(client.sendCommand('-version')).rejects.toThrow('GDB client closed');
+    },
+    15_000,
+  );
 });
