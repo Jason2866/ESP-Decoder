@@ -99,7 +99,10 @@ function formatThreadHeader(thread: ThreadDecodeResult): string {
 }
 
 function stringifyThreadDecodeResult(result: ThreadDecodeResult): string[] {
-  return result.result.stacktraceLines.map((line) => stringifyAddrLocation(line));
+  // Reuse the single-decode renderer so fault info (PC/Fault lines) and
+  // alloc info are not dropped; it also prints the program counter when
+  // the thread has no stack frames.
+  return stringifySingleDecodeResult(result.result);
 }
 
 function stringifyAddrLocation(location: AddrLocation): string {

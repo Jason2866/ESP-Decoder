@@ -153,48 +153,74 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           type: 'crashDetected',
           event: this.serializeCrashEvent(event),
         });
-
-        // Auto-decode if configured
-        if (this.config.elfPath) {
-          try {
-            const decoded = await decodeCrash(
-              event,
-              this.config.elfPath,
-              this.config.toolPath,
-              this.config.targetArch,
-              this.log,
-              this.config.romElfPath,
-              this.addr2linePool
-            );
-            event.decoded = decoded;
-            this.postMessage({
-              type: 'crashDecoded',
-              eventId: event.id,
-              decoded: this.serializeDecodedCrash(decoded),
-            });
-            if (decoded.toolsMissing) {
-              vscode.window.showWarningMessage(
-                'GDB/addr2line tools not found for this architecture. Build the project for the target chip first so the toolchain gets installed, or configure the tool path manually in settings.'
-              );
-            }
-          } catch (err) {
-            this.log.appendLine(`[ESP Decoder] Decode error for ${event.id}: ${err instanceof Error ? err.message : String(err)}`);
-            this.postMessage({
-              type: 'crashDecodeError',
-              eventId: event.id,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        } else {
-          this.log.appendLine('[ESP Decoder] Crash detected but no ELF file configured — cannot decode');
-          this.postMessage({
-            type: 'crashDecodeError',
-            eventId: event.id,
-            error: 'No ELF file configured. Build the project first so ESP Decoder can auto-detect the ELF, or use "ESP Decoder: Select ELF File" to select one.',
-          });
-        }
+        await this.decodeCrashEvent(event);
       })
     );
+
+    // A richer capture merged into an existing event (same id): refresh the
+    // stored event and re-decode so the webview shows the fuller dump.
+    this.disposables.push(
+      this.crashCapturer.onCrashUpdated(async (event) => {
+        const existing = this.crashEvents.find((e) => e.id === event.id);
+        if (!existing || existing.rawText === event.rawText) {
+          // Unknown id, or only the occurrence count changed — nothing to refresh.
+          return;
+        }
+        existing.kind = event.kind;
+        existing.lines = event.lines;
+        existing.rawText = event.rawText;
+        existing.timestamp = event.timestamp;
+        delete existing.decoded;
+        this.log.appendLine(`[ESP Decoder] Crash updated: id=${event.id}, lines=${event.lines.length}`);
+        this.postMessage({
+          type: 'crashUpdated',
+          event: this.serializeCrashEvent(event),
+        });
+        await this.decodeCrashEvent(existing);
+      })
+    );
+  }
+
+  /** Auto-decode a crash event when an ELF is configured and post the result. */
+  private async decodeCrashEvent(event: CrashEvent): Promise<void> {
+    if (this.config.elfPath) {
+      try {
+        const decoded = await decodeCrash(
+          event,
+          this.config.elfPath,
+          this.config.toolPath,
+          this.config.targetArch,
+          this.log,
+          this.config.romElfPath,
+          this.addr2linePool
+        );
+        event.decoded = decoded;
+        this.postMessage({
+          type: 'crashDecoded',
+          eventId: event.id,
+          decoded: this.serializeDecodedCrash(decoded),
+        });
+        if (decoded.toolsMissing) {
+          vscode.window.showWarningMessage(
+            'GDB/addr2line tools not found for this architecture. Build the project for the target chip first so the toolchain gets installed, or configure the tool path manually in settings.'
+          );
+        }
+      } catch (err) {
+        this.log.appendLine(`[ESP Decoder] Decode error for ${event.id}: ${err instanceof Error ? err.message : String(err)}`);
+        this.postMessage({
+          type: 'crashDecodeError',
+          eventId: event.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      this.log.appendLine('[ESP Decoder] Crash detected but no ELF file configured — cannot decode');
+      this.postMessage({
+        type: 'crashDecodeError',
+        eventId: event.id,
+        error: 'No ELF file configured. Build the project first so ESP Decoder can auto-detect the ELF, or use "ESP Decoder: Select ELF File" to select one.',
+      });
+    }
   }
 
   private wireWebview(webview: vscode.Webview): number {
@@ -2966,6 +2992,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         case 'crashDetected':
           addCrashEvent(msg.event);
           break;
+        case 'crashUpdated':
+          updateCrashEvent(msg.event);
+          break;
         case 'crashDecoded':
           updateCrashDecoded(msg.eventId, msg.decoded);
           break;
@@ -3291,6 +3320,27 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       const crashTab = document.querySelector('[data-tab="crashes"]');
       crashTab.style.color = 'var(--error-fg)';
       setTimeout(() => { crashTab.style.color = ''; }, 2000);
+    }
+
+    function updateCrashEvent(event) {
+      const el = document.getElementById('crash-' + event.id);
+      if (!el) {
+        // Event element missing (e.g. cleared buffer) — add it like a new event.
+        addCrashEvent(event);
+        return;
+      }
+      const rawEl = el.querySelector('.raw-output');
+      if (rawEl) {
+        rawEl.textContent = event.rawText;
+      }
+      const timeEl = el.querySelector('.crash-time');
+      if (timeEl) {
+        timeEl.textContent = new Date(event.timestamp).toLocaleTimeString();
+      }
+      const section = document.getElementById('decode-section-' + event.id);
+      if (section) {
+        section.innerHTML = '<div class="decode-status">Decoding...</div>';
+      }
     }
 
     function toggleCrash(id) {

@@ -324,7 +324,8 @@ export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
 
   const regRegex = /([A-Z]+[0-9]*)\s*:\s*(0x[0-9a-fA-F]+)/g;
   for (const line of lines) {
-    const dumpMatch = line.match(/^Core\s+(\d+)\s+register dump:/);
+    // Serial output may indent dump headers; tolerate leading whitespace.
+    const dumpMatch = line.match(/^\s*Core\s+(\d+)\s+register dump:/);
     if (dumpMatch) {
       current = section(parseInt(dumpMatch[1], 10));
     }
@@ -337,7 +338,7 @@ export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
       }
     }
 
-    if (line.startsWith('Backtrace:')) {
+    if (/^\s*Backtrace:/.test(line)) {
       // Entries are "0xPC:0xSP" pairs — only the PC is a code address;
       // stack pointers must not be resolved as frames.
       for (const match of line.matchAll(/(0x[0-9a-fA-F]{8}):0x[0-9a-fA-F]{8}/g)) {

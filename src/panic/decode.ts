@@ -236,7 +236,7 @@ function fixFaultInfo(result: DecodeResult): DecodeResult {
     result.faultInfo &&
     isGDBLine(result.faultInfo.faultAddr?.location) &&
     result.faultInfo.faultAddr.location.lineNumber === '??' &&
-    !result.faultInfo.faultAddr.addr
+    result.faultInfo.faultAddr.addr === undefined
   ) {
     const copy = JSON.parse(JSON.stringify(result));
     delete copy.faultInfo.faultAddr;

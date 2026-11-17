@@ -582,6 +582,51 @@ describe('CrashCapturer – signature dedup vs. backtrace divergence', () => {
   });
 });
 
+describe('CrashCapturer – event updates', () => {
+  it('fires onCrashUpdated with the same id when a richer capture merges', () => {
+    const capturer = new CrashCapturer();
+    const detected: CrashEvent[] = [];
+    const updated: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => detected.push(e));
+    capturer.onCrashUpdated((e) => updated.push(e));
+
+    capturer.pushData(
+      Buffer.from('assert failed: merge_me\nBacktrace: 0x40000001:0x3ffb0001\n', 'utf8'),
+    );
+    capturer.flush();
+    capturer.pushData(
+      Buffer.from(
+        'assert failed: merge_me\nBacktrace: 0x40000001:0x3ffb0001\nRebooting...\n',
+        'utf8',
+      ),
+    );
+    capturer.flush();
+
+    expect(detected.length).toBe(1);
+    expect(updated.length).toBe(1);
+    expect(updated[0].id).toBe(detected[0].id);
+    expect(updated[0].rawText).toContain('Rebooting...');
+  });
+});
+
+describe('CrashFramer – complete block size cap', () => {
+  it('finalizes a complete block at the cap even without a quiet period', () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+
+    const parts = ['assert failed: flood\n', 'Backtrace: 0x40000001:0x3ffb0001\n'];
+    for (let i = 0; i < 2100; i++) {
+      parts.push(`filler line ${i}\n`);
+    }
+    capturer.pushData(Buffer.from(parts.join(''), 'utf8'));
+
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('assert failed: flood');
+    expect(events[0].rawText).toContain('Backtrace:');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // ESP8266 crash decoding (raw decode fallback)
 // ---------------------------------------------------------------------------
@@ -1125,6 +1170,26 @@ describe('parseESP32PanicOutput – dual-core dumps', () => {
     expect(parsed.faultCode).toBe(0xc);
     expect(parsed.programCounter).toBe(0x40000002);
     // Only core 1's backtrace PCs.
+    expect(parsed.backtraceAddrs).toEqual([0x40000002, 0x40000003]);
+  });
+
+  it('retains an indented Backtrace line during panic-core selection', () => {
+    const text = [
+      'Guru Meditation Error: Core  1 panic\'ed (LoadProhibited). Exception was unhandled.',
+      '',
+      'Core  0 register dump:',
+      'PC      : 0x40000001  PS      : 0x00060030',
+      '  Backtrace: 0x40000001:0x3ffb0001 0x40000009:0x3ffb0009',
+      '',
+      '  Core  1 register dump:',
+      'PC      : 0x40000002  PS      : 0x00060030',
+      'EXCVADDR: 0x3ffb0004  EXCCAUSE: 0x0000000c',
+      '  Backtrace: 0x40000002:0x3ffb0002 0x40000003:0x3ffb0003',
+    ].join('\n');
+
+    const parsed = parseESP32PanicOutput(text);
+    expect(parsed.coreId).toBe(1);
+    expect(parsed.regs.PC).toBe(0x40000002);
     expect(parsed.backtraceAddrs).toEqual([0x40000002, 0x40000003]);
   });
 });

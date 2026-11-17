@@ -150,13 +150,18 @@ export class CrashCapturer {
   private capturer: Capturer;
   private readonly _onCrashDetected = new vscode.EventEmitter<CrashEvent>();
   readonly onCrashDetected = this._onCrashDetected.event;
+  private readonly _onCrashUpdated = new vscode.EventEmitter<CrashEvent>();
+  readonly onCrashUpdated = this._onCrashUpdated.event;
   private unsubscribe: (() => void) | undefined;
+  private unsubscribeUpdated: (() => void) | undefined;
 
   constructor() {
     this.capturer = createCapturer({ quietPeriodMs: 500 });
     this.unsubscribe = this.capturer.on('eventDetected', (capturerEvent: CapturerEvent) => {
-      const event = capturerEventToCrashEvent(capturerEvent);
-      this._onCrashDetected.fire(event);
+      this._onCrashDetected.fire(capturerEventToCrashEvent(capturerEvent));
+    });
+    this.unsubscribeUpdated = this.capturer.on('eventUpdated', (capturerEvent: CapturerEvent) => {
+      this._onCrashUpdated.fire(capturerEventToCrashEvent(capturerEvent));
     });
   }
 
@@ -180,18 +185,23 @@ export class CrashCapturer {
   reset(): void {
     // Create a fresh capturer instance to reset all state
     this.unsubscribe?.();
+    this.unsubscribeUpdated?.();
     this.capturer.dispose();
     this.capturer = createCapturer({ quietPeriodMs: 500 });
     this.unsubscribe = this.capturer.on('eventDetected', (capturerEvent: CapturerEvent) => {
-      const event = capturerEventToCrashEvent(capturerEvent);
-      this._onCrashDetected.fire(event);
+      this._onCrashDetected.fire(capturerEventToCrashEvent(capturerEvent));
+    });
+    this.unsubscribeUpdated = this.capturer.on('eventUpdated', (capturerEvent: CapturerEvent) => {
+      this._onCrashUpdated.fire(capturerEventToCrashEvent(capturerEvent));
     });
   }
 
   dispose(): void {
     this.unsubscribe?.();
+    this.unsubscribeUpdated?.();
     this.capturer.dispose();
     this._onCrashDetected.dispose();
+    this._onCrashUpdated.dispose();
   }
 }
 

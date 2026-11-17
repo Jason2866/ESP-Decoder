@@ -22,6 +22,14 @@ const crashPatterns = [
  */
 const MAX_INCOMPLETE_BLOCK_LINES = 500;
 
+/**
+ * Upper bound for a block that already has a completeness signal but the
+ * stream never goes quiet — it is emitted at this size instead of growing
+ * without limit. Kept well above realistic dump sizes (register dumps +
+ * stack memory + backtrace stay far below this).
+ */
+const MAX_COMPLETE_BLOCK_LINES = 2000;
+
 const startPatterns = crashPatterns;
 const reasonPatterns = crashPatterns;
 
@@ -76,14 +84,18 @@ export class CrashFramer {
       this.finalize(finalized);
     }
 
-    // Bound memory for blocks that never complete; complete blocks are
-    // unaffected and still finalize via the quiet timer or flush().
-    if (
-      this.active &&
-      this.active.lines.length >= MAX_INCOMPLETE_BLOCK_LINES &&
-      !isCompleteBlock(this.active.lines)
-    ) {
-      this.active = undefined;
+    // Bound memory: blocks that never complete are discarded, and a
+    // complete block that keeps growing without a quiet period is emitted
+    // at the cap instead of accumulating forever.
+    if (this.active) {
+      if (
+        this.active.lines.length >= MAX_INCOMPLETE_BLOCK_LINES &&
+        !isCompleteBlock(this.active.lines)
+      ) {
+        this.active = undefined;
+      } else if (this.active.lines.length >= MAX_COMPLETE_BLOCK_LINES) {
+        this.finalize(finalized);
+      }
     }
 
     return finalized;
