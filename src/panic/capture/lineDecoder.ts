@@ -1,11 +1,22 @@
+/** Upper bound for a single unterminated serial line (64 KiB). */
+const MAX_LINE_LENGTH = 64 * 1024;
+
 /** Incremental UTF-8 line decoder for serial byte chunks (handles CR/LF/CRLF). */
 export class LineDecoder {
   private decoder = new TextDecoder('utf-8');
   /** Raw bytes not yet decoded because they may end in an incomplete UTF-8 sequence. */
   private byteBuffer: number[] = [];
   private buffer = '';
+  /**
+   * Length of the buffer prefix already scanned for line breaks. Only the
+   * newly appended text is scanned on each push, so a long unterminated
+   * line cannot trigger quadratic rescans.
+   */
+  private scannedLength = 0;
   /** Set when a trailing CR was already emitted; swallows a following LF (split CRLF). */
   private skipLeadingLf = false;
+  /** Set after an oversized unterminated line was dropped; bytes are discarded through the next line break. */
+  private discardingLine = false;
 
   push(chunk: Uint8Array): string[] {
     for (const byte of chunk) {
@@ -18,7 +29,15 @@ export class LineDecoder {
       );
       this.byteBuffer = this.byteBuffer.slice(safeLength);
     }
-    return this.drain(false);
+    const lines = this.drain(false);
+    if (this.buffer.length > MAX_LINE_LENGTH) {
+      // Bound memory and rescan cost: drop the oversized line and discard
+      // its remainder through the next CR or LF.
+      this.buffer = '';
+      this.scannedLength = 0;
+      this.discardingLine = true;
+    }
+    return lines;
   }
 
   flush(): string[] {
@@ -69,10 +88,44 @@ export class LineDecoder {
       this.skipLeadingLf = false;
       if (this.buffer.charCodeAt(0) === 10) {
         this.buffer = this.buffer.slice(1);
+        this.scannedLength = Math.max(0, this.scannedLength - 1);
       }
     }
 
-    for (let i = 0; i < this.buffer.length; i++) {
+    if (this.discardingLine) {
+      // Drop everything through the next line break, then resume normal
+      // line detection. A CR at the chunk end keeps the split-CRLF rule.
+      let i = 0;
+      while (i < this.buffer.length) {
+        const ch = this.buffer.charCodeAt(i);
+        if (ch === 10) {
+          i += 1;
+          break;
+        }
+        if (ch === 13) {
+          if (this.buffer.charCodeAt(i + 1) === 10) {
+            i += 2;
+          } else {
+            if (i === this.buffer.length - 1 && !isFinal) {
+              this.skipLeadingLf = true;
+            }
+            i += 1;
+          }
+          break;
+        }
+        i++;
+      }
+      if (i >= this.buffer.length && !isFinal) {
+        this.buffer = '';
+        this.scannedLength = 0;
+        return lines;
+      }
+      this.discardingLine = false;
+      this.buffer = this.buffer.slice(i);
+      this.scannedLength = 0;
+    }
+
+    for (let i = this.scannedLength; i < this.buffer.length; i++) {
       const ch = this.buffer.charCodeAt(i);
       if (ch !== 10 && ch !== 13) {
         continue;
@@ -96,10 +149,14 @@ export class LineDecoder {
         lines.push(this.buffer.slice(start));
       }
       this.buffer = '';
+      this.scannedLength = 0;
       return lines;
     }
 
     this.buffer = this.buffer.slice(start);
+    // Everything left in the buffer was scanned above and contains no
+    // line break, so the next push only needs to scan appended text.
+    this.scannedLength = this.buffer.length;
     return lines;
   }
 }

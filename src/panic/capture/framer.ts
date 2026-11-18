@@ -142,7 +142,7 @@ export class CrashFramer {
     }
     const lines = this.active.lines;
     const hasSignal = lines.some((line) => isStartLine(line));
-    if (hasSignal && lines.length > 0 && isCompleteBlock(lines)) {
+    if (hasSignal && lines.length > 0 && isFinalizableBlock(lines)) {
       finalized.push({
         lines: [...lines],
         startedAt: this.active.startedAt,
@@ -166,17 +166,73 @@ function isAbortCalledLine(line: string): boolean {
   return /^abort\(\) was called/i.test(line.trim());
 }
 
+/**
+ * Strict completeness for the quiet-timer path: the block must contain
+ * captured crash data, not just a section heading. A 'Stack memory:' line
+ * alone does not count — at least one stack row must follow it — and an
+ * ESP8266 '>>>stack>>>' dump stays open until its '<<<stack<<<' end marker
+ * so the quiet timer cannot emit it before the stack rows arrive.
+ */
 function isCompleteBlock(lines: string[]): boolean {
-  return lines.some((line) =>
-    [
-      /Backtrace:/i,
-      /^Stack memory:/i,
-      /^Rebooting\.\.\./i,
-      /ELF file SHA256:/i,
-      />>>stack>>>/i, // ESP8266 stack block start marker
-      /^<<<stack<<</i, // ESP8266 stack block end marker
-    ].some((pattern) => pattern.test(line.trim())),
+  const trimmed = lines.map((line) => line.trim());
+  const esp8266StackOpen =
+    trimmed.some((line) => line.includes('>>>stack>>>')) &&
+    !trimmed.some((line) => line.startsWith('<<<stack<<<'));
+  for (const line of trimmed) {
+    if (
+      /Backtrace:/i.test(line) ||
+      /^Rebooting\.\.\./i.test(line) ||
+      /ELF file SHA256:/i.test(line) ||
+      line.startsWith('<<<stack<<<')
+    ) {
+      return true;
+    }
+  }
+  if (esp8266StackOpen) {
+    return false;
+  }
+  return hasStackMemoryData(lines);
+}
+
+/**
+ * Lenient completeness for explicit flushes, immediate finalization, and
+ * the size caps: a block with a crash start marker plus any dump section
+ * (even a bare 'Stack memory:' heading or an open ESP8266 stack) is still
+ * emitted rather than silently dropped.
+ */
+function isFinalizableBlock(lines: string[]): boolean {
+  return (
+    isCompleteBlock(lines) ||
+    lines.some((line) => {
+      const trimmed = line.trim();
+      return (
+        trimmed.includes('>>>stack>>>') ||
+        /^Stack memory:/i.test(trimmed) ||
+        isStackDataRow(trimmed)
+      );
+    })
   );
+}
+
+/** True when a 'Stack memory:' heading is followed by at least one data row. */
+function hasStackMemoryData(lines: string[]): boolean {
+  let inStackMemory = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^Stack memory:/i.test(trimmed)) {
+      inStackMemory = true;
+      continue;
+    }
+    if (inStackMemory && isStackDataRow(trimmed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** RISC-V 'Stack memory:' row: '<hexaddr>: <hexword> [<hexword> ...]'. */
+function isStackDataRow(line: string): boolean {
+  return /^[0-9a-fA-F]{4,}\s*:\s+(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})(\s|$)/.test(line);
 }
 
 /** End-of-crash lines that finalize immediately (without quiet timeout). */

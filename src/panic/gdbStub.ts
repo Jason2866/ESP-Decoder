@@ -1,9 +1,7 @@
-import net from 'node:net';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { Debug, PanicInfoWithStackData } from './types';
-import { gdbRegsInfoRiscvIlp32 } from './panicParse';
-
-/** Upper bound for a single 'm' memory-read packet (64 KiB). */
-const MAX_MEM_READ_SIZE = 0x10000;
 
 export class AbortError extends Error {
   readonly code = 'ABORT_ERR';
@@ -13,233 +11,93 @@ export class AbortError extends Error {
   }
 }
 
+function shellQuote(arg: string): string {
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
- * Minimal GDB remote-serial-protocol server, modeled on esp-idf-panic-decoder's
- * gdb_panic_server.py: answers register ('g') and memory ('m') packets from
- * the parsed panic dump. Only stack RAM returns real data; all other memory
- * reads return 0x00 bytes (GDB resolves code/symbols from the ELF itself).
+ * GDB remote-serial-protocol stub, modeled on esp-idf-panic-decoder's
+ * gdb_panic_server.py. Instead of opening a TCP listener, the panic state is
+ * written to a temp JSON file and GDB spawns a small stdio server via
+ * `target remote |<cmd>` — the remote protocol then travels over a private
+ * pipe owned by the GDB process, so no other local process can attach.
+ * The protocol implementation lives in gdbStubMain.js (plain JS, since the
+ * spawned process runs node directly and cannot load TypeScript).
  */
 export class GdbStubServer {
-  private server?: net.Server;
+  private tempDir?: string;
+  private abortHandler?: () => void;
 
   constructor(
     private readonly panicInfo: PanicInfoWithStackData,
     private readonly debug: Debug = () => {},
   ) {}
 
-  async start(signal?: AbortSignal): Promise<net.AddressInfo> {
-    if (this.server) {
+  /**
+   * Prepare the stub and return the remote-spec argument for
+   * `-target-select remote <remoteSpec>` (e.g. `|node stub.js info.json`).
+   */
+  async start(signal?: AbortSignal): Promise<{ remoteSpec: string }> {
+    if (this.tempDir) {
       throw new Error('Server already started');
     }
-
-    const server = net.createServer();
-    this.server = server;
-
-    await new Promise<void>((resolve, reject) => {
-      const listeners: (() => void)[] = [];
-      const cleanup = () => {
-        for (const remove of listeners) {
-          remove();
-        }
-      };
-
-      const abortHandler = () => {
-        this.debug('User abort');
-        cleanup();
-        this.close();
-        reject(new AbortError());
-      };
-
-      const errorHandler = (err: Error) => {
-        this.debug('Server error', err);
-        cleanup();
-        this.close();
-        reject(err);
-      };
-
-      if (signal?.aborted) {
-        abortHandler();
-        return;
-      }
-
-      signal?.addEventListener('abort', abortHandler);
-      listeners.push(() => signal?.removeEventListener('abort', abortHandler));
-
-      server.on('error', errorHandler);
-      listeners.push(() => server.removeListener('error', errorHandler));
-
-      const listeningHandler = () => {
-        cleanup();
-        resolve();
-      };
-      server.on('listening', listeningHandler);
-      listeners.push(() => server.removeListener('listening', listeningHandler));
-
-      server.listen(0, '127.0.0.1');
-    });
-
-    const address = server.address();
-    if (!address || typeof address === 'string') {
-      this.close();
-      throw new Error('Failed to start GDB stub server');
+    if (signal?.aborted) {
+      throw new AbortError();
     }
 
-    server.on('connection', (socket) => {
-      socket.on('error', () => socket.destroy());
-      let pending = '';
-      socket.on('data', (data) => {
-        pending = this.consumePackets(pending + data.toString(), socket);
-      });
-    });
+    this.abortHandler = () => {
+      this.debug('User abort');
+      void this.close();
+    };
+    signal?.addEventListener('abort', this.abortHandler, { once: true });
 
-    return address;
+    try {
+      this.tempDir = await mkdtemp(path.join(tmpdir(), 'esp-decoder-gdbstub-'));
+      const infoPath = path.join(this.tempDir, 'panic-info.json');
+      // stackData is a Buffer; JSON.stringify encodes it as
+      // { type: 'Buffer', data: [...] } which gdbStubMain.js revives.
+      await writeFile(infoPath, JSON.stringify(this.panicInfo));
+
+      const scriptPath = path.join(__dirname, 'gdbStubMain.js');
+      const remoteSpec =
+        process.platform === 'win32'
+          ? await this.buildWindowsRemoteSpec(scriptPath, infoPath)
+          : `|ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} ${shellQuote(scriptPath)} ${shellQuote(infoPath)}`;
+      this.debug('gdb stub remote spec', remoteSpec);
+      return { remoteSpec };
+    } catch (err) {
+      signal?.removeEventListener('abort', this.abortHandler);
+      this.abortHandler = undefined;
+      await this.close();
+      throw err;
+    }
   }
 
-  private consumePackets(pending: string, socket: net.Socket): string {
-    while (pending.length > 0) {
-      if (pending.startsWith('+')) {
-        pending = pending.slice(1);
-        continue;
-      }
-
-      if (pending.startsWith('-')) {
-        this.debug(`Invalid command: ${pending}`);
-        socket.write('-');
-        socket.end();
-        return '';
-      }
-
-      const packetStart = pending.indexOf('$');
-      if (packetStart === -1) {
-        this.debug(`Discarding non-packet data: ${JSON.stringify(pending)}`);
-        return '';
-      }
-      if (packetStart > 0) {
-        const ignored = pending.slice(0, packetStart);
-        this.debug(`Discarding packet prefix: ${JSON.stringify(ignored)}`);
-        pending = pending.slice(packetStart);
-      }
-
-      const checksumMark = pending.indexOf('#', 1);
-      if (checksumMark === -1 || checksumMark + 2 >= pending.length) {
-        return pending;
-      }
-
-      const packet = pending.slice(0, checksumMark + 3);
-      pending = pending.slice(checksumMark + 3);
-      this.debug(`Command: ${packet}`);
-      this.handleCommand(packet, socket);
-    }
-
-    return pending;
+  /**
+   * On Windows `|cmd` goes through cmd.exe, which cannot parse the POSIX
+   * `VAR=1 cmd` env prefix or single-quote escaping. Write a .cmd wrapper
+   * that sets ELECTRON_RUN_AS_NODE (the VS Code binary is Electron) and
+   * embeds the already-double-quoted paths.
+   */
+  private async buildWindowsRemoteSpec(scriptPath: string, infoPath: string): Promise<string> {
+    const cmdPath = path.join(this.tempDir!, 'gdbstub.cmd');
+    const q = (p: string) => `"${p.replace(/"/g, '""')}"`;
+    const content = [
+      '@echo off',
+      'set "ELECTRON_RUN_AS_NODE=1"',
+      `${q(process.execPath)} ${q(scriptPath)} ${q(infoPath)}`,
+      '',
+    ].join('\r\n');
+    await writeFile(cmdPath, content);
+    return `|"${cmdPath}"`;
   }
 
   close(): void {
-    this.server?.close();
-    this.server = undefined;
-  }
-
-  private handleCommand(buffer: string, socket: net.Socket): void {
-    if (buffer.startsWith('+')) {
-      buffer = buffer.slice(1); // ignore the leading '+'
+    const dir = this.tempDir;
+    this.tempDir = undefined;
+    if (dir) {
+      // Best-effort cleanup; the stub process exits on stdin EOF anyway.
+      void rm(dir, { recursive: true, force: true }).catch(() => {});
     }
-
-    const command = buffer.slice(1, -3); // ignore checksums
-    // Acknowledge the command
-    socket.write('+');
-    this.debug(`Raw buffer (length ${buffer.length}): ${JSON.stringify(buffer)}`);
-    this.debug(`Got command: ${command}`);
-    if (command === '?') {
-      // report sigtrap as the stop reason; the exact reason doesn't matter for backtracing
-      this.debug('Responding with: T05');
-      this.respond('T05', socket);
-    } else if (command.startsWith('Hg') || command.startsWith('Hc')) {
-      // Select thread command
-      this.debug('Responding with: OK');
-      this.respond('OK', socket);
-    } else if (command === 'qfThreadInfo') {
-      // Only one thread for now, can be extended to show one thread per core.
-      this.debug('Responding with: m1');
-      this.respond('m1', socket);
-    } else if (command === 'qC') {
-      this.debug('Responding with: QC1');
-      this.respond('QC1', socket);
-    } else if (command === 'g') {
-      // Registers read
-      this.respondRegs(socket);
-    } else if (command.startsWith('m')) {
-      // Memory read
-      const [addr, size] = command
-        .slice(1)
-        .split(',')
-        .map((v) => parseInt(v, 16));
-      if (!Number.isFinite(size) || size > MAX_MEM_READ_SIZE || !Number.isFinite(addr)) {
-        // GDB remote-protocol error reply (E + errno); reject oversized or
-        // malformed reads instead of looping per byte.
-        this.respond('E01', socket);
-        return;
-      }
-      this.respondMem(addr, size, socket);
-    } else if (command.startsWith('vKill') || command === 'k') {
-      // Quit
-      this.debug('Responding with: OK');
-      this.respond('OK', socket);
-      socket.end();
-    } else {
-      // Empty response required for any unknown command
-      this.debug('Responding with: (empty)');
-      this.respond('', socket);
-    }
-  }
-
-  private respond(data: string, socket: net.Socket): void {
-    const checksum = Buffer.from(data, 'ascii').reduce((sum, byte) => sum + byte, 0) & 0xff;
-    const res = `$${data}#${checksum.toString(16).padStart(2, '0')}`;
-    socket.write(res);
-    this.debug(`Wrote: ${res}`);
-  }
-
-  private respondRegs(socket: net.Socket): void {
-    let response = '';
-    // https://github.com/espressif/esp-idf-monitor/blob/fae383ecf281655abaa5e65433f671e274316d10/esp_idf_monitor/gdb_panic_server.py#L242-L247
-    // For each register name in the ILP32 list, emit the register value as
-    // 4 little-endian bytes in hex.
-    for (const regName of gdbRegsInfoRiscvIlp32) {
-      const regVal = this.panicInfo.regs[regName] || 0;
-      const regBytes = Buffer.alloc(4);
-      // Register values are serialized as 32-bit words; truncate wider
-      // values instead of letting writeUInt32LE throw out-of-range.
-      regBytes.writeUInt32LE(regVal >>> 0);
-      response += regBytes.toString('hex');
-    }
-    this.debug(
-      `Register values: ${gdbRegsInfoRiscvIlp32
-        .map((r) => `${r}=${this.panicInfo.regs[r] || 0}`)
-        .join(', ')}`,
-    );
-    this.debug(`Register response: ${response}`);
-    this.respond(response, socket);
-  }
-
-  private respondMem(startAddr: number, size: number, socket: net.Socket): void {
-    const stackAddrMin = this.panicInfo.stackBaseAddr;
-    const stackData = this.panicInfo.stackData;
-    const stackLen = stackData.length;
-    const stackAddrMax = stackAddrMin + stackLen;
-
-    const inStack = (addr: number) => stackAddrMin <= addr && addr < stackAddrMax;
-
-    let result = '';
-    for (let addr = startAddr; addr < startAddr + size; addr++) {
-      if (!inStack(addr)) {
-        result += '00';
-      } else {
-        result += stackData[addr - stackAddrMin].toString(16).padStart(2, '0');
-      }
-    }
-
-    this.debug(`Memory read request from 0x${startAddr.toString(16)} for ${size} bytes`);
-    this.debug(`Responding with memory: ${result}`);
-    this.respond(result, socket);
   }
 }

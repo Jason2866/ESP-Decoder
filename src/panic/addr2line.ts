@@ -30,7 +30,7 @@ class GDBSession {
   constructor({ toolPath, elfPath }: Pick<DecodeParams, 'elfPath' | 'toolPath'>, options: DecodeOptions = {}) {
     this.toolPath = toolPath;
     this.elfPath = elfPath;
-    this.gdb = spawn(toolPath, [elfPath], {
+    this.gdb = spawn(toolPath, ['-nx', elfPath], {
       stdio: 'pipe',
       signal: options.signal,
     });
@@ -83,14 +83,29 @@ class GDBSession {
 
   /**
    * Index of the '(gdb)' prompt that terminates the buffered response, or
-   * -1. GDB separates consecutive prompts with spaces rather than newlines
-   * ('(gdb) (gdb) '), and a '(gdb)' token inside source text must not
-   * complete the command early — only a prompt at the end of the buffer
-   * counts.
+   * -1. A valid prompt is followed by whitespace, sits at the end of the
+   * buffer, and either starts a line or directly follows another prompt —
+   * '(gdb)' inside source text (e.g. 'look for (gdb) here') fails the
+   * predecessor check, so a transport chunk ending mid-line cannot fake a
+   * prompt boundary. GDB separates consecutive prompts with spaces rather
+   * than newlines ('(gdb) (gdb) '), which the chain alternative covers.
    */
   private promptBoundaryIndex(): number {
-    const match = /(?<!\S)\(gdb\)\s*$/.exec(this.buffer);
-    return match ? match.index : -1;
+    let result = -1;
+    const re = /\(gdb\)/g;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(this.buffer)) !== null) {
+      const end = match.index + prompt.length;
+      // The prompt must be trailed by whitespace and nothing else.
+      if (!/^\s+$/.test(this.buffer.slice(end))) {
+        continue;
+      }
+      const before = this.buffer.slice(0, match.index);
+      if (/(?:^|[\r\n])[^\S\r\n]*$/.test(before) || /^(?:\(gdb\)[^\S\r\n]*)+$/.test(before)) {
+        result = match.index;
+      }
+    }
+    return result;
   }
 
   private onData(chunk: string): void {
@@ -219,13 +234,38 @@ class GDBSession {
   }
 
   async close(): Promise<void> {
-    if (!this.gdb.killed) {
-      this.gdb.stdin?.end();
-      this.gdb.kill('SIGTERM');
-      if (this.gdb.exitCode === null && this.gdb.signalCode === null) {
-        await new Promise((resolve) => this.gdb.once('exit', resolve));
-      }
+    if (this.gdb.exitCode !== null || this.gdb.signalCode !== null) {
+      return;
     }
+    this.gdb.stdin?.end();
+    this.gdb.kill('SIGTERM');
+    // killed only means the signal was sent — a wrapper may ignore SIGTERM,
+    // so wait for the actual exit, escalate to SIGKILL, and bound the wait.
+    if (!(await this.waitForExit(2000))) {
+      this.gdb.kill('SIGKILL');
+      await this.waitForExit(2000);
+    }
+  }
+
+  private waitForExit(timeoutMs: number): Promise<boolean> {
+    if (this.gdb.exitCode !== null || this.gdb.signalCode !== null) {
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve(false);
+      }, timeoutMs);
+      const onExit = () => {
+        cleanup();
+        resolve(true);
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.gdb.off('exit', onExit);
+      };
+      this.gdb.once('exit', onExit);
+    });
   }
 }
 

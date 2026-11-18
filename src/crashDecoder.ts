@@ -1284,7 +1284,10 @@ async function enhanceWithHeuristicStackFrames(
     heuristicFrames = await resolveAddressesViaGdb(candidateAddrs, elfPath, toolPath, log);
   }
 
-  if (heuristicFrames.length > 0) {
+  // A successful GDB/MI unwind is authoritative — the heuristic scan may
+  // only replace it when it resolves strictly more frames (e.g. the unwind
+  // stopped early because code memory reads return zeros).
+  if (heuristicFrames.length > decoded.stacktrace.length) {
     decoded.stacktrace = heuristicFrames;
   }
 }

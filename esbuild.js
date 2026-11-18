@@ -37,15 +37,31 @@ async function main() {
     logLevel: 'info',
   });
 
+  // The GDB panic stub runs as a standalone node process spawned by GDB via
+  // `target remote |<cmd>`; keep it an unbundled-style plain JS file in dist.
+  const ctxStub = await esbuild.context({
+    entryPoints: ['src/panic/gdbStubMain.js'],
+    bundle: true,
+    format: 'cjs',
+    minify: production,
+    sourcemap: false,
+    platform: 'node',
+    outfile: 'dist/gdbStubMain.js',
+    logLevel: 'info',
+  });
+
   if (watch) {
     await ctx.watch();
     await ctxAnsi.watch();
+    await ctxStub.watch();
     console.log('Watching for changes...');
   } else {
     await ctxAnsi.rebuild(); // build first so dist/ansiParser.js exists at runtime
+    await ctxStub.rebuild();
     await ctx.rebuild();
     await ctx.dispose();
     await ctxAnsi.dispose();
+    await ctxStub.dispose();
   }
 }
 

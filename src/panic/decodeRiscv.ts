@@ -7,6 +7,7 @@ import {
   toHexString,
 } from './panicParse';
 import {
+  isGDBLine,
   isParsedGDBLine,
   type AddrLine,
   type DecodeOptions,
@@ -173,13 +174,13 @@ async function fetchStacktraceWithMi(
     log('fetch stacktrace start', { elfPath, toolPath });
     const { signal, debug } = options;
     const gdbServer = new GdbStubServer(panicInfo, debug);
-    const { port } = await gdbServer.start(signal);
+    const { remoteSpec } = await gdbServer.start(signal);
     server = gdbServer;
-    log('gdb server started', { port });
+    log('gdb stub ready', { remoteSpec });
 
     client = new GdbMiClient(toolPath, ['--interpreter=mi2', '-n', elfPath], options);
     await client.drainHandshake();
-    const targetResult = await client.sendCommand(`-target-select remote 127.0.0.1:${port}`);
+    const targetResult = await client.sendCommand(`-target-select remote ${remoteSpec}`);
     if (miErrorPattern.test(targetResult)) {
       throw new Error(`Failed to connect to GDB remote target: ${describeMiFailure(targetResult)}`);
     }
@@ -258,6 +259,27 @@ function createDecodeResult(
 }
 
 /**
+ * PCs from firmware-printed 'Backtrace:' PC:SP pairs. Some ESP-IDF RISC-V
+ * targets (e.g. ESP32-P4) print an unwound backtrace instead of a raw
+ * 'Stack memory:' dump; those PCs are resolved directly via addr2line.
+ */
+function extractPrintedBacktraceAddrs(input: string): number[] {
+  const addrs: number[] = [];
+  for (const line of input.split(/\r?\n/)) {
+    if (!/Backtrace:/.test(line)) {
+      continue;
+    }
+    for (const match of line.matchAll(/(0x[0-9a-fA-F]+)\s*:\s*0x[0-9a-fA-F]+/g)) {
+      const addr = parseInt(match[1], 16);
+      if (!Number.isNaN(addr)) {
+        addrs.push(addr);
+      }
+    }
+  }
+  return addrs;
+}
+
+/**
  * Decode a RISC-V panic output: parse registers/stack dump, serve it to GDB
  * over the remote protocol, and resolve frames via GDB/MI + addr2line.
  */
@@ -288,13 +310,32 @@ export async function decodeRiscv(
   }
   const childOptions: DecodeOptions = { ...options, signal: decodeAbort.signal };
 
+  // When the firmware already printed an unwound 'Backtrace:' (no raw stack
+  // memory to serve), resolve those PCs in order via addr2line instead of
+  // asking GDB to unwind an empty stack.
+  const printedBacktrace = extractPrintedBacktraceAddrs(input);
+  const usePrintedBacktrace = printedBacktrace.length > 0;
+
+  const addr2lineAddrs: (number | undefined)[] = [
+    panicInfo.programCounter,
+    panicInfo.faultAddr,
+    ...(usePrintedBacktrace ? printedBacktrace : []),
+  ];
   const tasks = [
-    fetchStacktraceWithMi(params, panicInfo, childOptions, log),
-    addr2line(params, [panicInfo.programCounter, panicInfo.faultAddr], childOptions),
+    usePrintedBacktrace
+      ? Promise.resolve([] as (GDBLine | ParsedGDBLine)[])
+      : fetchStacktraceWithMi(params, panicInfo, childOptions, log),
+    addr2line(params, addr2lineAddrs, childOptions),
   ] as const;
 
   try {
-    const [stacktraceLines, [programCounter, faultAddr]] = await Promise.all(tasks);
+    const [miLines, resolved] = await Promise.all(tasks);
+    const [programCounter, faultAddr, ...frameLocations] = resolved;
+    const stacktraceLines = usePrintedBacktrace
+      ? frameLocations
+          .map((line) => line?.location)
+          .filter(isGDBLine)
+      : miLines;
     log('addr2line done', { programCounter, faultAddr });
     stacktraceLines.forEach((line, index) => {
       log('stacktrace line', index, line);

@@ -138,10 +138,10 @@ export class Capturer {
     this.quietTimer = setTimeout(() => {
       this.quietTimer = undefined;
       if (this.lineDecoder.hasPendingLine()) {
-        // The pending tail survives short pauses; if the stream then stays
-        // silent for a longer period, force-flush the line decoder so the
-        // completed crash block can emit without new output or an explicit
-        // flush(). Any new push() reschedules this timer.
+        // The pending tail survives short pauses; after a longer silence,
+        // run it through the normal line/block finalization flow so the
+        // completed crash block (including the tail line) can emit without
+        // new output or an explicit flush.
         this.quietTimer = setTimeout(() => {
           this.quietTimer = undefined;
           this.processLines(this.lineDecoder.flush());
@@ -188,21 +188,25 @@ export class Capturer {
     const exact = this.findRecentBySignature(candidate);
     if (exact) {
       // Signature only covers the first few backtrace frames; a matching
-      // signature with a conflicting backtrace is a different crash.
-      if (backtracesCompatible(exact.lightweight.backtraceAddrs, candidate.lightweight.backtraceAddrs)) {
+      // signature with a conflicting backtrace or return address is a
+      // different crash.
+      if (
+        backtracesCompatible(exact.lightweight.backtraceAddrs, candidate.lightweight.backtraceAddrs) &&
+        returnAddressesCompatible(exact.lightweight, candidate.lightweight)
+      ) {
         this.mergeIntoExisting(exact, candidate, shouldPreferCandidate(exact, candidate));
         return;
       }
     }
 
     const byContainment = this.findRecentContainmentMatch(candidate);
-    if (byContainment) {
+    if (byContainment && returnAddressesCompatible(byContainment.lightweight, candidate.lightweight)) {
       this.mergeIntoExisting(byContainment, candidate, shouldPreferCandidate(byContainment, candidate));
       return;
     }
 
     const byFingerprint = this.findRecentFingerprintMatch(candidate);
-    if (byFingerprint) {
+    if (byFingerprint && returnAddressesCompatible(byFingerprint.lightweight, candidate.lightweight)) {
       this.mergeIntoExisting(byFingerprint, candidate, shouldPreferCandidate(byFingerprint, candidate));
       return;
     }
@@ -545,6 +549,24 @@ function isLikelySameCrash(
   }
 
   return containsNormalizedText(existing.rawText, candidate.rawText);
+}
+
+/**
+ * RISC-V dedup uses MEPC/MCAUSE for identity, but the return address (RA)
+ * distinguishes call paths: two dumps with the same fault PC and cause but
+ * different callers are different crashes. Compatible unless both sides
+ * report an RA and the values differ.
+ */
+function returnAddressesCompatible(
+  a: CapturerLightweight,
+  b: CapturerLightweight,
+): boolean {
+  const raA = a.regs?.RA;
+  const raB = b.regs?.RA;
+  if (raA === undefined || raB === undefined) {
+    return true;
+  }
+  return raA === raB;
 }
 
 /**

@@ -268,7 +268,11 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
             'No ELF file configured — build the project (so it can be auto-detected) or run "ESP Decoder: Select ELF File"'
           );
         }
-        event.decoded = await decodeCrash(
+        // A crashUpdated merge can replace rawText while decodeCrash is
+        // running; the in-flight result would then be stale. Re-check the
+        // input afterwards and decode once more against the fresh capture.
+        const rawBefore = event.rawText;
+        const decoded = await decodeCrash(
           event,
           config.elfPath,
           config.toolPath,
@@ -276,6 +280,18 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
           deps.log,
           config.romElfPath
         );
+        if (event.rawText !== rawBefore) {
+          event.decoded = event.decoded ?? (await decodeCrash(
+            event,
+            config.elfPath,
+            config.toolPath,
+            config.targetArch,
+            deps.log,
+            config.romElfPath
+          ));
+        } else {
+          event.decoded = decoded;
+        }
       }
       const d = event.decoded;
       return jsonResult({

@@ -23,6 +23,9 @@ interface QueuedCommand {
   startedAt: number;
 }
 
+/** MI result records that settle a command response. */
+const miResultRecordPattern = /^\d*\^(?:done|running|error|exit|connected)\b/m;
+
 export interface GdbMiOptions {
   signal?: AbortSignal;
   debug?: (...args: unknown[]) => void;
@@ -59,7 +62,9 @@ export class GdbMiClient {
     this.cp.stdout!.setEncoding('utf8');
     this.cp.stderr!.setEncoding('utf8');
     this.cp.stdout!.on('data', (chunk: string) => this.onData(chunk));
-    this.cp.stderr!.on('data', (chunk: string) => this.onData(chunk));
+    // stderr carries diagnostics, not MI records — keep it out of the
+    // response buffer so a warning cannot corrupt a result record.
+    this.cp.stderr!.on('data', (chunk: string) => this.log('stderr', preview(chunk)));
     this.cp.stdin!.on('error', (err) => this.fail(err instanceof Error ? err : new Error(String(err))));
     this.cp.on('error', (err) => this.fail(err));
     this.cp.on('exit', (code, signal) => {
@@ -166,7 +171,15 @@ export class GdbMiClient {
         continue;
       }
 
-      const executor = this.commandQueue.shift();
+      const executor = this.commandQueue[0];
+      if (executor && !miResultRecordPattern.test(output)) {
+        // A prompt without a matching result record (async notification
+        // output) does not settle the pending command — keep it queued
+        // until its own ^done/^error/^running/^connected record arrives.
+        this.log('prompt without MI result record', preview(output));
+        continue;
+      }
+      this.commandQueue.shift();
       this.commandInFlight = false;
       if (executor) {
         const elapsed = Date.now() - executor.startedAt;

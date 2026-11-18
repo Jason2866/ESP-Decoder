@@ -129,14 +129,13 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
 
 /**
  * Pick the register dump belonging to the panicking core named in the
- * panic header; fall back to the first dump when absent or unmatched.
+ * panic header. The first-dump fallback applies only when the header does
+ * not identify a core; a named core without its own dump yields undefined
+ * so callers never report another core's fields under its name.
  */
-function selectActiveDump(result: RisvPanicParseResult): RegisterDump {
+function selectActiveDump(result: RisvPanicParseResult): RegisterDump | undefined {
   if (result.panicCoreId !== undefined) {
-    const match = result.regDumps.find((d) => d.coreId === result.panicCoreId);
-    if (match) {
-      return match;
-    }
+    return result.regDumps.find((d) => d.coreId === result.panicCoreId);
   }
   return result.regDumps[0];
 }
@@ -183,11 +182,16 @@ function getStackAddrAndData(stackDump: StackDumpSegment[]): {
  */
 export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
   const parsed = parseRiscvPanicDetailed(input);
-  const { regDumps, stackDump, programCounter, faultAddr, faultCode } = parsed;
+  const { regDumps, stackDump } = parsed;
   if (regDumps.length === 0) {
     throw new Error('No register dumps found');
   }
   const active = selectActiveDump(parsed);
+  if (!active) {
+    throw new Error(
+      `No register dump found for panicking core ${parsed.panicCoreId}`,
+    );
+  }
   if (regDumps.length > 1) {
     console.warn(
       `[panic-decoder] Multi-core dump detected (${regDumps.length} cores); ` +
@@ -203,9 +207,9 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
 
   return {
     coreId,
-    programCounter: active.programCounter ?? programCounter,
-    faultAddr: active.faultAddr ?? faultAddr,
-    faultCode: active.faultCode ?? faultCode,
+    programCounter: active.programCounter,
+    faultAddr: active.faultAddr,
+    faultCode: active.faultCode,
     regs,
     stackBaseAddr,
     stackData,
@@ -218,21 +222,24 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
  */
 export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrace {
   const parsed = parseRiscvPanicDetailed(input);
-  const { regDumps, programCounter, faultCode, faultAddr } = parsed;
+  const { regDumps } = parsed;
   if (regDumps.length === 0) {
     throw new Error('No register dumps found');
   }
   const active = selectActiveDump(parsed);
+  if (!active) {
+    throw new Error(
+      `No register dump found for panicking core ${parsed.panicCoreId}`,
+    );
+  }
   const { coreId, regs } = active;
   return {
     coreId,
-    programCounter: active.programCounter ?? programCounter,
-    faultCode: active.faultCode ?? faultCode,
-    faultAddr: active.faultAddr ?? faultAddr,
+    programCounter: active.programCounter,
+    faultCode: active.faultCode,
+    faultAddr: active.faultAddr,
     regs,
-    backtraceAddrs: (active.programCounter ?? programCounter)
-      ? [active.programCounter ?? programCounter]
-      : [],
+    backtraceAddrs: active.programCounter !== undefined ? [active.programCounter] : [],
   };
 }
 
@@ -350,16 +357,19 @@ export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
     }
   }
 
-  // Prefer the section of the core named in the panic header; fall back to
-  // the first section that captured data, then to an empty result.
+  // Prefer the section of the core named in the panic header. When the
+  // header names a core whose dump is missing or empty, report no frames or
+  // registers rather than presenting another core's dump as the panic stack;
+  // the first-data fallback applies only when no core is named.
   let selected: [number, CoreSection] | undefined;
   if (panicCoreId !== undefined) {
     const exact = sections.get(panicCoreId);
     if (exact && hasData(exact)) {
       selected = [panicCoreId, exact];
     }
+  } else {
+    selected = [...sections.entries()].find(([, s]) => hasData(s));
   }
-  selected ??= [...sections.entries()].find(([, s]) => hasData(s));
   const [coreId, { regs, backtraceAddrs }] =
     selected ?? [panicCoreId ?? 0, { regs: {}, backtraceAddrs: [] }];
 

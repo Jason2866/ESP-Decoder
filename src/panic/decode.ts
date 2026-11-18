@@ -70,9 +70,7 @@ function fixDecodeResult(result: DecodeResult): DecodeResult {
   const fixedPathsResult = fixWindowsPaths(result);
   let filteredResult = filterFreeRTOSStackLines(fixedPathsResult);
   filteredResult = filterStackPointerLines(filteredResult);
-  const fixedFaultInfoResult = fixFaultInfo(filteredResult);
-  const dedupedResult = dedupeGDBLines(fixedFaultInfoResult);
-  return dedupedResult;
+  return fixFaultInfo(filteredResult);
 }
 
 function fixWindowsPaths(result: DecodeResult): DecodeResult {
@@ -126,50 +124,6 @@ function fixWindowsPath(path: string): string {
     : path;
 }
 
-function equalsGDBLine(left: GDBLine | ParsedGDBLine, right: GDBLine | ParsedGDBLine): boolean {
-  if (isParsedGDBLine(left) && !isParsedGDBLine(right)) {
-    return false;
-  }
-  if (!isParsedGDBLine(left) && isParsedGDBLine(right)) {
-    return false;
-  }
-
-  if (isParsedGDBLine(left) && isParsedGDBLine(right)) {
-    return (
-      left.regAddr === right.regAddr &&
-      left.lineNumber === right.lineNumber &&
-      left.file === right.file &&
-      left.method === right.method &&
-      frameArgsEqual(left.args, right.args)
-    );
-  }
-
-  return left.regAddr === right.regAddr && left.lineNumber === right.lineNumber;
-}
-
-/**
- * Frame args distinguish otherwise identical frames (e.g. recursive calls
- * at the same address with different arguments), so they participate in
- * dedup equality.
- */
-function frameArgsEqual(
-  left: ParsedGDBLine['args'],
-  right: ParsedGDBLine['args'],
-): boolean {
-  if (!left?.length && !right?.length) {
-    return true;
-  }
-  if (!left || !right || left.length !== right.length) {
-    return false;
-  }
-  return left.every(
-    (arg, i) =>
-      arg.name === right[i].name &&
-      arg.value === right[i].value &&
-      arg.type === right[i].type,
-  );
-}
-
 function filterFreeRTOSStackLines(result: DecodeResult): DecodeResult {
   return {
     ...result,
@@ -213,22 +167,6 @@ function isStackPointerLine(line: GDBLine | ParsedGDBLine, prevLine: GDBLine | P
   const isPrevAddr4x = prevAddr >>> 28 === 0x4;
 
   return line.lineNumber === '??' && isAddr3x && isPrevAddr4x;
-}
-
-function dedupeGDBLines(result: DecodeResult): DecodeResult {
-  return {
-    ...result,
-    stacktraceLines: result.stacktraceLines.reduce(
-      (acc, currentLine) => {
-        const previousLine = acc[acc.length - 1];
-        if (previousLine && equalsGDBLine(previousLine, currentLine)) {
-          return acc;
-        }
-        return [...acc, currentLine];
-      },
-      [] as (GDBLine | ParsedGDBLine)[],
-    ),
-  };
 }
 
 function fixFaultInfo(result: DecodeResult): DecodeResult {
