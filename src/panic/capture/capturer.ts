@@ -246,8 +246,22 @@ export class Capturer {
       return;
     }
     const active = this.framer.peekActiveBlock();
-    const eventId = active ? this.blockEventIndex.get(active.id) : undefined;
-    if (!active || eventId === undefined || !this.eventsById.has(eventId)) {
+    if (!active) {
+      this.lastPreviewKey = '';
+      return;
+    }
+    const eventId = this.blockEventIndex.get(active.id);
+    const hasEvent = eventId !== undefined && this.eventsById.has(eventId);
+    if (
+      !hasEvent &&
+      (!this.framer.isCompleteWithLine(preview) ||
+        !endsWithCompleteBacktracePair(preview))
+    ) {
+      // No event yet and the pending line does not complete the crash
+      // record — or it is a 'Backtrace:' line whose tail is still
+      // streaming (last token is not a complete 0xPC:0xSP pair). Publishing
+      // now would emit a block the framer itself would discard at flush,
+      // or attribute a truncated line.
       this.lastPreviewKey = '';
       return;
     }
@@ -966,6 +980,23 @@ function toArray(value: number | undefined): number[] {
  * register-dump row, or a section header. Truncated records (e.g. a
  * 'Backtrace:' line cut before its first PC:SP pair) do not qualify.
  */
+/**
+ * A pending 'Backtrace:' line may be published before its terminator only
+ * when it ends on a complete '0xPC:0xSP' pair. A truncated tail (e.g. a
+ * line that pauses mid-stream at '0x4200') means more of the same line is
+ * still coming, so the preview must stay buffered until the newline.
+ * Non-Backtrace previews are unaffected.
+ */
+function endsWithCompleteBacktracePair(text: string): boolean {
+  const match = /^\s*Backtrace:(.*)$/i.exec(text);
+  if (!match) {
+    return true;
+  }
+  const tokens = match[1].trim().split(/\s+/).filter(Boolean);
+  const last = tokens[tokens.length - 1];
+  return last !== undefined && /^0x[0-9a-fA-F]+:0x[0-9a-fA-F]+$/.test(last);
+}
+
 function isCompletePendingCrashLine(text: string): boolean {
   return (
     /^Backtrace:\s*0x[0-9a-fA-F]+\s*:\s*0x[0-9a-fA-F]+/i.test(text) ||

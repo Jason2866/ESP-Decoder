@@ -154,6 +154,22 @@ export class CrashFramer {
   }
 
   /**
+   * Whether the still-open block would satisfy the quiet-period
+   * completeness rule if the given line were appended. Lets consumers
+   * preview an unterminated line that itself carries the completeness
+   * signal (e.g. a final 'Backtrace:' line whose terminator never came).
+   */
+  isCompleteWithLine(line: string): boolean {
+    if (!this.active) {
+      return false;
+    }
+    return (
+      this.active.lines.some(isStartLine) &&
+      isCompleteBlock([...this.active.lines, line])
+    );
+  }
+
+  /**
    * Snapshot of the still-open block, if any. Lets consumers preview the
    * buffered unterminated line against the active block's identity even
    * when no new block is emitted this tick.

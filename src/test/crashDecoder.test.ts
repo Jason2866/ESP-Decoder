@@ -548,11 +548,15 @@ describe('CrashCapturer – quiet period with unterminated line', () => {
     expect(events[0].rawText).toContain('Backtrace:');
   });
 
-  it('preserves an unterminated Backtrace line until flush', async () => {
+  it('emits an unterminated final Backtrace line after the quiet period', async () => {
     const capturer = new CrashCapturer();
     const events: CrashEvent[] = [];
+    const updates: CrashEvent[] = [];
     capturer.onCrashDetected((e) => events.push(e));
-    // Crash ends with a Backtrace line that has no trailing newline.
+    capturer.onCrashUpdated((e) => updates.push(e));
+    // Crash ends with a Backtrace line that has no trailing newline — the
+    // pending line itself carries the completeness signal, so the quiet
+    // period must publish it as a preview instead of waiting for flush().
     capturer.pushData(
       Buffer.from(
         'assert failed: unterminated_bt\n' +
@@ -561,12 +565,16 @@ describe('CrashCapturer – quiet period with unterminated line', () => {
       ),
     );
     await new Promise((resolve) => setTimeout(resolve, 700));
-    expect(events.length).toBe(0);
-
-    capturer.flush();
     expect(events.length).toBe(1);
     expect(events[0].rawText).toContain('assert failed: unterminated_bt');
     expect(events[0].rawText).toContain('Backtrace: 0x42000001');
+
+    // The terminator completes the SAME line — a revision, not a new event.
+    capturer.pushData(Buffer.from('\n', 'utf8'));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(events.length).toBe(1);
+    expect(updates.length).toBeGreaterThanOrEqual(1);
+    expect(updates.at(-1)?.rawText.split('Backtrace:').length).toBe(2);
   });
 
   it('emits a complete block after the quiet period without flush', async () => {
