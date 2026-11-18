@@ -188,4 +188,40 @@ describe('findPioEnvironments build directory resolution', () => {
     expect(pioCore.getCorePythonCommandOutput).not.toHaveBeenCalled();
     expect(environments).toContainEqual(expect.objectContaining({ name: 'demo', elfPath }));
   });
+
+  it('detects the riscv arch from the ELF when the board definition is unreadable', async () => {
+    fs.writeFileSync(
+      path.join(workspace, 'platformio.ini'),
+      '[env:demo]\nboard = my-custom-board\n'
+    );
+    const elfPath = path.join(workspace, '.pio', 'build', 'demo', 'firmware.elf');
+    fs.mkdirSync(path.dirname(elfPath), { recursive: true });
+    // Minimal ELF32/64 header: magic, ELFCLASS64, little-endian, EM_RISCV.
+    const elf = Buffer.alloc(52, 0);
+    elf.writeUInt32BE(0x7f454c46, 0);
+    elf[4] = 2;
+    elf[5] = 1;
+    elf.writeUInt16LE(243, 18);
+    fs.writeFileSync(elfPath, elf);
+
+    const environments = await findPioEnvironments(workspace);
+
+    expect(environments).toContainEqual(
+      expect.objectContaining({ name: 'demo', elfPath, targetArch: 'riscv' })
+    );
+  });
+
+  it('leaves targetArch undefined when neither board nor ELF reveal the arch', async () => {
+    fs.writeFileSync(
+      path.join(workspace, 'platformio.ini'),
+      '[env:demo]\nboard = my-custom-board\n'
+    );
+    const elfPath = path.join(workspace, '.pio', 'build', 'demo', 'firmware.elf');
+    fs.mkdirSync(path.dirname(elfPath), { recursive: true });
+    fs.writeFileSync(elfPath, '');
+
+    const environments = await findPioEnvironments(workspace);
+
+    expect(environments[0]?.targetArch).toBeUndefined();
+  });
 });

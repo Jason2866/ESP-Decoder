@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { findEspIdfBuilds } from './espIdfIntegration';
 import { core as pioCore, installer as pioInstaller, project as pioProject } from 'pioarduino-node-helpers';
-import { KNOWN_CHIPS, chipArch, ChipArch } from './chipTargets';
+import { KNOWN_CHIPS, chipArch, detectElfArch, ChipArch } from './chipTargets';
 
 /**
  * Detected PlatformIO environment with ELF and tool paths.
@@ -263,7 +263,7 @@ function parseEnvironments(sections: Sections): ParsedEnv[] {
  * Used for ROM ELF lookup. Sorted by key length descending so
  * "esp32s3" matches before "esp32".
  */
-function getChipName(boardName: string | undefined, workspaceFolder?: string, coreDir?: string): string {
+function getChipName(boardName: string | undefined, workspaceFolder?: string, coreDir?: string): string | undefined {
   // KNOWN_CHIPS is pre-sorted longest-first so 'esp32s31' matches before 'esp32s3'.
   const sortedKeys = KNOWN_CHIPS;
 
@@ -277,12 +277,23 @@ function getChipName(boardName: string | undefined, workspaceFolder?: string, co
         }
       }
     }
+    // Board JSON missing or unreadable: env names and board IDs often embed
+    // the chip themselves ('esp32c3-devkitm-1', 'esp32dev'). Matching the
+    // name is weaker evidence than the MCU field but better than guessing.
+    const nameNorm = boardName.toLowerCase().replace(/[-_]/g, '');
+    for (const key of sortedKeys) {
+      if (nameNorm.includes(key)) {
+        return key;
+      }
+    }
   }
-  return 'esp32';
+  // No chip evidence at all — callers fall back to the firmware ELF's
+  // e_machine for the arch family instead of assuming ESP32/Xtensa.
+  return undefined;
 }
 
 /**
- * Find ROM ELF file for a given chip from PlatformIO's tool-esp-rom-elfs package.
+ * Find ROM ELF file for a given chip from PlatformIO's tool-esp-rom-elfs package.    
  * Mirrors filter_exception_decoder.py's find_rom_elf() logic.
  */
 function findRomElf(packagesDir: string, chipName: string): string | undefined {
@@ -804,15 +815,20 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
     const board = parsed?.board;
 
     const chipName = getChipName(board || envName, workspaceFolder, coreDir);
-    const targetArch: ChipArch = chipArch(chipName);
+    // The firmware ELF's e_machine is authoritative for the arch family —
+    // an unreadable board definition must not default to ESP32/Xtensa and
+    // select the wrong GDB for RISC-V builds.
+    const targetArch =
+      (elfFiles[0] ? detectElfArch(elfFiles[0]) : undefined) ??
+      (chipName ? chipArch(chipName) : undefined);
 
     const packagesDir = getPioPackagesDir(coreDir);
     let toolPath: string | undefined;
     let romElfPath: string | undefined;
 
     if (packagesDir) {
-      toolPath = findPioGdbToolPath(packagesDir, targetArch, chipName);
-      romElfPath = findRomElf(packagesDir, chipName);
+      toolPath = findPioGdbToolPath(packagesDir, targetArch ?? 'xtensa', chipName);
+      romElfPath = chipName ? findRomElf(packagesDir, chipName) : undefined;
     }
 
     // Create an entry for each .elf file found

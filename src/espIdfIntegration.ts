@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { chipArch, ChipArch } from './chipTargets';
+import { chipArch, detectElfArch, ChipArch } from './chipTargets';
 
 export interface EspIdfBuild {
   name: string;
@@ -274,10 +274,13 @@ export async function findEspIdfBuilds(workspaceFolder: string): Promise<EspIdfB
   const buildDir = path.join(workspaceFolder, 'build');
   const projectName = readProjectName(workspaceFolder);
   const idfTarget = parseIdfTarget(workspaceFolder);
-  const targetArch = idfTargetFamily(idfTarget);
-  const toolPath = findGdbFromIdfTools(targetArch ?? 'xtensa', idfTarget);
-
   const elfCandidates = findElfCandidates(buildDir, projectName);
+  // sdkconfig is authoritative when present; otherwise the firmware ELF's
+  // e_machine decides — never guess Xtensa for an unreadable target.
+  const targetArch =
+    idfTargetFamily(idfTarget) ??
+    (elfCandidates[0] ? detectElfArch(elfCandidates[0]) : undefined);
+  const toolPath = findGdbFromIdfTools(targetArch ?? 'xtensa', idfTarget);
   return elfCandidates.map((elfPath, index) => ({
     name: index === 0 ? 'ESP-IDF (build)' : `ESP-IDF (build:${path.basename(elfPath, '.elf')})`,
     elfPath,
