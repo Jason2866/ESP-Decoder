@@ -186,7 +186,12 @@ function getStackAddrAndData(stackDump: StackDumpSegment[]): {
     if (stackBaseAddr === 0) {
       stackBaseAddr = baseAddr;
     } else if (baseAddr !== prevBaseAddr + bytesInLine) {
-      throw new Error('Invalid base address');
+      // A gap between rows means the capture is missing stack bytes —
+      // serving the rows as one contiguous buffer would feed GDB wrong
+      // data at shifted addresses. Mark the stack unavailable instead of
+      // joining rows across the gap or aborting the whole parse; the
+      // caller keeps registers and printed 'Backtrace:' PCs.
+      return { stackBaseAddr: 0, stackData: Buffer.alloc(0) };
     }
 
     const lineData = Buffer.concat(
@@ -419,7 +424,12 @@ export function parseXtensaPanicOutput(input: string): PanicInfoWithBacktrace {
   if (
     Object.keys(parsed.regs).length === 0 &&
     parsed.backtraceAddrs.length === 0 &&
-    !parsed.programCounter
+    !parsed.programCounter &&
+    // A core-named panic header ('Guru Meditation Error: Core N ...') marks
+    // ESP32-format output whose named core simply has no data — falling
+    // back to the ESP8266 parser could attribute another format's fields
+    // to it. The fallback is only for inputs without such a header.
+    !/Guru Meditation Error:\s*Core\s+\d+/i.test(input)
   ) {
     return parseESP8266PanicOutput(input);
   }

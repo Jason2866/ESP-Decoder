@@ -147,6 +147,12 @@ export class CrashFramer {
     return finalized;
   }
 
+  /** Id of the still-open block, if any — for consumers that only need
+   * identity (e.g. index pruning) without copying the accumulated lines. */
+  activeBlockId(): number | undefined {
+    return this.active?.id;
+  }
+
   /**
    * Snapshot of the still-open block, if any. Lets consumers preview the
    * buffered unterminated line against the active block's identity even

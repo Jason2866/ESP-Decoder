@@ -234,7 +234,14 @@ class GDBSession {
   }
 
   async close(): Promise<void> {
-    if (this.gdb.exitCode !== null || this.gdb.signalCode !== null) {
+    // A failed spawn (ENOENT) leaves pid undefined and never emits 'exit' —
+    // the bounded waits below would run their full timeout for a child
+    // that never existed.
+    if (
+      this.gdb.pid === undefined ||
+      this.gdb.exitCode !== null ||
+      this.gdb.signalCode !== null
+    ) {
       return;
     }
     this.gdb.stdin?.end();

@@ -408,7 +408,7 @@ export async function decodeCoredumpFile(
       });
     }
   } finally {
-    client.close();
+    await client.close();
   }
 
   if (!results.length && tryRepair) {

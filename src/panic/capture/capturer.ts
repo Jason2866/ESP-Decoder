@@ -86,6 +86,15 @@ export class Capturer {
    * (lines/rawText/lightweight), so a revision knows whether it owns the
    * display or must win a completeness comparison first. */
   private readonly displayBlockIndex = new Map<string, number>();
+  /** Event id → block id that created the event. Revisions of that block
+   * are the same occurrence by framer identity and skip the cross-block
+   * compatibility recheck — a pending-line preview may hold truncated
+   * values (e.g. 'RA : 0x4200') that legitimately complete differently. */
+  private readonly eventOwnerBlock = new Map<string, number>();
+  /** Block id → event id for merges that incremented the event's count,
+   * so a later incompatible revision can roll the contribution back when
+   * the block splits out into its own event. */
+  private readonly countedBlockIndex = new Map<number, string>();
   /** `${blockId}:${previewText}` of the last published pending-line preview. */
   private lastPreviewKey = '';
   /** First observed return address per event, kept as dedup evidence even
@@ -175,10 +184,14 @@ export class Capturer {
     }
     // Only the framer's still-open block can emit revisions; mappings for
     // finalized blocks are dead weight and are dropped here.
-    const activeId = this.framer.peekActiveBlock()?.id;
+    const activeId = this.framer.activeBlockId();
     for (const blockId of this.blockEventIndex.keys()) {
       if (blockId !== activeId) {
         this.blockEventIndex.delete(blockId);
+        // The count contribution already applied stays — only the dead
+        // rollback bookkeeping for a block that can no longer revise is
+        // dropped here.
+        this.countedBlockIndex.delete(blockId);
       }
     }
   }
@@ -257,16 +270,33 @@ export class Capturer {
     // legitimately fail (register lines arriving late change detectKind).
     const revisionId = this.blockEventIndex.get(block.id);
     const revision = revisionId === undefined ? undefined : this.eventsById.get(revisionId);
-    if (revision && this.revisionCompatible(revision, candidate)) {
+    // A revision of the event's own block is the same occurrence by framer
+    // identity — apply it unconditionally. The compatibility recheck exists
+    // for cross-block provisional merges, and running it on own-block
+    // revisions would split one crash when a pending-line preview held a
+    // truncated value (e.g. 'RA : 0x4200') that completes differently.
+    const ownsRevision =
+      revision !== undefined && this.eventOwnerBlock.get(revision.id) === block.id;
+    if (revision && (ownsRevision || this.revisionCompatible(revision, candidate))) {
       this.applyRevision(revision, candidate, block.id);
       return;
     }
     if (revision) {
       // A provisional cross-block dedup match that now conflicts on
       // identifying data is a different crash: release the mapping and
-      // fall through to normal dedup so the block can become its own
-      // event (or match a compatible one).
+      // roll back this block's count contribution so the split-out block
+      // leaves the event's occurrence count unchanged, then fall through
+      // to normal dedup so the block can become its own event (or match
+      // a compatible one).
       this.blockEventIndex.delete(block.id);
+      const countedEventId = this.countedBlockIndex.get(block.id);
+      this.countedBlockIndex.delete(block.id);
+      const countedEvent =
+        countedEventId === undefined ? undefined : this.eventsById.get(countedEventId);
+      if (countedEvent && countedEvent.count > 1) {
+        countedEvent.count -= 1;
+        this.emit('eventUpdated', countedEvent);
+      }
     }
 
     const exact = this.findRecentBySignature(candidate);
@@ -311,6 +341,7 @@ export class Capturer {
     this.eventsById.set(next.id, next);
     this.signatureIndex.set(next.signature, next.id);
     this.blockEventIndex.set(block.id, next.id);
+    this.eventOwnerBlock.set(next.id, block.id);
     this.displayBlockIndex.set(next.id, block.id);
     this.trimEvents();
     this.emit('eventDetected', next);
@@ -482,6 +513,7 @@ export class Capturer {
     // take the applyRevision path and leave count untouched.
     existing.count += 1;
     this.blockEventIndex.set(blockId, existing.id);
+    this.countedBlockIndex.set(blockId, existing.id);
     existing.lastSeenAt = Math.max(existing.lastSeenAt, candidate.lastSeenAt);
 
     if (preferCandidate) {
@@ -552,9 +584,11 @@ export class Capturer {
       this.eventsById.delete(removed.id);
       this.raEvidence.delete(removed.id);
       this.displayBlockIndex.delete(removed.id);
+      this.eventOwnerBlock.delete(removed.id);
       for (const [blockId, eventId] of this.blockEventIndex) {
         if (eventId === removed.id) {
           this.blockEventIndex.delete(blockId);
+          this.countedBlockIndex.delete(blockId);
         }
       }
       if (this.signatureIndex.get(removed.signature) === removed.id) {

@@ -215,8 +215,8 @@ async function fetchStacktraceWithMi(
     log('fetch stacktrace done', stacktraceLines.length);
     return stacktraceLines;
   } finally {
-    client?.close();
-    server?.close();
+    await client?.close();
+    await server?.close();
   }
 }
 
@@ -372,25 +372,38 @@ export async function decodeRiscv(
   }
   const childOptions: DecodeOptions = { ...options, signal: decodeAbort.signal };
 
-  // When the firmware already printed an unwound 'Backtrace:' and there is
-  // no raw stack memory to serve, resolve those PCs in order via addr2line
-  // instead of asking GDB to unwind an empty stack. If a 'Stack memory:'
-  // dump is present the MI unwind is the richer source and takes precedence.
+  // When the firmware already printed an unwound 'Backtrace:', those PCs
+  // are always resolved via addr2line: they are the primary source when no
+  // recoverable stack exists, and the fallback when the MI unwind fails or
+  // recovers fewer frames than the firmware printed (code-space words in
+  // the dump alone do not prove a saved frame chain). A 'Stack memory:'
+  // dump that MI CAN unwind stays authoritative.
   const printedBacktrace = extractPrintedBacktraceAddrs(input, panicInfo.coreId);
   const usePrintedBacktrace = printedBacktraceApplies(printedBacktrace, panicInfo.stackData);
 
   const addr2lineAddrs: (number | undefined)[] = [
     panicInfo.programCounter,
     panicInfo.faultAddr,
-    ...(usePrintedBacktrace ? printedBacktrace : []),
+    ...printedBacktrace,
   ];
   // addr2line throws on an empty address list; a missing MEPC/MTVAL must not
   // discard the MI-unwound frames, so skip the lookup entirely then.
   const hasLookupAddrs = addr2lineAddrs.some((a) => a !== undefined);
+  const miTask = usePrintedBacktrace
+    ? Promise.resolve([] as (GDBLine | ParsedGDBLine)[])
+    : fetchStacktraceWithMi(params, panicInfo, childOptions, log).catch(
+        (err: unknown) => {
+          // A printed backtrace remains available whenever MI cannot
+          // recover the stack — an abort still propagates.
+          if (printedBacktrace.length === 0 || childOptions.signal?.aborted) {
+            throw err;
+          }
+          log('MI unwind failed; falling back to printed backtrace', err);
+          return [] as (GDBLine | ParsedGDBLine)[];
+        },
+      );
   const tasks = [
-    usePrintedBacktrace
-      ? Promise.resolve([] as (GDBLine | ParsedGDBLine)[])
-      : fetchStacktraceWithMi(params, panicInfo, childOptions, log),
+    miTask,
     hasLookupAddrs
       ? addr2line(params, addr2lineAddrs, childOptions)
       : Promise.resolve([] as (AddrLine | undefined)[]),
@@ -398,13 +411,15 @@ export async function decodeRiscv(
 
   try {
     const [miLines, resolved] = await Promise.all(tasks);
-    const [programCounter, faultAddr, ...frameLocations] = resolved;
-    const stacktraceLines = usePrintedBacktrace
-      ? frameLocations
-          .map((line) => line?.location)
-          .filter(isGDBLine)
-      : miLines;
+    const [programCounter, faultAddr, ...printedLocations] = resolved;
+    const printedLines = printedLocations
+      .map((line) => line?.location)
+      .filter(isGDBLine);
     log('addr2line done', { programCounter, faultAddr });
+    const stacktraceLines =
+      !usePrintedBacktrace && miLines.length >= printedBacktrace.length
+        ? miLines
+        : printedLines;
     stacktraceLines.forEach((line, index) => {
       log('stacktrace line', index, line);
     });

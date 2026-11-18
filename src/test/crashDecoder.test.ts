@@ -57,6 +57,7 @@ import {
   gdbRegsInfoRiscvIlp32,
   parseRiscvPanicDetailed,
   parseESP32PanicOutput,
+  parseXtensaPanicOutput,
   addr2line,
   isParsedGDBLine,
   parseLine,
@@ -435,20 +436,26 @@ describe('CrashCapturer – ESP32 Guru Meditation (native capturer path)', () =>
 describe('CrashCapturer – assert/abort continuation', () => {
   it('keeps assert failed and abort() was called in a single crash block', () => {
     const capturer = new CrashCapturer();
-    const event = feedCrashText(
-      capturer,
-      [
-        'assert failed: npl_freertos_event_init',
-        'abort() was called at PC 0x42001234 on core 0',
-        'Backtrace: 0x42001234:0x3ffb1234 0x42005678:0x3ffb5678',
-        'Rebooting...',
-      ].join('\n'),
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    capturer.pushData(
+      Buffer.from(
+        [
+          'assert failed: npl_freertos_event_init',
+          'abort() was called at PC 0x42001234 on core 0',
+          'Backtrace: 0x42001234:0x3ffb1234 0x42005678:0x3ffb5678',
+          'Rebooting...',
+        ].join('\n'),
+        'utf8',
+      ),
     );
-    expect(event).toBeDefined();
-    expect(event!.rawText).toContain('assert failed: npl_freertos_event_init');
-    expect(event!.rawText).toContain('abort() was called');
-    expect(event!.rawText).toContain('Backtrace:');
-    expect(event!.lines.filter((l) => l.includes('assert failed:'))).toHaveLength(1);
+    capturer.flush();
+    expect(events).toHaveLength(1);
+    const event = events[0];
+    expect(event.rawText).toContain('assert failed: npl_freertos_event_init');
+    expect(event.rawText).toContain('abort() was called');
+    expect(event.rawText).toContain('Backtrace:');
+    expect(event.lines.filter((l) => l.includes('assert failed:'))).toHaveLength(1);
   });
 
   it('starts a new block when abort() arrives after a completed backtrace', () => {
@@ -1271,8 +1278,9 @@ describe.skipIf(isWindows)('addr2line – prompt boundary', () => {
   const fakeGdbPath = path.join(tmpDir, 'fake-gdb.cjs');
 
   // Fake interactive GDB: emits a '(gdb) ' prompt after each command. The
-  // `list` response embeds a standalone '(gdb)' token mid-output — it must
-  // not terminate the command before the real source line arrives.
+  // `list` response embeds a standalone '(gdb)' token mid-output — split
+  // across two stdout chunks so the first ends exactly at the token. It
+  // must not terminate the command before the real source line arrives.
   fs.writeFileSync(
     fakeGdbPath,
     `#!/usr/bin/env node
@@ -1280,7 +1288,9 @@ const readline = require('readline');
 process.stdout.write('Fake GNU gdb\\n(gdb) ');
 readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (line.startsWith('list ')) {
-    process.stdout.write('note: token (gdb) appears mid-output\\n0x40000000 is at /src/main.c:42\\n(gdb) ');
+    process.stdout.write('note: token (gdb)', () => {
+      process.stdout.write(' appears mid-output\\n0x40000000 is at /src/main.c:42\\n(gdb) ');
+    });
   } else {
     process.stdout.write('OK\\n(gdb) ');
   }
@@ -1294,16 +1304,21 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   });
 
   it('does not terminate the response at a (gdb) token inside list output', async () => {
-    const [result] = await addr2line(
+    // Two lookups: the second must still receive its own response after
+    // the first one's embedded '(gdb)' token failed to fake a boundary.
+    const results = await addr2line(
       { elfPath: '/nonexistent/firmware.elf', toolPath: fakeGdbPath },
-      [0x40000000],
+      [0x40000000, 0x40000004],
     );
 
-    expect(result).toBeDefined();
-    expect(isParsedGDBLine(result?.location)).toBe(true);
-    const location = result!.location as ParsedGDBLine;
-    expect(location.file).toBe('/src/main.c');
-    expect(location.lineNumber).toBe('42');
+    expect(results).toHaveLength(2);
+    for (const result of results) {
+      expect(result).toBeDefined();
+      expect(isParsedGDBLine(result?.location)).toBe(true);
+      const location = result!.location as ParsedGDBLine;
+      expect(location.file).toBe('/src/main.c');
+      expect(location.lineNumber).toBe('42');
+    }
   }, 30_000);
 });
 
@@ -1472,6 +1487,42 @@ describe('Capturer – block revisions', () => {
     capturer.dispose();
   });
 
+  it('replaces a truncated preview value when the pending line completes', async () => {
+    const capturer = new Capturer({ quietPeriodMs: 50 });
+    const detected: CapturerEvent[] = [];
+    capturer.on('eventDetected', (e) => detected.push(e));
+
+    // The dump is complete except the final register line, which arrives
+    // unterminated AND truncated mid-value: the preview publishes
+    // RA = 0x4200 while the real value will be 0x42001234. Xtensa format
+    // is used so the register line after 'Backtrace:' is still parsed.
+    capturer.push(
+      Buffer.from(
+        'assert failed: same_reason\n' +
+          'Backtrace: 0x400d1000:0x3ffb1000\n' +
+          'RA      : 0x4200',
+        'utf8',
+      ),
+    );
+    await sleep(120);
+    expect(detected).toHaveLength(1);
+    expect(detected[0].lightweight.regs?.RA).toBe(0x4200);
+
+    // The rest of the value plus the terminator completes the SAME line —
+    // same block id, so it must revise the preview in place. A naive RA
+    // compatibility check would see 0x4200 vs 0x42001234 as a conflict and
+    // emit a second event for one crash.
+    capturer.push(Buffer.from('1234\nRebooting...\n', 'utf8'));
+    await sleep(120);
+    capturer.flush();
+    await sleep(80);
+
+    expect(detected).toHaveLength(1);
+    expect(capturer.getEvents()).toHaveLength(1);
+    expect(capturer.getEvents()[0].lightweight.regs?.RA).toBe(0x42001234);
+    capturer.dispose();
+  });
+
   it('retains the first observed RA as dedup evidence without displaying it', async () => {
     const capturer = new Capturer({ quietPeriodMs: 50 });
     const detected: CapturerEvent[] = [];
@@ -1555,6 +1606,10 @@ describe('Capturer – block revisions', () => {
 
     const events = capturer.getEvents();
     expect(events).toHaveLength(2);
+    // B's provisional merge contributed +1 to A's count; the split must
+    // roll it back — two distinct crashes count as two, not three.
+    expect(events[0].count).toBe(1);
+    expect(events[1].count).toBe(1);
     expect(events[1].lightweight.backtraceAddrs).toContain(0x400d3000);
     expect(events[0].lightweight.backtraceAddrs).toEqual([0x400d1000, 0x400d2000]);
     capturer.dispose();
@@ -2354,5 +2409,86 @@ describe('decodeCrash – raw fallback selected-core extraction', () => {
     const addresses = decoded.stacktrace.map((f) => f.address.toLowerCase());
     expect(addresses).toContain('0x400d1234');
     expect(addresses).toContain('0x400d5678');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseXtensaPanicOutput – ESP8266 fallback guard
+// ---------------------------------------------------------------------------
+
+describe('parseXtensaPanicOutput – named-core header guard', () => {
+  it('does not fall back to ESP8266 parsing for a core-named panic header', () => {
+    // A 'Guru Meditation Error: Core N' header marks ESP32-format output;
+    // even when the named core has no data, the ESP8266 parser must not
+    // attribute its fields (epc1, >>>stack>>> rows) to this capture.
+    const text = [
+      "Guru Meditation Error: Core  0 panic'ed (LoadProhibited). Exception was unhandled.",
+      'Core 1 register dump:',
+      'PC      : 0x400d1111  PS      : 0x00060030',
+      '',
+      'Exception (28):',
+      'epc1=0x4020e41c epc2=0x00000000',
+    ].join('\n');
+    const parsed = parseXtensaPanicOutput(text);
+    expect(parsed.coreId).toBe(0);
+    expect(Object.keys(parsed.regs)).toHaveLength(0);
+    expect(parsed.backtraceAddrs).toHaveLength(0);
+    expect(parsed.programCounter).toBeUndefined();
+  });
+
+  it('still falls back to ESP8266 parsing without a core-named header', () => {
+    const parsed = parseXtensaPanicOutput(ESP8266_CRASH_TEXT);
+    expect(parsed.programCounter).toBeDefined();
+    expect(Object.keys(parsed.regs).length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseRiscvPanicOutput – stack row gaps
+// ---------------------------------------------------------------------------
+
+describe('parseRiscvPanicOutput – stack row gaps', () => {
+  it('marks the stack unavailable on a row gap but keeps registers', () => {
+    const text = [
+      'Core 0 register dump:',
+      'MEPC    : 0x42004abc  MCAUSE  : 0x00000002',
+      'Stack memory:',
+      '3fc8f2d0: 00000000 00000000 00000000 00000000',
+      // Gap: expected next row at 0x3fc8f2e0, this one starts at 0x3fc8f2f0.
+      '3fc8f2f0: 00000000 00000000 00000000 00000000',
+    ].join('\n');
+    const info = parseRiscvPanicOutput(text);
+    expect(info.regs['MEPC']).toBe(0x42004abc);
+    expect(info.stackData.length).toBe(0);
+  });
+
+  it('keeps contiguous stacks on the existing unwind path', () => {
+    const text = [
+      'Core 0 register dump:',
+      'MEPC    : 0x42004abc  MCAUSE  : 0x00000002',
+      'Stack memory:',
+      '3fc8f2d0: 00000000 00000000 00000000 00000000',
+      '3fc8f2e0: 00000000 00000000 00000000 00000000',
+    ].join('\n');
+    const info = parseRiscvPanicOutput(text);
+    expect(info.stackBaseAddr).toBe(0x3fc8f2d0);
+    expect(info.stackData.length).toBe(32);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseLine – frame arguments split at the first '=' only
+// ---------------------------------------------------------------------------
+
+describe('parseLine – argument values containing equals signs', () => {
+  it('keeps the full value when an argument contains additional equals signs', () => {
+    const parsed = parseLine(
+      '0x400d5678 in worker(count=1, blob=a=b=c) at /fw/main.cpp:42',
+    ) as ParsedGDBLine;
+    expect(parsed.method).toBe('worker');
+    expect(parsed.args).toEqual([
+      { name: 'count', value: '1' },
+      { name: 'blob', value: 'a=b=c' },
+    ]);
   });
 });

@@ -1352,9 +1352,14 @@ async function enhanceWithHeuristicStackFrames(
     const known = new Set(
       decoded.stacktrace.map((f) => f.address.replace(/^0x/i, '').toLowerCase()),
     );
-    const extra = heuristicFrames.filter(
-      (f) => !known.has(f.address.replace(/^0x/i, '').toLowerCase()),
-    );
+    const extra: typeof heuristicFrames = [];
+    for (const f of heuristicFrames) {
+      const key = f.address.replace(/^0x/i, '').toLowerCase();
+      if (!known.has(key)) {
+        known.add(key);
+        extra.push(f);
+      }
+    }
     if (extra.length > 0) {
       decoded.stacktrace = [...decoded.stacktrace, ...extra];
     }
@@ -1772,20 +1777,49 @@ function parseFaultInfo(text: string): DecodedCrash['faultInfo'] | undefined {
   return undefined;
 }
 
+const RAW_REGISTER_PATTERN =
+  /\b(EPC\d|EXCVADDR|EXCCAUSE|DEPC|MTVAL|MEPC|MCAUSE|MSTATUS|MTVEC|MHARTID|SP|A\d+|RA|GP|TP|S\d+(?:\/FP)?|T\d+|PC)\s*[:=]\s*(0x[0-9a-fA-F]+)/gi;
+
 /**
  * Parse register values from crash text (fallback).
  */
 function parseRegisters(text: string): Record<string, number> {
   const regs: Record<string, number> = {};
-  const regPattern =
-    /\b(EPC\d|EXCVADDR|EXCCAUSE|DEPC|MTVAL|MEPC|MCAUSE|MSTATUS|MTVEC|MHARTID|SP|A\d+|RA|GP|TP|S\d+(?:\/FP)?|T\d+|PC)\s*[:=]\s*(0x[0-9a-fA-F]+)/gi;
-
-  let match;
-  while ((match = regPattern.exec(text)) !== null) {
+  for (const match of text.matchAll(RAW_REGISTER_PATTERN)) {
     regs[match[1].toUpperCase()] = parseInt(match[2], 16);
   }
-
   return regs;
+}
+
+/**
+ * Register fields the detailed parser does not keep in `regs` (MCAUSE,
+ * MTVAL, MHARTID, ...) collected only from register-dump lines inside the
+ * selected core's section. Stack rows and the printed backtrace sit outside
+ * the register boundaries, and keys the detailed parse already recorded
+ * are never overwritten — a repeated or later register-looking line cannot
+ * clobber the authoritative value.
+ */
+function collectMissingRegisters(section: string, regs: Record<string, number>): void {
+  let inRegisterDump = false;
+  for (const line of section.split(/\r\n?|\n/)) {
+    if (/^\s*Core\s+\d+\s+register dump:/i.test(line)) {
+      inRegisterDump = true;
+      continue;
+    }
+    if (/^\s*(?:Stack memory:|Backtrace:)/i.test(line)) {
+      inRegisterDump = false;
+      continue;
+    }
+    if (!inRegisterDump) {
+      continue;
+    }
+    for (const match of line.matchAll(RAW_REGISTER_PATTERN)) {
+      const key = match[1].toUpperCase();
+      if (!(key in regs)) {
+        regs[key] = parseInt(match[2], 16);
+      }
+    }
+  }
 }
 
 /**
@@ -1860,11 +1894,13 @@ function createRawDecode(crashText: string): DecodedCrash {
           ? riscv.regDumps.find((d) => d.coreId === riscv.panicCoreId)
           : riscv.regDumps[0];
       if (active) {
-        // Scan only the selected core's section so register names the
-        // detailed parser does not keep (MCAUSE, MTVAL, MHARTID, ...) are
-        // still captured — scoped to the panicking core, not the whole
-        // multi-core capture.
-        regs = parseRegisters(extractRiscvCoreSection(crashText));
+        // The detailed parse already scoped registers to the selected
+        // core's dump — reuse it and collect only the extra fields it does
+        // not keep (MCAUSE, MTVAL, MHARTID, ...) from register lines, so a
+        // later register-looking line cannot overwrite values like RA.
+        const section = extractRiscvCoreSection(crashText);
+        regs = { ...active.regs };
+        collectMissingRegisters(section, regs);
         selectedCoreId = riscv.panicCoreId ?? active.coreId;
         // Printed 'Backtrace:' PCs attributed to the selected core only.
         for (const addr of extractPrintedBacktraceAddrs(crashText, selectedCoreId)) {
@@ -1901,7 +1937,7 @@ function createRawDecode(crashText: string): DecodedCrash {
 
   // If no backtrace frames found, extract addresses from stack dumps
   if (frames.length === 0 && !suppressStructured) {
-    const lines = crashText.split('\n');
+    const lines = crashText.split(/\r\n?|\n/);
     let inStackMemory = false;
     let inEsp8266Stack = false;
     let currentCore: number | undefined;

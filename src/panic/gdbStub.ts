@@ -45,11 +45,16 @@ export class GdbStubServer {
       throw new AbortError();
     }
 
-    this.abortHandler = () => {
+    // During setup, cancellation is only recorded — start() still owns the
+    // temp directory and cleans it up itself before rejecting. Removing it
+    // here would race the in-flight mkdtemp/writeFile and could delete the
+    // directory while panic-info.json is still being written.
+    let cancelled = false;
+    const onSetupAbort = () => {
+      cancelled = true;
       this.debug('User abort');
-      void this.close();
     };
-    signal?.addEventListener('abort', this.abortHandler, { once: true });
+    signal?.addEventListener('abort', onSetupAbort, { once: true });
 
     try {
       this.tempDir = await mkdtemp(path.join(tmpdir(), 'esp-decoder-gdbstub-'));
@@ -59,17 +64,29 @@ export class GdbStubServer {
       await writeFile(infoPath, JSON.stringify(this.panicInfo));
 
       // The abort listener may have fired during the async setup above;
-      // do not hand out a remote spec for a cancelled decode.
-      if (signal?.aborted) {
+      // do not hand out a remote spec for a cancelled decode. Cleanup
+      // ownership is still ours — remove the temp dir before rejecting.
+      if (cancelled || signal?.aborted) {
+        signal?.removeEventListener('abort', onSetupAbort);
+        await this.close();
         throw new AbortError();
       }
 
       const scriptPath = path.join(__dirname, 'gdbStubMain.js');
       const remoteSpec = this.buildRemoteSpec(scriptPath, infoPath);
       this.debug('gdb stub remote spec', remoteSpec);
+      // Startup succeeded — transfer cleanup ownership to the abort
+      // handler. No await sits between the cancellation check above and
+      // this swap, so an abort cannot slip through unhandled.
+      signal?.removeEventListener('abort', onSetupAbort);
+      this.abortHandler = () => {
+        this.debug('User abort');
+        void this.close();
+      };
+      signal?.addEventListener('abort', this.abortHandler, { once: true });
       return { remoteSpec };
     } catch (err) {
-      signal?.removeEventListener('abort', this.abortHandler);
+      signal?.removeEventListener('abort', onSetupAbort);
       this.abortHandler = undefined;
       await this.close();
       throw err;
@@ -90,12 +107,12 @@ export class GdbStubServer {
     return `|ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} ${shellQuote(scriptPath)} ${shellQuote(infoPath)}`;
   }
 
-  close(): void {
+  async close(): Promise<void> {
     const dir = this.tempDir;
     this.tempDir = undefined;
     if (dir) {
       // Best-effort cleanup; the stub process exits on stdin EOF anyway.
-      void rm(dir, { recursive: true, force: true }).catch(() => {});
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
     }
   }
 }

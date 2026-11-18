@@ -40,10 +40,14 @@ function parseMethodSignature(sig: string): {
     argsStr
       .match(/(?:[^,"']+|"[^"]*"|'[^']*')+/g)
       ?.map((arg) => {
-        const parts = arg.split('=');
-        if (parts.length === 2) {
-          const [argName, value] = parts.map((s) => s.trim());
-          return { name: argName, value };
+        // Split only at the first '=' so values containing '=' (e.g.
+        // 'key=a=b') keep their full text; 'n=1' still parses normally.
+        const eq = arg.indexOf('=');
+        if (eq > 0) {
+          return {
+            name: arg.slice(0, eq).trim(),
+            value: arg.slice(eq + 1).trim(),
+          };
         }
         return { name: arg.trim() };
       }) || [];

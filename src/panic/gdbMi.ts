@@ -33,6 +33,31 @@ const miResultRecordPattern = /^\d*\^(?:done|running|error|exit|connected)\b/m;
  */
 const EXIT_DRAIN_TIMEOUT_MS = 1000;
 
+/** Bound for each stage of close()'s SIGTERM → SIGKILL escalation. */
+const SHUTDOWN_TIMEOUT_MS = 2000;
+
+/** Resolve true once the child exits, false after the timeout. */
+function waitForChildExit(child: cp.ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(false);
+    }, timeoutMs);
+    const onExit = () => {
+      cleanup();
+      resolve(true);
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.off('exit', onExit);
+    };
+    child.once('exit', onExit);
+  });
+}
+
 export interface GdbMiOptions {
   signal?: AbortSignal;
   debug?: (...args: unknown[]) => void;
@@ -56,6 +81,7 @@ export class GdbMiClient {
   private processExited = false;
   private exitError: Error | undefined;
   private exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
+  private closePromise: Promise<void> | undefined;
   private handshakeResolve: (() => void) | null = null;
   private handshakeReject: ((err: Error) => void) | null = null;
 
@@ -201,8 +227,10 @@ export class GdbMiClient {
       // the record itself delimits the response.
       const exitMatch = /(?:^|\n)\d*\^exit\b[^\n]*/.exec(this.stdoutBuffer);
       let end: number;
+      let terminalExit = false;
       if (exitMatch && (!promptMatch || exitMatch.index <= promptMatch.index)) {
         end = exitMatch.index + exitMatch[0].length;
+        terminalExit = true;
       } else if (promptMatch) {
         end = promptMatch.index + promptMatch[0].length;
       } else {
@@ -225,6 +253,26 @@ export class GdbMiClient {
         this.log('handshake done', preview(output));
         resolve?.();
         continue;
+      }
+
+      if (terminalExit) {
+        // A terminal ^exit record means GDB is gone: settle the in-flight
+        // command only when it is the '-gdb-exit' it answers, reject every
+        // other queued command without dispatching it, and fail the client
+        // so nothing further is written to the dying process.
+        const executor = this.commandQueue.shift();
+        this.commandInFlight = false;
+        if (executor) {
+          const elapsed = Date.now() - executor.startedAt;
+          this.log('recv', `${executor.command} (${elapsed}ms)`, preview(output));
+          if (executor.command.includes('-gdb-exit')) {
+            executor.resolve(output);
+          } else {
+            executor.reject(new Error('GDB exited before the command completed'));
+          }
+        }
+        this.fail(this.exitError ?? new Error('GDB exited'));
+        return;
       }
 
       const executor = this.commandQueue[0];
@@ -254,14 +302,34 @@ export class GdbMiClient {
     }
   }
 
-  close(): void {
+  close(): Promise<void> {
     this.log('close');
     // Record the closed state so pending sendCommand() promises reject
     // (kill() alone leaves cp.killed set, which skips fail() on exit) and
     // later commands fail fast. fail() is idempotent.
     this.fail(new Error('GDB client closed'));
     this.cp.stdin?.end();
-    this.cp.kill();
+    // Repeated close() calls share one shutdown; an already-exited child
+    // resolves immediately without touching pipes or signals.
+    this.closePromise ??= this.shutdownChild();
+    return this.closePromise;
+  }
+
+  /**
+   * SIGTERM the child, wait for the actual exit (kill() only means the
+   * signal was sent — a wrapper may ignore it), then escalate to SIGKILL
+   * after a bounded timeout so no process or pipe is left behind.
+   */
+  private async shutdownChild(): Promise<void> {
+    if (this.cp.exitCode !== null || this.cp.signalCode !== null) {
+      return;
+    }
+    this.cp.kill('SIGTERM');
+    if (await waitForChildExit(this.cp, SHUTDOWN_TIMEOUT_MS)) {
+      return;
+    }
+    this.cp.kill('SIGKILL');
+    await waitForChildExit(this.cp, SHUTDOWN_TIMEOUT_MS);
   }
 
   async drainHandshake(): Promise<void> {
