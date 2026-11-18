@@ -222,6 +222,9 @@ describe('findPioEnvironments build directory resolution', () => {
 
     const environments = await findPioEnvironments(workspace);
 
-    expect(environments[0]?.targetArch).toBeUndefined();
+    const demo = environments.find((e) => e.name === 'demo');
+    expect(demo).toBeDefined();
+    expect(demo!.elfPath).toBe(elfPath);
+    expect(demo!.targetArch).toBeUndefined();
   });
 });
