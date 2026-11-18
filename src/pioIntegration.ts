@@ -827,7 +827,24 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
     let romElfPath: string | undefined;
 
     if (packagesDir) {
-      toolPath = findPioGdbToolPath(packagesDir, targetArch ?? 'xtensa', chipName);
+      if (targetArch) {
+        toolPath = findPioGdbToolPath(packagesDir, targetArch, chipName);
+      } else {
+        // Arch unknown even after ELF/board detection: probe both toolchain
+        // families instead of assuming Xtensa — a RISC-V-only installation
+        // must not be missed. The platform string breaks ties when it names
+        // the family ('espressif32_riscv', '...-riscv...').
+        const riscvHint = /riscv/i.test(parsed?.platform ?? '');
+        const order: ChipArch[] = riscvHint
+          ? ['riscv', 'xtensa']
+          : ['xtensa', 'riscv'];
+        for (const arch of order) {
+          toolPath = findPioGdbToolPath(packagesDir, arch, chipName);
+          if (toolPath) {
+            break;
+          }
+        }
+      }
       romElfPath = chipName ? findRomElf(packagesDir, chipName) : undefined;
     }
 

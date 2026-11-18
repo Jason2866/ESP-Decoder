@@ -45,10 +45,10 @@ interface BlockSnapshot {
   lastSeenAt: number;
 }
 
-/** Bounded per-occurrence record kept for every block merged into an
- * event — replaces the full BlockSnapshot once the block can no longer
- * emit revisions. */
-interface EventMemberRec {
+/** Bounded aggregate of a deduplicated event's finalized occurrences —
+ * replaces per-block records so a long crash loop cannot grow rollback
+ * state without bound. */
+interface EventAggregate {
   firstSeenAt: number;
   lastSeenAt: number;
   ra?: number;
@@ -118,14 +118,15 @@ export class Capturer {
   private readonly countedBlockIndex = new Map<number, string>();
   /** Latest emitted capture snapshot per framed block. Only the framer's
    * still-revisable (active) block keeps an entry — finalized blocks are
-   * folded into eventMembers/eventFallback and their snapshot dropped, so
+   * folded into eventAggregate/eventFallback and their snapshot dropped, so
    * rollback state stays bounded regardless of occurrence count. */
   private readonly blockSnapshots = new Map<number, BlockSnapshot>();
-  /** Event id → merged occurrences (block id → timing/RA record) in merge
-   * order. Bounded aggregate state for finalized blocks: enough to
-   * recompute timestamps and RA dedup evidence when the still-revisable
-   * block splits out of a provisional cross-block merge. */
-  private readonly eventMembers = new Map<string, Map<number, EventMemberRec>>();
+  /** Event id → aggregate of FINALIZED occurrences (timing extremes and
+   * first RA). Bounded per event regardless of crash-loop length: only
+   * blocks that can no longer emit revisions are folded in, which is all
+   * the state needed to restore the event when the still-revisable block
+   * splits out of a provisional cross-block merge. */
+  private readonly eventAggregate = new Map<string, EventAggregate>();
   /** Event id → richest FINALIZED block capture. Kept so a split of the
    * revisable display owner can restore a real snapshot; one per event. */
   private readonly eventFallback = new Map<
@@ -232,6 +233,20 @@ export class Capturer {
       const eventId = this.blockEventIndex.get(blockId);
       const snap = this.blockSnapshots.get(blockId);
       if (eventId !== undefined && snap !== undefined) {
+        const agg = this.eventAggregate.get(eventId);
+        if (agg) {
+          agg.firstSeenAt = Math.min(agg.firstSeenAt, snap.firstSeenAt);
+          agg.lastSeenAt = Math.max(agg.lastSeenAt, snap.lastSeenAt);
+          if (agg.ra === undefined) {
+            agg.ra = snap.lightweight.regs?.RA;
+          }
+        } else {
+          this.eventAggregate.set(eventId, {
+            firstSeenAt: snap.firstSeenAt,
+            lastSeenAt: snap.lastSeenAt,
+            ra: snap.lightweight.regs?.RA,
+          });
+        }
         const fb = this.eventFallback.get(eventId);
         if (
           fb === undefined ||
@@ -382,7 +397,6 @@ export class Capturer {
       // The departed block may have supplied the display snapshot, RA
       // evidence, or the extreme timestamps — recompute the event's state
       // from the occurrences that remain associated with it.
-      this.eventMembers.get(revision.id)?.delete(block.id);
       this.restoreOccurrenceState(revision, block.id);
       this.emit('eventUpdated', revision);
     }
@@ -430,13 +444,6 @@ export class Capturer {
     this.signatureIndex.set(next.signature, next.id);
     this.blockEventIndex.set(block.id, next.id);
     this.eventOwnerBlock.set(next.id, block.id);
-    this.recordMember(
-      next.id,
-      block.id,
-      block.startedAt,
-      block.lastAt,
-      lightweight.regs?.RA,
-    );
     this.displayBlockIndex.set(next.id, block.id);
     this.trimEvents();
     this.emit('eventDetected', next);
@@ -494,13 +501,6 @@ export class Capturer {
     },
     blockId: number,
   ): void {
-    this.recordMember(
-      existing.id,
-      blockId,
-      candidate.firstSeenAt,
-      candidate.lastSeenAt,
-      candidate.lightweight.regs?.RA,
-    );
     existing.firstSeenAt = Math.min(existing.firstSeenAt, candidate.firstSeenAt);
     existing.lastSeenAt = Math.max(existing.lastSeenAt, candidate.lastSeenAt);
     this.retainRa(existing, candidate.lightweight.regs?.RA);
@@ -529,70 +529,30 @@ export class Capturer {
   }
 
   /**
-   * Record a block's occurrence under an event. Member records are the
-   * bounded replacement for per-block snapshots once a block finalizes:
-   * they carry the timing extremes and RA evidence needed to restore the
-   * event when the still-revisable block splits out.
-   */
-  private recordMember(
-    eventId: string,
-    blockId: number,
-    firstSeenAt: number,
-    lastSeenAt: number,
-    ra: number | undefined,
-  ): void {
-    let members = this.eventMembers.get(eventId);
-    if (!members) {
-      members = new Map();
-      this.eventMembers.set(eventId, members);
-    }
-    const rec = members.get(blockId);
-    if (rec) {
-      rec.firstSeenAt = Math.min(rec.firstSeenAt, firstSeenAt);
-      rec.lastSeenAt = Math.max(rec.lastSeenAt, lastSeenAt);
-      if (ra !== undefined) {
-        rec.ra = ra;
-      }
-      return;
-    }
-    members.set(blockId, { firstSeenAt, lastSeenAt, ra });
-  }
-
-  /**
    * After a merged block splits out, revert the event to the state implied
    * by its remaining occurrences: extreme timestamps and RA dedup evidence
-   * are recomputed from their member records, and when the departed block
+   * are recomputed from the finalized-occurrence aggregate, and when the departed block
    * supplied the displayed capture the display falls back to the richest
    * finalized snapshot so the event no longer presents another crash's
    * lines/registers/backtrace.
    */
   private restoreOccurrenceState(event: CapturerEvent, departedBlockId: number): void {
-    const members = this.eventMembers.get(event.id);
-    if (!members) {
+    // The departed block was still revisable, so it was never folded into
+    // the aggregate — the aggregate already describes exactly the remaining
+    // (finalized) occurrences.
+    const agg = this.eventAggregate.get(event.id);
+    if (!agg) {
       return;
     }
-    members.delete(departedBlockId);
-    if (members.size === 0) {
-      return;
-    }
-    const recs = [...members.values()];
 
-    event.firstSeenAt = Math.min(...recs.map((r) => r.firstSeenAt));
-    event.lastSeenAt = Math.max(...recs.map((r) => r.lastSeenAt));
+    event.firstSeenAt = agg.firstSeenAt;
+    event.lastSeenAt = agg.lastSeenAt;
 
-    // First observed RA among the remaining blocks, in merge order — the
-    // departed block's return address must not keep influencing dedup.
-    let ra: number | undefined;
-    for (const rec of recs) {
-      if (rec.ra !== undefined) {
-        ra = rec.ra;
-        break;
-      }
-    }
-    if (ra === undefined) {
+    // The departed block's return address must not keep influencing dedup.
+    if (agg.ra === undefined) {
       this.raEvidence.delete(event.id);
     } else {
-      this.raEvidence.set(event.id, ra);
+      this.raEvidence.set(event.id, agg.ra);
     }
 
     if (this.displayBlockIndex.get(event.id) !== departedBlockId) {
@@ -706,13 +666,6 @@ export class Capturer {
     existing.count += 1;
     this.blockEventIndex.set(blockId, existing.id);
     this.countedBlockIndex.set(blockId, existing.id);
-    this.recordMember(
-      existing.id,
-      blockId,
-      candidate.firstSeenAt,
-      candidate.lastSeenAt,
-      candidate.lightweight.regs?.RA,
-    );
     existing.lastSeenAt = Math.max(existing.lastSeenAt, candidate.lastSeenAt);
 
     if (preferCandidate) {
@@ -784,16 +737,14 @@ export class Capturer {
       this.raEvidence.delete(removed.id);
       this.displayBlockIndex.delete(removed.id);
       this.eventOwnerBlock.delete(removed.id);
-      const removedMembers = this.eventMembers.get(removed.id);
-      this.eventMembers.delete(removed.id);
+      this.eventAggregate.delete(removed.id);
       this.eventFallback.delete(removed.id);
-      // Only the still-revisable block can hold a live snapshot; drop it
-      // if it belonged to the trimmed event.
-      removedMembers?.forEach((_, blockId) => this.blockSnapshots.delete(blockId));
       for (const [blockId, eventId] of this.blockEventIndex) {
         if (eventId === removed.id) {
           this.blockEventIndex.delete(blockId);
           this.countedBlockIndex.delete(blockId);
+          // Only the still-revisable block can hold a live snapshot.
+          this.blockSnapshots.delete(blockId);
         }
       }
       if (this.signatureIndex.get(removed.signature) === removed.id) {

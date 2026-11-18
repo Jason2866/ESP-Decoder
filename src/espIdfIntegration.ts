@@ -280,7 +280,12 @@ export async function findEspIdfBuilds(workspaceFolder: string): Promise<EspIdfB
   const targetArch =
     idfTargetFamily(idfTarget) ??
     (elfCandidates[0] ? detectElfArch(elfCandidates[0]) : undefined);
-  const toolPath = findGdbFromIdfTools(targetArch ?? 'xtensa', idfTarget);
+  // Unknown arch: try Xtensa first (legacy default), then RISC-V — a
+  // RISC-V-only ESP-IDF tool install must not be missed.
+  let toolPath = findGdbFromIdfTools(targetArch ?? 'xtensa', idfTarget);
+  if (!toolPath && targetArch === undefined) {
+    toolPath = findGdbFromIdfTools('riscv', idfTarget);
+  }
   return elfCandidates.map((elfPath, index) => ({
     name: index === 0 ? 'ESP-IDF (build)' : `ESP-IDF (build:${path.basename(elfPath, '.elf')})`,
     elfPath,

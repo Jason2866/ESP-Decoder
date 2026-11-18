@@ -970,32 +970,30 @@ describe('decodeCoredumpElf', () => {
     // are covered above.
   ];
 
-  it.each(coredumpCases)(
-    'decodes the $label coredump with its matching firmware ELF',
-    async ({ chip, arch, coredumpFile, elfFile }) => {
-      const coredumpPath = path.join(FIXTURES_DIR, coredumpFile);
-      const elfPath = path.join(FIXTURES_DIR, elfFile);
-      const gdbPath = arch === 'riscv' ? GDB_PATH : XTENSA_GDB_PATH;
-      if (
-        !fs.existsSync(coredumpPath) ||
-        !fs.existsSync(elfPath) ||
-        !gdbPath ||
-        !fs.existsSync(gdbPath)
-      ) {
-        return; // fixtures or toolchain unavailable — passes trivially
-      }
+  for (const { label, chip, arch, coredumpFile, elfFile } of coredumpCases) {
+    const coredumpPath = path.join(FIXTURES_DIR, coredumpFile);
+    const elfPath = path.join(FIXTURES_DIR, elfFile);
+    const gdbPath = arch === 'riscv' ? GDB_PATH : XTENSA_GDB_PATH;
+    const missing =
+      !fs.existsSync(coredumpPath) ||
+      !fs.existsSync(elfPath) ||
+      !gdbPath ||
+      !fs.existsSync(gdbPath);
+    it.skipIf(missing)(
+      `decodes the ${label} coredump with its matching firmware ELF`,
+      async () => {
+        const result = await decodeCoredumpElf(coredumpPath, elfPath, gdbPath!, chip);
 
-      const result = await decodeCoredumpElf(coredumpPath, elfPath, gdbPath, chip);
+        expect(result).toBeDefined();
+        expect(result.threads.length).toBeGreaterThan(0);
 
-      expect(result).toBeDefined();
-      expect(result.threads.length).toBeGreaterThan(0);
-
-      const currentThread = result.threads.find((t) => t.isCurrent);
-      expect(currentThread).toBeDefined();
-      expect(currentThread!.decoded.stacktrace.length).toBeGreaterThan(0);
-    },
-    60_000,
-  );
+        const currentThread = result.threads.find((t) => t.isCurrent);
+        expect(currentThread).toBeDefined();
+        expect(currentThread!.decoded.stacktrace.length).toBeGreaterThan(0);
+      },
+      60_000,
+    );
+  }
 });
 
 describe('containsBase64Coredump', () => {
