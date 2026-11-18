@@ -3257,7 +3257,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
     function updateConfigDisplay(config) {
       if (config.elfPath) {
-        var parts = config.elfPath.split('/');
+        var parts = config.elfPath.replace(/\\\\/g, '/').split('/');
         var name = parts[parts.length - 1];
         document.getElementById('btn-elf').textContent = 'ELF: ' + name;
         document.getElementById('btn-elf').title = config.elfPath;
@@ -3472,7 +3472,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           html += '<td class="frame-func">' + escapeHtml(frame.function || '??') + '</td>';
 
           if (frame.file && frame.line) {
-            const shortFile = frame.file.split('/').pop();
+            const shortFile = frame.file.replace(/\\\\/g, '/').split('/').pop();
             html += '<td><span class="frame-file" data-file="' +
               escapeHtml(frame.file) + '" data-line="' + escapeHtml(frame.line) +
               '">' + escapeHtml(shortFile + ':' + frame.line) + '</span></td>';
@@ -3555,13 +3555,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       // paths used in data-file attributes are not corrupted by HTML entities.
       var result = '';
       var lastIndex = 0;
-      var re = /(\\/[\\w.\\-\\/]+\\.\\w+):(\\d+)/g;
+      var re = /((?:[A-Za-z]:)?\\/[\\w.\\-\\/]+\\.\\w+):(\\d+)/g;
       var m;
       while ((m = re.exec(text)) !== null) {
         result += escapeHtml(text.slice(lastIndex, m.index));
         var file = m[1];
         var line = m[2];
-        var shortFile = file.split('/').pop();
+        var shortFile = file.replace(/\\\\/g, '/').split('/').pop();
         result += '<span class="frame-file" data-file="' +
           escapeAttr(file) + '" data-line="' + escapeAttr(line) +
           '">' + escapeHtml(shortFile + ':' + line) + '</span>';
@@ -3578,7 +3578,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         var func = match[1];
         var file = match[2];
         var line = match[3];
-        var shortFile = file.split('/').pop();
+        var shortFile = file.replace(/\\\\/g, '/').split('/').pop();
         return escapeHtml(func) + ' at <span class="frame-file" data-file="' +
           escapeAttr(file) + '" data-line="' + escapeAttr(line) +
           '">' + escapeHtml(shortFile + ':' + line) + '</span>';
