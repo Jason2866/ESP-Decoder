@@ -293,12 +293,21 @@ export function extractPrintedBacktraceAddrs(input: string, coreId: number): num
 }
 
 /**
+ * Minimum stack bytes worth unwinding via GDB/MI: below this a frame chain
+ * cannot be recovered anyway (a saved ra/sp pair needs ~16 bytes per frame),
+ * so a printed 'Backtrace:' stays the better source. ESP32-S31 dumps a
+ * single mostly-zero 32-byte row — the firmware-printed backtrace is richer.
+ */
+const MIN_UNWIND_STACK_BYTES = 64;
+
+/**
  * The printed-'Backtrace:' path applies only when the selected core printed
- * an unwound backtrace AND there is no raw 'Stack memory:' dump to unwind —
- * a stack dump is the richer source and keeps the MI unwind authoritative.
+ * an unwound backtrace AND there is no usable raw 'Stack memory:' dump to
+ * unwind — a real stack dump is the richer source and keeps the MI unwind
+ * authoritative.
  */
 export function printedBacktraceApplies(printedBacktrace: number[], stackData: Buffer): boolean {
-  return printedBacktrace.length > 0 && stackData.length === 0;
+  return printedBacktrace.length > 0 && stackData.length < MIN_UNWIND_STACK_BYTES;
 }
 
 /**

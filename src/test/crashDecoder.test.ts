@@ -476,10 +476,12 @@ describe('CrashCapturer – assert/abort continuation', () => {
 });
 
 describe('CrashCapturer – quiet period with unterminated line', () => {
-  it('does not finalize while a line lacks a newline; emits on explicit flush', async () => {
+  it('emits the complete block while an unterminated tail stays buffered', async () => {
     const capturer = new CrashCapturer();
     const events: CrashEvent[] = [];
+    const updates: CrashEvent[] = [];
     capturer.onCrashDetected((e) => events.push(e));
+    capturer.onCrashUpdated((e) => updates.push(e));
     // No trailing newline: the last line stays buffered in LineDecoder.
     capturer.pushData(
       Buffer.from(
@@ -491,15 +493,17 @@ describe('CrashCapturer – quiet period with unterminated line', () => {
         'utf8',
       ),
     );
-    // Wait beyond the 500 ms quiet period: the framer must not finalize
-    // while the unterminated line is still buffered.
+    // Beyond the quiet period the complete block emits provisionally; the
+    // unterminated 'Rebooting...' tail is not flushed mid-line.
     await new Promise((resolve) => setTimeout(resolve, 700));
-    expect(events.length).toBe(0);
-
-    capturer.flush();
     expect(events.length).toBe(1);
     expect(events[0].rawText).toContain('assert failed: unterminated_tail');
-    expect(events[0].rawText).toContain('Rebooting...');
+    expect(events[0].rawText).not.toContain('Rebooting');
+
+    // Explicit flush completes the tail line into the still-open block.
+    capturer.flush();
+    expect(updates.length).toBe(1);
+    expect(updates[0].rawText).toContain('Rebooting...');
   });
 
   it('preserves the block when the stream ends mid-UTF-8-sequence', async () => {
@@ -1300,28 +1304,52 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   }, 30_000);
 });
 
-describe('CrashCapturer – pending tail quiet flush', () => {
-  it('finalizes a block whose last line never terminates after a longer silence', async () => {
+describe('CrashCapturer – pending tail stays buffered', () => {
+  it('emits the complete block at quiet period without flushing a partial line', async () => {
     const capturer = new CrashCapturer();
     const events: CrashEvent[] = [];
+    const updates: CrashEvent[] = [];
     capturer.onCrashDetected((e) => events.push(e));
+    capturer.onCrashUpdated((e) => updates.push(e));
     capturer.pushData(
       Buffer.from(
         'assert failed: pending_tail\n' +
           'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002\n' +
-          'Rebooting',
+          'Rebooting...',
         'utf8',
       ),
     );
-    // quietPeriod (500ms) passes but the pending line must survive it.
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    expect(events.length).toBe(0);
-    // After the extended silence the decoder flush emits the tail line and
-    // the complete block finalizes without flush() or new output.
-    await new Promise((resolve) => setTimeout(resolve, 2200));
+    // Quiet period (~500ms): the complete block emits provisionally; the
+    // unterminated 'Rebooting...' tail is NOT flushed mid-line.
+    await new Promise((resolve) => setTimeout(resolve, 800));
     expect(events.length).toBe(1);
     expect(events[0].rawText).toContain('assert failed: pending_tail');
-    expect(events[0].rawText).toContain('Rebooting');
+    expect(events[0].rawText).not.toContain('Rebooting');
+    // Explicit flush completes the tail line; it joins the open block and
+    // produces a richer update for the same event.
+    capturer.flush();
+    expect(updates.length).toBe(1);
+    expect(updates[0].rawText).toContain('Rebooting...');
+  }, 10_000);
+
+  it('does not split a line that pauses mid-stream', async () => {
+    const capturer = new CrashCapturer();
+    const events: CrashEvent[] = [];
+    capturer.onCrashDetected((e) => events.push(e));
+    capturer.pushData(
+      Buffer.from('assert failed: split\nBacktrace: 0x4200', 'utf8'),
+    );
+    // Wait well beyond the old 2.5s pending-line timeout: the partial
+    // 'Backtrace: 0x4200' must stay buffered, not be emitted as a line.
+    await new Promise((resolve) => setTimeout(resolve, 2800));
+    expect(events.length).toBe(0);
+    // The rest of the line arrives and completes the logical line intact.
+    capturer.pushData(
+      Buffer.from('4abc:0x3ffb0001\nRebooting...\n', 'utf8'),
+    );
+    capturer.flush();
+    expect(events.length).toBe(1);
+    expect(events[0].rawText).toContain('Backtrace: 0x42004abc:0x3ffb0001');
   }, 10_000);
 });
 
@@ -1531,6 +1559,20 @@ describe('CrashFramer – provisional quiet flush', () => {
 // parseRiscvPanicDetailed – whitespace-tolerant core dump headers
 // ---------------------------------------------------------------------------
 
+describe('parseRiscvPanicOutput – bare-hex stack words', () => {
+  it('parses stack memory rows whose words lack 0x prefixes', () => {
+    const text = [
+      'Core 0 register dump:',
+      'MEPC    : 0x42004abc  MCAUSE  : 0x00000002',
+      'Stack memory:',
+      '3fc8f2d0: 00000000 00000000 00000000 00000000 42004abc 00000000 00000000 00000000',
+    ].join('\n');
+    const info = parseRiscvPanicOutput(text);
+    expect(info.stackBaseAddr).toBe(0x3fc8f2d0);
+    expect(info.stackData.length).toBe(32);
+  });
+});
+
 describe('parseRiscvPanicDetailed – indented dump headers', () => {
   it('parses an indented Core register dump header', () => {
     const text = [
@@ -1570,11 +1612,16 @@ describe('extractPrintedBacktraceAddrs – multi-core', () => {
 });
 
 describe('printedBacktraceApplies', () => {
-  it('requires printed PCs and an empty stack dump', () => {
+  it('requires printed PCs and a stack dump too small to unwind', () => {
     expect(printedBacktraceApplies([0x42000001], Buffer.alloc(0))).toBe(true);
     expect(printedBacktraceApplies([], Buffer.alloc(0))).toBe(false);
-    expect(printedBacktraceApplies([0x42000001], Buffer.alloc(16))).toBe(false);
+    // Below MIN_UNWIND_STACK_BYTES (64) the printed backtrace stays better.
+    expect(printedBacktraceApplies([0x42000001], Buffer.alloc(16))).toBe(true);
+    expect(printedBacktraceApplies([0x42000001], Buffer.alloc(32))).toBe(true);
     expect(printedBacktraceApplies([], Buffer.alloc(16))).toBe(false);
+    // A real stack dump keeps the MI unwind authoritative.
+    expect(printedBacktraceApplies([0x42000001], Buffer.alloc(64))).toBe(false);
+    expect(printedBacktraceApplies([0x42000001], Buffer.alloc(256))).toBe(false);
   });
 
   it('a Stack memory dump keeps the MI unwind authoritative', () => {
@@ -1582,7 +1629,9 @@ describe('printedBacktraceApplies', () => {
       'Core 0 register dump:',
       'MEPC    : 0x42001000  MCAUSE  : 0x00000002',
       'Stack memory:',
-      '3fc80000: 0x00000000 0x42000001 0x00000000 0x00000000',
+      '3fc80000: 0x00000000 0x42000001 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000',
+      '3fc80020: 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000',
+      '3fc80040: 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000',
       'Backtrace: 0x42000001:0x3ffb0001',
     ].join('\n');
     const info = parseRiscvPanicOutput(text);

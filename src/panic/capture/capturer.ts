@@ -57,7 +57,7 @@ const defaultOptions = {
  * Silence after which an unterminated line in LineDecoder is force-flushed
  * so a pending crash tail can complete its block.
  */
-const PENDING_LINE_TIMEOUT_MS = 2000;
+
 
 /**
  * Module-level event id allocator: capturer resets create fresh instances,
@@ -137,21 +137,11 @@ export class Capturer {
     }
     this.quietTimer = setTimeout(() => {
       this.quietTimer = undefined;
-      if (this.lineDecoder.hasPendingLine()) {
-        // The pending tail survives short pauses; after a longer silence,
-        // run it through the normal line/block finalization flow so the
-        // completed crash block (including the tail line) can emit without
-        // new output or an explicit flush.
-        this.quietTimer = setTimeout(() => {
-          this.quietTimer = undefined;
-          this.processLines(this.lineDecoder.flush());
-          this.finalizeBlocks(this.framer.flush(this.options.now(), true));
-        }, PENDING_LINE_TIMEOUT_MS);
-        this.quietTimer.unref?.();
-        return;
-      }
       // Timer path emits only complete blocks; an incomplete block stays
-      // active so late-arriving backtrace lines can still join it.
+      // active so late-arriving backtrace lines can still join it. A pending
+      // (unterminated) line is deliberately NOT flushed here: flushing it
+      // mid-line would split one logical line into two and corrupt frames.
+      // It completes via its terminator, the next push, or flush()/dispose().
       this.finalizeBlocks(this.framer.flush(this.options.now(), true));
     }, this.options.quietPeriodMs);
     this.quietTimer.unref?.();
