@@ -948,7 +948,7 @@ function extractRiscvCoreSection(crashText: string): string {
     // the panicking core — the selected one.
     let currentCore: number | undefined = selectedCore;
     let captured = false;
-    for (const line of crashText.split('\n')) {
+    for (const line of crashText.split(/\r?\n|\r/)) {
       const header = line.match(/^\s*Core\s+(\d+)\s+register dump:/);
       if (header) {
         currentCore = parseInt(header[1], 10);
@@ -1806,8 +1806,8 @@ function parseRiscvSections(crashText: string) {
     const hasRiscvRegs = parsed.regDumps.some(
       (d) =>
         d.regs.MEPC !== undefined ||
-        d.regs.MCAUSE !== undefined ||
-        d.regs.MTVAL !== undefined,
+        d.faultCode !== undefined ||
+        d.faultAddr !== undefined,
     );
     return hasRiscvRegs || parsed.stackDump.length > 0 ? parsed : undefined;
   } catch {
@@ -1815,13 +1815,23 @@ function parseRiscvSections(crashText: string) {
   }
 }
 
-/** Safe Xtensa parse for the raw fallback; undefined when it yields nothing. */
+/** Safe Xtensa parse for the raw fallback.
+ *
+ * Returns undefined only for unrecognized formats so the caller can keep
+ * the generic register/backtrace scan. A sectioned ESP-IDF dump
+ * ('Core N register dump:') whose selected core is missing is still a
+ * recognized format — the empty parse is returned so the caller does not
+ * fall back to scanning every core's registers and backtrace.
+ */
 function parseXtensaSections(crashText: string) {
   try {
     const parsed = parseESP32PanicOutput(crashText);
-    return Object.keys(parsed.regs).length > 0 || parsed.backtraceAddrs.length > 0
-      ? parsed
-      : undefined;
+    const hasData =
+      Object.keys(parsed.regs).length > 0 || parsed.backtraceAddrs.length > 0;
+    if (hasData || /Core\s+\d+\s+register dump:/i.test(crashText)) {
+      return parsed;
+    }
+    return undefined;
   } catch {
     return undefined;
   }

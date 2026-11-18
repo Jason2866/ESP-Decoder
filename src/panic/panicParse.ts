@@ -71,6 +71,9 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
   const stackDump: StackDumpSegment[] = [];
   let currentRegDump: RegisterDump | undefined;
   let inStackMemory = false;
+  /** Set by 'Backtrace:': the core's section is done — later diagnostics
+   * must not reopen register or stack parsing for this core. */
+  let dumpClosed = false;
   let faultCode: number | undefined;
   let faultAddr: number | undefined;
   let programCounter = 0;
@@ -84,8 +87,15 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
     if (dumpHeader) {
       currentRegDump = { coreId: parseInt(dumpHeader[1], 10), regs: {} };
       regDumps.push(currentRegDump);
-      // A new dump ends the previous core's stack-memory section.
+      // A new dump ends the previous core's stack-memory section and
+      // reopens register parsing for the new core.
       inStackMemory = false;
+      dumpClosed = false;
+    } else if (dumpClosed) {
+      // After 'Backtrace:' the section is closed: ignore stack rows and
+      // register-looking fields so later diagnostics cannot overwrite the
+      // crash registers. A new 'Core N register dump:' header reopens it.
+      continue;
     } else if (currentRegDump && !inStackMemory) {
       for (const match of line.matchAll(/([A-Z_0-9/]+)\s*:\s*(0x[0-9a-fA-F]+)/g)) {
         const regName = match[1];
@@ -116,6 +126,7 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
       // printed backtrace or the next core, not this stack dump.
       if (/^\s*Backtrace:/i.test(line)) {
         inStackMemory = false;
+        dumpClosed = true;
         continue;
       }
       // Stack words may be '0x'-prefixed or bare hex (ESP32-S31 prints
@@ -132,6 +143,12 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
           .trim()
           .split(/\s+/)
           .map((hex) => parseInt(hex, 16));
+        // Stack words and addresses are 32-bit; a wider value means the row
+        // is not stack data (e.g. a glued token) — skip the whole segment.
+        const fits32 = (v: number) => Number.isFinite(v) && v >= 0 && v <= 0xffffffff;
+        if (!fits32(baseAddr) || data.some((w) => !fits32(w))) {
+          continue;
+        }
         stackDump.push({ coreId: currentRegDump.coreId, baseAddr, data });
       }
     }

@@ -13,6 +13,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'node:module';
+import { EventEmitter } from 'node:events';
+import cp from 'node:child_process';
 
 // ---------------------------------------------------------------------------
 // Mock vscode before importing any module that depends on it
@@ -1515,6 +1517,96 @@ describe('Capturer – block revisions', () => {
     expect(capturer.getEvents()[1].count).toBe(1);
     capturer.dispose();
   });
+
+  it('splits a provisional cross-block match when later evidence conflicts', async () => {
+    const capturer = new Capturer({ quietPeriodMs: 50, dedupWindowMs: 60_000 });
+    capturer.on('eventDetected', () => {});
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    // Event A: Xtensa crash with a two-frame printed backtrace.
+    capturer.push(
+      Buffer.from(
+        'assert failed: same_reason\n' +
+          'Backtrace: 0x400d1000:0x3ffb1000 0x400d2000:0x3ffb2000\n',
+        'utf8',
+      ),
+    );
+    capturer.flush();
+    await sleep(80);
+    expect(capturer.getEvents()).toHaveLength(1);
+
+    // Block B: same reason + a prefix of A's backtrace — provisionally
+    // dedups into event A via the fingerprint path while still open.
+    capturer.push(
+      Buffer.from('assert failed: same_reason\nBacktrace: 0x400d1000:0x3ffb1000\n', 'utf8'),
+    );
+    await sleep(120);
+    expect(capturer.getEvents()).toHaveLength(1);
+    expect(capturer.getEvents()[0].count).toBe(2);
+
+    // B's block revises with a conflicting second frame — the provisional
+    // match was wrong: B must split into its own event instead of
+    // rewriting A's snapshot.
+    capturer.push(Buffer.from('Backtrace: 0x400d3000:0x3ffb3000\n', 'utf8'));
+    await sleep(120);
+    capturer.push(Buffer.from('Rebooting...\n', 'utf8'));
+    capturer.flush();
+    await sleep(80);
+
+    const events = capturer.getEvents();
+    expect(events).toHaveLength(2);
+    expect(events[1].lightweight.backtraceAddrs).toContain(0x400d3000);
+    expect(events[0].lightweight.backtraceAddrs).toEqual([0x400d1000, 0x400d2000]);
+    capturer.dispose();
+  });
+
+  it('preserves the richer display snapshot when a shorter duplicate is revised', async () => {
+    const capturer = new Capturer({ quietPeriodMs: 50, dedupWindowMs: 60_000 });
+    capturer.on('eventDetected', () => {});
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    const rich =
+      "Core 0 panic'ed (Store access fault). Exception was unhandled.\n" +
+      'Core 0 register dump:\n' +
+      'MEPC    : 0x42000001  MCAUSE  : 0x00000007\n' +
+      'RA      : 0x11111111  SP      : 0x3fc80000\n' +
+      'Stack memory:\n' +
+      '3fc80000: 0x00000000 0x00000000 0x00000000 0x00000000\n' +
+      '3fc80010: 0x00000000 0x00000000 0x00000000 0x00000000\n' +
+      'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002\n';
+    const poor =
+      "Core 0 panic'ed (Store access fault). Exception was unhandled.\n" +
+      'Core 0 register dump:\n' +
+      'MEPC    : 0x42000001  MCAUSE  : 0x00000007\n' +
+      'Backtrace: 0x42000001:0x3ffb0001\n';
+
+    // Rich occurrence becomes event E and owns the display snapshot.
+    capturer.push(Buffer.from(rich, 'utf8'));
+    await sleep(120);
+    expect(capturer.getEvents()).toHaveLength(1);
+
+    // Poorer duplicate dedups into E (count=2) but does not take over the
+    // display — it stays provisional and can still be revised.
+    capturer.push(Buffer.from(poor, 'utf8'));
+    await sleep(120);
+    expect(capturer.getEvents()).toHaveLength(1);
+    expect(capturer.getEvents()[0].count).toBe(2);
+    expect(capturer.getEvents()[0].rawText).toContain('Stack memory:');
+
+    // The poor block revises with one more compatible Backtrace pair —
+    // still shorter than the rich display, so the snapshot must NOT be
+    // replaced by it.
+    capturer.push(Buffer.from('Backtrace: 0x42000002:0x3ffb0002\n', 'utf8'));
+    await sleep(120);
+
+    const event = capturer.getEvents()[0];
+    expect(capturer.getEvents()).toHaveLength(1);
+    expect(event.count).toBe(2);
+    expect(event.rawText).toContain('Stack memory:');
+    expect(event.lines).toContain('3fc80010: 0x00000000 0x00000000 0x00000000 0x00000000');
+    expect(event.lightweight.regs?.RA).toBe(0x11111111);
+    capturer.dispose();
+  });
 });
 
 describe('GdbMiClient – close()', () => {
@@ -1604,6 +1696,19 @@ describe('parseLine – symbol without line info', () => {
     expect(line.file).toBe('??');
     expect(line.lineNumber).toBe('??');
   });
+
+  it('keeps parentheses inside template arguments as part of the symbol', () => {
+    const parsed = parseLine(
+      '0x400d5678 in ns::worker<void (int)()>() at /fw/main.cpp:42',
+    );
+    expect(parsed).toBeDefined();
+    const line = parsed as ParsedGDBLine;
+    // Only the top-level '()' is the argument list — '(int)' inside the
+    // template argument must not truncate the symbol name.
+    expect(line.method).toBe('ns::worker<void (int)()>');
+    expect(line.file).toBe('/fw/main.cpp');
+    expect(line.lineNumber).toBe('42');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1677,6 +1782,75 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     },
     15_000,
   );
+});
+
+// ---------------------------------------------------------------------------
+// GdbMiClient – controlled child event order (exit → ^exit → close)
+// ---------------------------------------------------------------------------
+
+describe('GdbMiClient – controlled exit event order', () => {
+  interface FakeGdbChild extends EventEmitter {
+    killed: boolean;
+    kill(): void;
+    stdout: EventEmitter & { setEncoding(encoding: string): void };
+    stderr: EventEmitter & { setEncoding(encoding: string): void };
+    stdin: EventEmitter & { write(chunk: string): boolean; end(): void };
+  }
+
+  function makeFakeChild() {
+    const child = new EventEmitter() as unknown as FakeGdbChild;
+    child.killed = false;
+    child.kill = () => {
+      child.killed = true;
+    };
+    const stdout = new EventEmitter() as FakeGdbChild['stdout'];
+    stdout.setEncoding = () => {};
+    const stderr = new EventEmitter() as FakeGdbChild['stderr'];
+    stderr.setEncoding = () => {};
+    const stdin = new EventEmitter() as FakeGdbChild['stdin'];
+    stdin.write = () => true;
+    stdin.end = () => {};
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.stdin = stdin;
+    return { child, stdout, stdin };
+  }
+
+  it('settles the terminal command on post-exit stdout and rejects unanswered work', async () => {
+    const { child, stdout, stdin } = makeFakeChild();
+    const written: string[] = [];
+    stdin.write = (cmd: string) => {
+      written.push(cmd);
+      return true;
+    };
+
+    const client = new GdbMiClient('fake-gdb', [], {
+      spawnProcess: (() => child) as unknown as typeof cp.spawn,
+    });
+    try {
+      stdout.emit('data', 'Fake GNU gdb\n(gdb) ');
+      await client.drainHandshake();
+
+      const terminal = client.sendCommand('-gdb-exit');
+      const unanswered = client.sendCommand('-stack-list-frames');
+      const unansweredAssertion = expect(unanswered).rejects.toThrow(
+        'GDB exited unexpectedly',
+      );
+
+      // Controlled order — 'exit' first, then the buffered '^exit' record
+      // on stdout, then 'close'. No reliance on the write callback.
+      child.emit('exit', 0, null);
+      stdout.emit('data', '^exit\n');
+      child.emit('close');
+
+      await expect(terminal).resolves.toContain('^exit');
+      await unansweredAssertion;
+      // The queued command was never dispatched to the dead child.
+      expect(written).toEqual(['-gdb-exit\n']);
+    } finally {
+      client.close();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1811,6 +1985,22 @@ describe('CrashFramer – provisional quiet flush', () => {
     expect(out).toHaveLength(1);
     expect(out[0].lines[0]).toBe('assert failed: second crash Backtrace: 0x42000009:0x3ffb0009');
   });
+
+  it('keeps a provisional block open across blank separator lines', () => {
+    const framer = new CrashFramer(500);
+    framer.pushLine("Core 0 panic'ed (Store access fault)", 0);
+    framer.pushLine('Backtrace: 0x42000001:0x3ffb0001', 10);
+    expect(framer.flush(1000, true)).toHaveLength(1);
+
+    // Blank lines carry no information — they must not close the block
+    // before the next core's dump header arrives.
+    expect(framer.pushLine('', 1100)).toEqual([]);
+    expect(framer.pushLine('   ', 1110)).toEqual([]);
+    expect(framer.pushLine('Core 1 register dump:', 1200)).toEqual([]);
+    const out = framer.flush(2000, true);
+    expect(out).toHaveLength(1);
+    expect(out[0].lines).toContain('Core 1 register dump:');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1873,6 +2063,43 @@ describe('parseRiscvPanicDetailed – indented dump headers', () => {
   });
 });
 
+describe('parseRiscvPanicDetailed – post-backtrace section close', () => {
+  it('ignores register fields after Backtrace until the next core header', () => {
+    const text = [
+      'Core 0 register dump:',
+      'MEPC    : 0x42001000  MCAUSE  : 0x00000002',
+      'Stack memory:',
+      '3fc80000: 0x00000000 0x00000000',
+      'Backtrace: 0x42001000:0x3ffb0001',
+      // Later diagnostics must not overwrite the crash registers.
+      'MEPC    : 0xdeadbeef  MCAUSE  : 0xffffffff',
+      'Core 1 register dump:',
+      'MEPC    : 0x42101000  MCAUSE  : 0x00000005',
+    ].join('\n');
+    const parsed = parseRiscvPanicDetailed(text);
+    const core0 = parsed.regDumps.find((d) => d.coreId === 0);
+    const core1 = parsed.regDumps.find((d) => d.coreId === 1);
+    expect(core0?.regs.MEPC).toBe(0x42001000);
+    expect(core0?.faultCode).toBe(0x00000002);
+    expect(core1?.regs.MEPC).toBe(0x42101000);
+    expect(core1?.faultCode).toBe(0x00000005);
+  });
+
+  it('rejects stack rows containing words wider than 32 bits', () => {
+    const text = [
+      'Core 0 register dump:',
+      'MEPC    : 0x42001000',
+      'Stack memory:',
+      '3fc80000: 0x00000000 0x100000000 0x00000000',
+      '3fc80010: 0x00000000 0x00000000 0x00000000 0x00000000',
+    ].join('\n');
+    const parsed = parseRiscvPanicDetailed(text);
+    expect(parsed.stackDump).toHaveLength(1);
+    expect(parsed.stackDump[0].baseAddr).toBe(0x3fc80010);
+    expect(parsed.stackDump[0].data).toHaveLength(4);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // decodeRiscv – printed Backtrace attribution & stack-dump precedence
 // ---------------------------------------------------------------------------
@@ -1912,16 +2139,34 @@ describe('extractPrintedBacktraceAddrs – multi-core', () => {
 });
 
 describe('printedBacktraceApplies', () => {
-  it('requires printed PCs and a stack dump too small to unwind', () => {
+  it('applies when printed PCs exist and the stack has no recoverable frame chain', () => {
     expect(printedBacktraceApplies([0x42000001], Buffer.alloc(0))).toBe(true);
     expect(printedBacktraceApplies([], Buffer.alloc(0))).toBe(false);
     // Below MIN_UNWIND_STACK_BYTES (64) the printed backtrace stays better.
     expect(printedBacktraceApplies([0x42000001], Buffer.alloc(16))).toBe(true);
     expect(printedBacktraceApplies([0x42000001], Buffer.alloc(32))).toBe(true);
     expect(printedBacktraceApplies([], Buffer.alloc(16))).toBe(false);
-    // A real stack dump keeps the MI unwind authoritative.
-    expect(printedBacktraceApplies([0x42000001], Buffer.alloc(64))).toBe(false);
-    expect(printedBacktraceApplies([0x42000001], Buffer.alloc(256))).toBe(false);
+    // A large but contentless dump cannot be unwound either — the size
+    // threshold alone must not suppress the printed PCs.
+    expect(printedBacktraceApplies([0x42000001], Buffer.alloc(64))).toBe(true);
+    expect(printedBacktraceApplies([0x42000001], Buffer.alloc(256))).toBe(true);
+  });
+
+  it('defers to the MI unwind only when the stack holds recoverable frame candidates', () => {
+    // Two code-space words (saved ra candidates) in a >=64-byte dump.
+    const chain = Buffer.alloc(64);
+    chain.writeUInt32LE(0x42001000, 12);
+    chain.writeUInt32LE(0x42102000, 44);
+    expect(printedBacktraceApplies([0x42000001], chain)).toBe(false);
+    // A single code-space word is not a recoverable chain.
+    const single = Buffer.alloc(64);
+    single.writeUInt32LE(0x42001000, 12);
+    expect(printedBacktraceApplies([0x42000001], single)).toBe(true);
+    // Data pointers outside the code range do not count either.
+    const dataOnly = Buffer.alloc(64);
+    dataOnly.writeUInt32LE(0x3fc80000, 12);
+    dataOnly.writeUInt32LE(0x3fc81000, 44);
+    expect(printedBacktraceApplies([0x42000001], dataOnly)).toBe(true);
   });
 
   it('a Stack memory dump keeps the MI unwind authoritative', () => {
@@ -1930,7 +2175,7 @@ describe('printedBacktraceApplies', () => {
       'MEPC    : 0x42001000  MCAUSE  : 0x00000002',
       'Stack memory:',
       '3fc80000: 0x00000000 0x42000001 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000',
-      '3fc80020: 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000',
+      '3fc80020: 0x00000000 0x42000009 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000',
       '3fc80040: 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000',
       'Backtrace: 0x42000001:0x3ffb0001',
     ].join('\n');
@@ -1972,10 +2217,10 @@ describe('decodeCrash – raw fallback core isolation', () => {
     'Backtrace: 0x42100001:0x3ffb1001',
   ].join('\n');
 
-  function makeEvent(rawText: string): CrashEvent {
+  function makeEvent(rawText: string, kind: 'xtensa' | 'riscv' | 'unknown' = 'riscv'): CrashEvent {
     return {
       id: 'test-raw-core',
-      kind: 'riscv',
+      kind,
       lines: rawText.split('\n').filter((l) => l.trim().length > 0),
       rawText,
       timestamp: Date.now(),
@@ -2006,6 +2251,29 @@ describe('decodeCrash – raw fallback core isolation', () => {
     expect(decoded.faultInfo?.coreId).toBe(1);
     expect(decoded.regs?.['MEPC']).toBe(0x42100001);
     expect(decoded.stacktrace.length).toBeGreaterThan(0);
+  });
+
+  it('suppresses another core\'s registers for a sectioned Xtensa dump with a missing selected core', async () => {
+    // 'Core 1 panic'ed but only core 0's dump arrived — the raw fallback
+    // must keep the fault header without attributing core 0's registers
+    // or backtrace PCs to core 1.
+    const text = [
+      "Guru Meditation Error: Core  1 panic'ed (Store access fault). Exception was unhandled.",
+      '',
+      'Core  0 register dump:',
+      'PC       : 0x400d1234  EXCCAUSE: 0x0000001d',
+      'Backtrace: 0x400d1234:0x3ffb0001',
+    ].join('\n');
+    const decoded = await decodeCrash(
+      makeEvent(text, 'xtensa'),
+      ELF_PATH,
+      '/nonexistent/xtensa-esp32-elf-gdb',
+      'esp32',
+    );
+    expect(decoded.faultInfo?.coreId).toBe(1);
+    expect(decoded.regs).toBeUndefined();
+    expect(decoded.stacktrace).toEqual([]);
+    expect(decoded.rawOutput).toContain('Core  0 register dump:');
   });
 });
 

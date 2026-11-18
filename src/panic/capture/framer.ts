@@ -76,6 +76,12 @@ export class CrashFramer {
     // finalize still emits pending continuation rows instead of dropping
     // them; an unchanged provisional block stays suppressed.
     if (this.active?.provisional && !isStartLine(line)) {
+      // Blank separator lines carry no information — they must not close an
+      // open block before a continuation header (e.g. 'Core 1 register
+      // dump:') arrives on the next line.
+      if (line.trim() === '') {
+        return finalized;
+      }
       const isTail = isImmediateFinalizeLine(line);
       if (isTail || isContinuationLine(line)) {
         this.active.lines.push(line);
@@ -139,6 +145,24 @@ export class CrashFramer {
     }
 
     return finalized;
+  }
+
+  /**
+   * Snapshot of the still-open block, if any. Lets consumers preview the
+   * buffered unterminated line against the active block's identity even
+   * when no new block is emitted this tick.
+   */
+  peekActiveBlock(): FramedCrashBlock | undefined {
+    if (!this.active) {
+      return undefined;
+    }
+    return {
+      id: this.active.id,
+      lines: [...this.active.lines],
+      startedAt: this.active.startedAt,
+      lastAt: this.active.lastAt,
+      reasonLine: this.active.reasonLine,
+    };
   }
 
   /**

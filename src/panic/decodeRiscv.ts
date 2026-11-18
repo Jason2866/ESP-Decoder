@@ -293,21 +293,52 @@ export function extractPrintedBacktraceAddrs(input: string, coreId: number): num
 }
 
 /**
- * Minimum stack bytes worth unwinding via GDB/MI: below this a frame chain
- * cannot be recovered anyway (a saved ra/sp pair needs ~16 bytes per frame),
- * so a printed 'Backtrace:' stays the better source. ESP32-S31 dumps a
- * single mostly-zero 32-byte row — the firmware-printed backtrace is richer.
+ * Minimum stack bytes worth attempting a GDB/MI unwind: below this a frame
+ * chain cannot be recovered anyway (a saved ra/sp pair needs ~16 bytes per
+ * frame). ESP32-S31 dumps a single mostly-zero 32-byte row — the
+ * firmware-printed backtrace is richer.
  */
 const MIN_UNWIND_STACK_BYTES = 64;
 
 /**
+ * ESP code space (instruction bus) — the same range the raw fallback uses
+ * to spot candidate return addresses in stack dumps.
+ */
+const CODE_ADDR_MIN = 0x40000000;
+const CODE_ADDR_MAX = 0x50000000;
+
+/**
+ * Whether the captured stack bytes contain a recoverable RISC-V frame
+ * chain: at least two saved-return-address candidates (code-space words)
+ * in a buffer large enough to hold frames. A big but contentless dump
+ * (zeros, data pointers only) cannot be unwound — the printed 'Backtrace:'
+ * stays the better source even though it exceeds the size threshold.
+ */
+function stackHasRecoverableFrames(stackData: Buffer): boolean {
+  if (stackData.length < MIN_UNWIND_STACK_BYTES) {
+    return false;
+  }
+  let codePointers = 0;
+  for (let i = 0; i + 4 <= stackData.length; i += 4) {
+    const word = stackData.readUInt32LE(i);
+    if (word >= CODE_ADDR_MIN && word < CODE_ADDR_MAX) {
+      codePointers++;
+      if (codePointers >= 2) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * The printed-'Backtrace:' path applies only when the selected core printed
- * an unwound backtrace AND there is no usable raw 'Stack memory:' dump to
- * unwind — a real stack dump is the richer source and keeps the MI unwind
- * authoritative.
+ * an unwound backtrace AND the stack dump cannot provide a recoverable
+ * frame chain for the MI unwind — a stack with real ra/sp candidates is
+ * the richer source and keeps the MI unwind authoritative.
  */
 export function printedBacktraceApplies(printedBacktrace: number[], stackData: Buffer): boolean {
-  return printedBacktrace.length > 0 && stackData.length < MIN_UNWIND_STACK_BYTES;
+  return printedBacktrace.length > 0 && !stackHasRecoverableFrames(stackData);
 }
 
 /**

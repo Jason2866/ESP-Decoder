@@ -3362,6 +3362,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       if (rawEl) {
         rawEl.textContent = event.rawText;
       }
+      const kindEl = el.querySelector('.crash-kind');
+      if (kindEl) {
+        kindEl.textContent = event.isCoredump ? 'coredump' : event.kind;
+      }
       const timeEl = el.querySelector('.crash-time');
       if (timeEl) {
         timeEl.textContent = new Date(event.timestamp).toLocaleTimeString();
@@ -3555,7 +3559,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       // paths used in data-file attributes are not corrupted by HTML entities.
       var result = '';
       var lastIndex = 0;
-      var re = /((?:[A-Za-z]:)?[\\/\\\\][\\w.\\-\\/\\\\]+\\.\\w+):(\\d+)/g;
+      // Anchored paths (drive letter, leading slash, './' or '../') may
+      // contain spaces — same rule as the serial link matcher — so Windows
+      // paths like 'C:\My Project\src\main.cpp:42' stay one data-file.
+      var re = /((?:(?:[A-Za-z]:)?[\\\\/]|\\.{1,2}[\\\\/])[\\w.\\-\\/\\\\ ]+\\.\\w+):(\\d+)/g;
       var m;
       while ((m = re.exec(text)) !== null) {
         result += escapeHtml(text.slice(lastIndex, m.index));

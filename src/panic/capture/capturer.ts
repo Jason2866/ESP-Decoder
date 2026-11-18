@@ -78,8 +78,16 @@ export class Capturer {
   private events: CapturerEvent[] = [];
   private readonly eventsById = new Map<string, CapturerEvent>();
   private readonly signatureIndex = new Map<string, string>();
-  /** Framer block id → event id, so revisions of one block update in place. */
+  /** Framer block id → event id, so revisions of one block update in place.
+   * Only the framer's still-open block keeps a mapping — a finalized block
+   * can never emit again. */
   private readonly blockEventIndex = new Map<number, string>();
+  /** Event id → block id that supplied the currently displayed snapshot
+   * (lines/rawText/lightweight), so a revision knows whether it owns the
+   * display or must win a completeness comparison first. */
+  private readonly displayBlockIndex = new Map<string, number>();
+  /** `${blockId}:${previewText}` of the last published pending-line preview. */
+  private lastPreviewKey = '';
   /** First observed return address per event, kept as dedup evidence even
    * when no display snapshot reports it. */
   private readonly raEvidence = new Map<string, number>();
@@ -165,6 +173,14 @@ export class Capturer {
     for (const block of blocks) {
       this.mergeEvent(block);
     }
+    // Only the framer's still-open block can emit revisions; mappings for
+    // finalized blocks are dead weight and are dropped here.
+    const activeId = this.framer.peekActiveBlock()?.id;
+    for (const blockId of this.blockEventIndex.keys()) {
+      if (blockId !== activeId) {
+        this.blockEventIndex.delete(blockId);
+      }
+    }
   }
 
   /**
@@ -174,17 +190,49 @@ export class Capturer {
    * completed line later revises the same block through the normal path.
    */
   private attachPendingPreview(blocks: FramedCrashBlock[]): void {
-    if (blocks.length === 0) {
-      return;
-    }
     const pending = this.lineDecoder.peekPendingLine().trim();
-    if (!pending || !isCompletePendingCrashLine(pending)) {
+    const preview =
+      pending !== '' && isCompletePendingCrashLine(pending) ? pending : undefined;
+
+    if (blocks.length > 0) {
+      const last = blocks[blocks.length - 1];
+      if (preview && !last.lines.includes(preview)) {
+        last.lines.push(preview);
+      }
+      this.lastPreviewKey = preview ? `${last.id}:${preview}` : '';
       return;
     }
-    const last = blocks[blocks.length - 1];
-    if (!last.lines.includes(pending)) {
-      last.lines.push(pending);
+
+    // No block was emitted this tick, but the still-open block may already
+    // have an event whose pending preview grew — publish the change under
+    // the same block id so it revises the existing event in place. The
+    // preview is never written into the framer: when the line's terminator
+    // arrives, the real line replaces it through the normal path.
+    if (!preview) {
+      this.lastPreviewKey = '';
+      return;
     }
+    const active = this.framer.peekActiveBlock();
+    const eventId = active ? this.blockEventIndex.get(active.id) : undefined;
+    if (!active || eventId === undefined || !this.eventsById.has(eventId)) {
+      this.lastPreviewKey = '';
+      return;
+    }
+    const key = `${active.id}:${preview}`;
+    if (key === this.lastPreviewKey) {
+      return;
+    }
+    this.lastPreviewKey = key;
+    const lines = active.lines.includes(preview)
+      ? [...active.lines]
+      : [...active.lines, preview];
+    this.mergeEvent({
+      id: active.id,
+      lines,
+      startedAt: active.startedAt,
+      lastAt: active.lastAt,
+      reasonLine: active.reasonLine,
+    });
   }
 
   private mergeEvent(block: FramedCrashBlock): void {
@@ -209,9 +257,16 @@ export class Capturer {
     // legitimately fail (register lines arriving late change detectKind).
     const revisionId = this.blockEventIndex.get(block.id);
     const revision = revisionId === undefined ? undefined : this.eventsById.get(revisionId);
-    if (revision) {
-      this.applyRevision(revision, candidate);
+    if (revision && this.revisionCompatible(revision, candidate)) {
+      this.applyRevision(revision, candidate, block.id);
       return;
+    }
+    if (revision) {
+      // A provisional cross-block dedup match that now conflicts on
+      // identifying data is a different crash: release the mapping and
+      // fall through to normal dedup so the block can become its own
+      // event (or match a compatible one).
+      this.blockEventIndex.delete(block.id);
     }
 
     const exact = this.findRecentBySignature(candidate);
@@ -256,6 +311,7 @@ export class Capturer {
     this.eventsById.set(next.id, next);
     this.signatureIndex.set(next.signature, next.id);
     this.blockEventIndex.set(block.id, next.id);
+    this.displayBlockIndex.set(next.id, block.id);
     this.trimEvents();
     this.emit('eventDetected', next);
   }
@@ -267,6 +323,38 @@ export class Capturer {
    * lines/rawText/lightweight/kind/signature refresh — including a kind
    * change when late register lines flip architecture detection.
    */
+  /**
+   * A mapped-block revision is normally the same crash growing — but a
+   * provisional cross-block dedup match must be rechecked once the fuller
+   * capture arrives: conflicting identifying data means the block is a
+   * different crash. The return address always counts; backtrace frames
+   * only when the kind is unchanged (addresses are not comparable across
+   * architectures, so a kind flip cannot conflict here).
+   */
+  private revisionCompatible(
+    existing: CapturerEvent,
+    candidate: {
+      kind: CapturerEventKind;
+      lightweight: CapturerLightweight;
+    },
+  ): boolean {
+    if (
+      !returnAddressesCompatible(
+        this.matchLightweight(existing),
+        candidate.lightweight,
+      )
+    ) {
+      return false;
+    }
+    return (
+      existing.kind !== candidate.kind ||
+      backtracesCompatible(
+        existing.lightweight.backtraceAddrs,
+        candidate.lightweight.backtraceAddrs,
+      )
+    );
+  }
+
   private applyRevision(
     existing: CapturerEvent,
     candidate: {
@@ -278,21 +366,32 @@ export class Capturer {
       firstSeenAt: number;
       lastSeenAt: number;
     },
+    blockId: number,
   ): void {
-    existing.kind = candidate.kind;
-    existing.lines = [...candidate.lines];
-    existing.rawText = candidate.rawText;
     existing.firstSeenAt = Math.min(existing.firstSeenAt, candidate.firstSeenAt);
     existing.lastSeenAt = Math.max(existing.lastSeenAt, candidate.lastSeenAt);
-    // Same RA-evidence preservation as mergeIntoExisting: a richer capture
-    // that omits RA must not erase a previously observed return address.
-    const mergedRegs = { ...candidate.lightweight.regs };
-    if (mergedRegs.RA === undefined && existing.lightweight.regs.RA !== undefined) {
-      mergedRegs.RA = existing.lightweight.regs.RA;
-    }
-    existing.lightweight = { ...candidate.lightweight, regs: mergedRegs };
     this.retainRa(existing, candidate.lightweight.regs?.RA);
-    this.reindexSignature(existing, candidate.signature);
+
+    // The displayed snapshot belongs to the occurrence (block) that
+    // supplied it. A revision of that same block always replaces it — the
+    // capture only grows. A revision of a different occurrence merged into
+    // this event replaces the snapshot only when it is richer, so a
+    // shorter duplicate cannot clobber the better display.
+    const ownsDisplay = this.displayBlockIndex.get(existing.id) === blockId;
+    if (ownsDisplay || shouldPreferCandidate(existing, candidate)) {
+      existing.kind = candidate.kind;
+      existing.lines = [...candidate.lines];
+      existing.rawText = candidate.rawText;
+      // Same RA-evidence preservation as mergeIntoExisting: a richer capture
+      // that omits RA must not erase a previously observed return address.
+      const mergedRegs = { ...candidate.lightweight.regs };
+      if (mergedRegs.RA === undefined && existing.lightweight.regs.RA !== undefined) {
+        mergedRegs.RA = existing.lightweight.regs.RA;
+      }
+      existing.lightweight = { ...candidate.lightweight, regs: mergedRegs };
+      this.reindexSignature(existing, candidate.signature);
+      this.displayBlockIndex.set(existing.id, blockId);
+    }
     this.emit('eventUpdated', existing);
   }
 
@@ -397,6 +496,7 @@ export class Capturer {
       }
       existing.lightweight = { ...candidate.lightweight, regs: mergedRegs };
       this.reindexSignature(existing, candidate.signature);
+      this.displayBlockIndex.set(existing.id, blockId);
     }
     this.retainRa(existing, candidate.lightweight.regs?.RA);
 
@@ -451,6 +551,12 @@ export class Capturer {
       }
       this.eventsById.delete(removed.id);
       this.raEvidence.delete(removed.id);
+      this.displayBlockIndex.delete(removed.id);
+      for (const [blockId, eventId] of this.blockEventIndex) {
+        if (eventId === removed.id) {
+          this.blockEventIndex.delete(blockId);
+        }
+      }
       if (this.signatureIndex.get(removed.signature) === removed.id) {
         this.signatureIndex.delete(removed.signature);
       }
@@ -715,7 +821,7 @@ function toArray(value: number | undefined): number[] {
 function isCompletePendingCrashLine(text: string): boolean {
   return (
     /^Backtrace:\s*0x[0-9a-fA-F]+\s*:\s*0x[0-9a-fA-F]+/i.test(text) ||
-    /^[0-9a-fA-F]{4,}\s*:\s+(?:(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})\s*)+$/.test(text) ||
+    /^[0-9a-fA-F]{4,}\s*:\s+(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})(?:\s+(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,}))*\s*$/.test(text) ||
     /^[A-Z][A-Z0-9/]*\s*:\s*0x[0-9a-fA-F]+/i.test(text) ||
     /^Stack memory:/i.test(text) ||
     /^Core\s+\d+\s+register dump:/i.test(text)

@@ -26,9 +26,18 @@ interface QueuedCommand {
 /** MI result records that settle a command response. */
 const miResultRecordPattern = /^\d*\^(?:done|running|error|exit|connected)\b/m;
 
+/**
+ * Bound for draining buffered stdout after the child exits: an inherited
+ * stdout handle can keep 'close' from firing, so unanswered commands are
+ * rejected on this timer instead of waiting for the stream to end.
+ */
+const EXIT_DRAIN_TIMEOUT_MS = 1000;
+
 export interface GdbMiOptions {
   signal?: AbortSignal;
   debug?: (...args: unknown[]) => void;
+  /** Test hook: replace the child_process.spawn used to start GDB. */
+  spawnProcess?: typeof cp.spawn;
 }
 
 /** Minimal GDB MI client for queueing commands and reading result records. */
@@ -46,11 +55,15 @@ export class GdbMiClient {
    * stdout settle the in-flight command before 'close' rejects the rest. */
   private processExited = false;
   private exitError: Error | undefined;
+  private exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
   private handshakeResolve: (() => void) | null = null;
   private handshakeReject: ((err: Error) => void) | null = null;
 
   constructor(gdbPath: string, args: string[], options: GdbMiOptions = {}) {
-    this.cp = cp.spawn(gdbPath, args, { stdio: 'pipe', signal: options.signal });
+    this.cp = (options.spawnProcess ?? cp.spawn)(gdbPath, args, {
+      stdio: 'pipe',
+      signal: options.signal,
+    });
     this.id = ++clientSeq;
     this.log = createLogger(this.id, options.debug);
     this.log('spawn', gdbPath, args.join(' '));
@@ -79,12 +92,32 @@ export class GdbMiClient {
       // 'exit' can fire while the final stdout chunk (e.g. a terminal
       // '^exit' record) is still buffered. Stop dispatching new commands
       // but do NOT fail yet — drainResponses() keeps running on 'data' and
-      // may still settle the in-flight command. 'close' (stdio drained)
-      // rejects whatever remains unanswered.
+      // may still settle the in-flight command.
       this.processExited = true;
       this.exitError = new Error(`GDB exited unexpectedly (code=${code}, signal=${signal})`);
+      if (!this.commandInFlight) {
+        // No written command can still receive a response — queued work
+        // was never dispatched and is unanswerable. Reject now instead of
+        // waiting for 'close', which an inherited stdout handle could
+        // delay indefinitely.
+        this.fail(this.exitError);
+        return;
+      }
+      // The in-flight command may still be settled by buffered stdout;
+      // bound the wait so a missing 'close' cannot pend forever.
+      this.exitDrainTimer = setTimeout(() => {
+        this.exitDrainTimer = undefined;
+        if (this.exitError) {
+          this.fail(this.exitError);
+        }
+      }, EXIT_DRAIN_TIMEOUT_MS);
+      this.exitDrainTimer.unref?.();
     });
     this.cp.on('close', () => {
+      if (this.exitDrainTimer) {
+        clearTimeout(this.exitDrainTimer);
+        this.exitDrainTimer = undefined;
+      }
       if (this.exitError) {
         this.fail(this.exitError);
       }
@@ -212,6 +245,12 @@ export class GdbMiClient {
         this.log('recv without queued command', preview(output));
       }
       this.pumpCommandQueue();
+      // The child already exited: commands still queued were never
+      // dispatched and can never be answered — reject them now rather
+      // than waiting for stderr or the 'close' event.
+      if (this.processExited && this.exitError && this.commandQueue.length > 0) {
+        this.fail(this.exitError);
+      }
     }
   }
 

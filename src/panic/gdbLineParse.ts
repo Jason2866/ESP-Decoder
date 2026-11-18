@@ -9,12 +9,33 @@ function parseMethodSignature(sig: string): {
   name: string;
   args: { name: string; value?: string; type?: string }[];
 } {
-  const nameMatch = sig.match(/^([^(]+)\s*\((.*)\)$/s);
-  if (!nameMatch) {
-    return { name: sig.trim(), args: [] };
+  const trimmed = sig.trim();
+  // Strip only a top-level trailing argument list: scan back from the final
+  // ')' to its matching '(' so parentheses inside template arguments (e.g.
+  // 'ns::worker<void (int)()>()') stay part of the symbol name. A signature
+  // without a trailing ')' (e.g. 'app_main+0x10') is kept whole.
+  let openIdx = -1;
+  if (trimmed.endsWith(')')) {
+    let depth = 0;
+    for (let i = trimmed.length - 1; i >= 0; i--) {
+      const ch = trimmed[i];
+      if (ch === ')') {
+        depth++;
+      } else if (ch === '(') {
+        depth--;
+        if (depth === 0) {
+          openIdx = i;
+          break;
+        }
+      }
+    }
+  }
+  if (openIdx <= 0) {
+    return { name: trimmed, args: [] };
   }
 
-  const [, name, argsStr] = nameMatch;
+  const name = trimmed.slice(0, openIdx).trim();
+  const argsStr = trimmed.slice(openIdx + 1, -1);
   const args =
     argsStr
       .match(/(?:[^,"']+|"[^"]*"|'[^']*')+/g)
