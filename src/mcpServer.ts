@@ -261,39 +261,50 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
       if (!event) {
         throw new Error(`No crash with id '${crash_id}' — call list_crashes for valid ids`);
       }
-      if (!event.decoded) {
+      let d = event.decoded;
+      if (!d) {
         const config = data.getSessionConfig();
         if (!config.elfPath) {
           throw new Error(
             'No ELF file configured — build the project (so it can be auto-detected) or run "ESP Decoder: Select ELF File"'
           );
         }
-        // A crashUpdated merge can replace rawText while decodeCrash is
-        // running; the in-flight result would then be stale. Re-check the
-        // input afterwards and decode once more against the fresh capture.
-        const rawBefore = event.rawText;
-        const decoded = await decodeCrash(
-          event,
-          config.elfPath,
-          config.toolPath,
-          config.targetArch,
-          deps.log,
-          config.romElfPath
-        );
-        if (event.rawText !== rawBefore) {
-          event.decoded = event.decoded ?? (await decodeCrash(
-            event,
-            config.elfPath,
-            config.toolPath,
-            config.targetArch,
-            deps.log,
-            config.romElfPath
-          ));
-        } else {
-          event.decoded = decoded;
+        // Each attempt decodes a snapshot of the event. A crashUpdated
+        // merge can replace rawText while decodeCrash is running; the
+        // in-flight result would then be stale. Retry once against the
+        // fresh capture; if it keeps changing, leave the cache untouched.
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 2 && !event.decoded; attempt++) {
+          const snapshot = { ...event };
+          try {
+            const decoded = await decodeCrash(
+              snapshot,
+              config.elfPath,
+              config.toolPath,
+              config.targetArch,
+              deps.log,
+              config.romElfPath
+            );
+            if (event.rawText === snapshot.rawText) {
+              // Capture unchanged — cache only if still empty (another
+              // request may have stored a decode while we awaited).
+              event.decoded = event.decoded ?? decoded;
+            }
+            // Stale result: loop retries with the updated capture.
+          } catch (err) {
+            if (event.rawText === snapshot.rawText) {
+              throw err;
+            }
+            lastError = err;
+          }
+        }
+        d = event.decoded;
+        if (!d) {
+          throw lastError instanceof Error
+            ? lastError
+            : new Error('Crash capture kept changing during decode — retry decode_crash');
         }
       }
-      const d = event.decoded;
       return jsonResult({
         faultInfo: d.faultInfo,
         frames: d.stacktrace,

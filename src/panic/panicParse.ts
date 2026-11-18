@@ -78,14 +78,14 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
   const panicCoreId = panicCoreMatch ? parseInt(panicCoreMatch[1], 10) : undefined;
 
   for (const line of lines) {
-    if (line.startsWith('Core')) {
-      const match = line.match(/^Core\s+(\d+)\s+register dump:/);
-      if (match) {
-        currentRegDump = { coreId: parseInt(match[1], 10), regs: {} };
-        regDumps.push(currentRegDump);
-        // A new dump ends the previous core's stack-memory section.
-        inStackMemory = false;
-      }
+    // Tolerate leading whitespace, matching the Xtensa parser and the
+    // printed-backtrace attribution in decodeRiscv.
+    const dumpHeader = line.match(/^\s*Core\s+(\d+)\s+register dump:/);
+    if (dumpHeader) {
+      currentRegDump = { coreId: parseInt(dumpHeader[1], 10), regs: {} };
+      regDumps.push(currentRegDump);
+      // A new dump ends the previous core's stack-memory section.
+      inStackMemory = false;
     } else if (currentRegDump && !inStackMemory) {
       for (const match of line.matchAll(/([A-Z_0-9/]+)\s*:\s*(0x[0-9a-fA-F]+)/g)) {
         const regName = match[1];
@@ -112,7 +112,7 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
         inStackMemory = true;
       }
     } else if (inStackMemory && currentRegDump) {
-      const match = line.match(/^([0-9a-fA-F]+):\s*((?:0x[0-9a-fA-F]+\s*)+)/);
+      const match = line.match(/^\s*([0-9a-fA-F]+):\s*((?:0x[0-9a-fA-F]+\s*)+)/);
       if (match) {
         const baseAddr = parseInt(match[1], 16);
         const data = match[2]

@@ -263,10 +263,23 @@ function createDecodeResult(
  * targets (e.g. ESP32-P4) print an unwound backtrace instead of a raw
  * 'Stack memory:' dump; those PCs are resolved directly via addr2line.
  */
-function extractPrintedBacktraceAddrs(input: string): number[] {
+export function extractPrintedBacktraceAddrs(input: string, coreId: number): number[] {
   const addrs: number[] = [];
+  let currentCore: number | undefined;
+  let sawCoreHeader = false;
   for (const line of input.split(/\r?\n/)) {
+    // 'Backtrace:' lines belong to the core section they appear under — the
+    // same attribution parseRiscvPanicDetailed applies to register dumps.
+    const dumpMatch = line.match(/^\s*Core\s+(\d+)\s+register dump:/);
+    if (dumpMatch) {
+      currentCore = parseInt(dumpMatch[1], 10);
+      sawCoreHeader = true;
+      continue;
+    }
     if (!/Backtrace:/.test(line)) {
+      continue;
+    }
+    if (sawCoreHeader && currentCore !== coreId) {
       continue;
     }
     for (const match of line.matchAll(/(0x[0-9a-fA-F]+)\s*:\s*0x[0-9a-fA-F]+/g)) {
@@ -277,6 +290,15 @@ function extractPrintedBacktraceAddrs(input: string): number[] {
     }
   }
   return addrs;
+}
+
+/**
+ * The printed-'Backtrace:' path applies only when the selected core printed
+ * an unwound backtrace AND there is no raw 'Stack memory:' dump to unwind —
+ * a stack dump is the richer source and keeps the MI unwind authoritative.
+ */
+export function printedBacktraceApplies(printedBacktrace: number[], stackData: Buffer): boolean {
+  return printedBacktrace.length > 0 && stackData.length === 0;
 }
 
 /**
@@ -310,22 +332,28 @@ export async function decodeRiscv(
   }
   const childOptions: DecodeOptions = { ...options, signal: decodeAbort.signal };
 
-  // When the firmware already printed an unwound 'Backtrace:' (no raw stack
-  // memory to serve), resolve those PCs in order via addr2line instead of
-  // asking GDB to unwind an empty stack.
-  const printedBacktrace = extractPrintedBacktraceAddrs(input);
-  const usePrintedBacktrace = printedBacktrace.length > 0;
+  // When the firmware already printed an unwound 'Backtrace:' and there is
+  // no raw stack memory to serve, resolve those PCs in order via addr2line
+  // instead of asking GDB to unwind an empty stack. If a 'Stack memory:'
+  // dump is present the MI unwind is the richer source and takes precedence.
+  const printedBacktrace = extractPrintedBacktraceAddrs(input, panicInfo.coreId);
+  const usePrintedBacktrace = printedBacktraceApplies(printedBacktrace, panicInfo.stackData);
 
   const addr2lineAddrs: (number | undefined)[] = [
     panicInfo.programCounter,
     panicInfo.faultAddr,
     ...(usePrintedBacktrace ? printedBacktrace : []),
   ];
+  // addr2line throws on an empty address list; a missing MEPC/MTVAL must not
+  // discard the MI-unwound frames, so skip the lookup entirely then.
+  const hasLookupAddrs = addr2lineAddrs.some((a) => a !== undefined);
   const tasks = [
     usePrintedBacktrace
       ? Promise.resolve([] as (GDBLine | ParsedGDBLine)[])
       : fetchStacktraceWithMi(params, panicInfo, childOptions, log),
-    addr2line(params, addr2lineAddrs, childOptions),
+    hasLookupAddrs
+      ? addr2line(params, addr2lineAddrs, childOptions)
+      : Promise.resolve([] as (AddrLine | undefined)[]),
   ] as const;
 
   try {

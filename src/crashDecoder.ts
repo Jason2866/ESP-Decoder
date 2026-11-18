@@ -20,6 +20,7 @@ import {
   isGDBLine,
   createCapturer,
   parseESP32PanicOutput,
+  parseRiscvPanicDetailed,
 } from './panic';
 import type {
   Capturer,
@@ -246,11 +247,16 @@ export async function decodeCrash(
     log?.appendLine(msg);
   };
 
+  // Resolve the configured architecture up front so tool discovery uses the
+  // same family the decoder will use — a recognized targetArch override must
+  // not fall back to crash-kind guessing (e.g. kind 'unknown' + riscv).
+  const resolvedArch = resolveTargetArch(targetArch, crashEvent.kind);
+
   if (!toolPath) {
     const isEsp8266Crash = crashEvent.kind === 'xtensa'
       && />>>stack>>>/.test(crashEvent.rawText)
       && !/Backtrace:/i.test(crashEvent.rawText);
-    toolPath = autoDetectPioToolPath(crashEvent.kind, log, isEsp8266Crash ? 'esp8266' : undefined);
+    toolPath = autoDetectPioToolPath(resolvedArch, log, isEsp8266Crash ? 'esp8266' : undefined);
     if (!toolPath) {
       write('[ESP Decoder] No toolPath (GDB/addr2line) found — returning raw decode');
       const raw = createRawDecode(crashEvent.rawText);
@@ -270,8 +276,6 @@ export async function decodeCrash(
   }
 
   try {
-    // Resolve target architecture to a decode target ('xtensa' | 'riscv')
-    const resolvedArch = resolveTargetArch(targetArch, crashEvent.kind);
 
     // === Xtensa fast-path: resolve stack/backtrace addresses directly via addr2line ===
     // Covers both the "Backtrace: 0xPC:0xSP ..." format and the ESP8266
@@ -1284,11 +1288,20 @@ async function enhanceWithHeuristicStackFrames(
     heuristicFrames = await resolveAddressesViaGdb(candidateAddrs, elfPath, toolPath, log);
   }
 
-  // A successful GDB/MI unwind is authoritative — the heuristic scan may
-  // only replace it when it resolves strictly more frames (e.g. the unwind
-  // stopped early because code memory reads return zeros).
-  if (heuristicFrames.length > decoded.stacktrace.length) {
-    decoded.stacktrace = heuristicFrames;
+  // The GDB/MI unwind stays authoritative for the frames it covers; the
+  // heuristic scan only appends candidates it resolved that the unwind did
+  // not reach (the unwind can stop early because code-memory reads return
+  // zeros). Unwind frames are never replaced or reordered.
+  if (heuristicFrames.length > 0) {
+    const known = new Set(
+      decoded.stacktrace.map((f) => f.address.replace(/^0x/i, '').toLowerCase()),
+    );
+    const extra = heuristicFrames.filter(
+      (f) => !known.has(f.address.replace(/^0x/i, '').toLowerCase()),
+    );
+    if (extra.length > 0) {
+      decoded.stacktrace = [...decoded.stacktrace, ...extra];
+    }
   }
 }
 
@@ -1722,14 +1735,37 @@ function parseRegisters(text: string): Record<string, number> {
 /**
  * Create a raw (unparsed) decode result as fallback.
  */
+/**
+ * True when a RISC-V panic header names a core ('Core N panic'ed') but the
+ * capture contains no 'Core N register dump:' section for it — any
+ * register/stack data present belongs to a different core.
+ */
+function riscvNamedCoreDumpMissing(crashText: string): boolean {
+  try {
+    const parsed = parseRiscvPanicDetailed(crashText);
+    if (parsed.panicCoreId === undefined) {
+      return false;
+    }
+    return !parsed.regDumps.some((d) => d.coreId === parsed.panicCoreId);
+  } catch {
+    return false;
+  }
+}
+
 function createRawDecode(crashText: string): DecodedCrash {
   const faultInfo = parseFaultInfo(crashText);
-  const regs = parseRegisters(crashText);
+  // When the panic header names a core whose register dump never arrived,
+  // the capture only holds another core's data — keep the raw text and the
+  // header-derived fault info but omit structured registers and frames.
+  const missingCoreDump = riscvNamedCoreDumpMissing(crashText);
+  const regs = missingCoreDump ? {} : parseRegisters(crashText);
 
   const frames: StackFrame[] = [];
 
   // Try Xtensa-style backtrace: 0xADDR:0xADDR pairs
-  const btMatch = crashText.match(/Backtrace:\s*((?:0x[0-9a-fA-F]+[:\s]*)+)/i);
+  const btMatch = missingCoreDump
+    ? null
+    : crashText.match(/Backtrace:\s*((?:0x[0-9a-fA-F]+[:\s]*)+)/i);
   if (btMatch) {
     const pairs = btMatch[1].trim().split(/\s+/);
     for (const pair of pairs) {
@@ -1741,7 +1777,7 @@ function createRawDecode(crashText: string): DecodedCrash {
   }
 
   // If no backtrace frames found, extract addresses from stack dumps
-  if (frames.length === 0) {
+  if (frames.length === 0 && !missingCoreDump) {
     const lines = crashText.split('\n');
     let inStackMemory = false;
     let inEsp8266Stack = false;

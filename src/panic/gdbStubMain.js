@@ -136,6 +136,20 @@ class Stub {
     const stackAddrMax = stackAddrMin + stackData.length;
     const inStack = (addr) => stackAddrMin <= addr && addr < stackAddrMax;
 
+    // A range that partially overlaps the captured stack would report the
+    // uncaptured tail as zero bytes — GDB would read phantom zeros for a
+    // saved register or argument. Reject it instead; reads fully outside
+    // the capture keep the zero-fill model, fully inside return real bytes.
+    if (stackData.length > 0) {
+      const rangeEnd = startAddr + size;
+      const overlaps = startAddr < stackAddrMax && rangeEnd > stackAddrMin;
+      const fullyInside = startAddr >= stackAddrMin && rangeEnd <= stackAddrMax;
+      if (overlaps && !fullyInside) {
+        this.respond('E01');
+        return;
+      }
+    }
+
     let result = '';
     for (let offset = 0; offset < size; offset++) {
       const addr = startAddr + offset;

@@ -12,6 +12,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'node:module';
 
 // ---------------------------------------------------------------------------
 // Mock vscode before importing any module that depends on it
@@ -56,8 +57,13 @@ import {
   parseESP32PanicOutput,
   addr2line,
   isParsedGDBLine,
+  parseLine,
   LineDecoder,
   GdbMiClient,
+  CrashFramer,
+  parseRiscvPanicOutput,
+  extractPrintedBacktraceAddrs,
+  printedBacktraceApplies,
 } from '../panic/index.js';
 import type { ParsedGDBLine } from '../panic/index.js';
 
@@ -1351,3 +1357,306 @@ describe('GdbMiClient – close()', () => {
     15_000,
   );
 });
+
+// ---------------------------------------------------------------------------
+// LineDecoder – oversized line handling
+// ---------------------------------------------------------------------------
+
+describe('LineDecoder – oversized lines', () => {
+  const encode = (s: string) => new TextEncoder().encode(s);
+  const BIG = 'x'.repeat(70 * 1024); // > 64 KiB MAX_LINE_LENGTH
+
+  it('drops a complete oversized line delivered in a single chunk', () => {
+    const decoder = new LineDecoder();
+    const lines = decoder.push(encode(`${BIG}\nok\n`));
+    expect(lines).toEqual(['ok']);
+  });
+
+  it('ends discard mode when the oversized line terminator arrives alone', () => {
+    const decoder = new LineDecoder();
+    // No delimiter: the tail exceeds the limit and enters discard mode.
+    expect(decoder.push(encode(BIG))).toEqual([]);
+    // The LF that terminates the oversized line must end discard mode —
+    // the next valid line has to survive.
+    expect(decoder.push(encode('\n'))).toEqual([]);
+    expect(decoder.push(encode('ok\n'))).toEqual(['ok']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// gdbLineParse – GDB 'No line number information' keeps the symbol name
+// ---------------------------------------------------------------------------
+
+describe('parseLine – symbol without line info', () => {
+  it('preserves the symbol from "No line number information available"', () => {
+    const parsed = parseLine(
+      'No line number information available for address 0x400d1234 <app_main+0x10>',
+    );
+    expect(parsed).toBeDefined();
+    expect(isParsedGDBLine(parsed!)).toBe(true);
+    const line = parsed as ParsedGDBLine;
+    expect(line.method).toBe('app_main');
+    expect(line.file).toBe('??');
+    expect(line.lineNumber).toBe('??');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GdbMiClient – terminal ^exit record without a following prompt
+// ---------------------------------------------------------------------------
+
+describe('GdbMiClient – ^exit without prompt', () => {
+  const isWindows = process.platform === 'win32';
+  let tmpDir: string;
+  let fakeGdbPath: string;
+
+  beforeAll(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gdbmi-exit-'));
+    fakeGdbPath = path.join(tmpDir, 'fake-gdb.cjs');
+    // Emits the handshake prompt, then answers every command with a bare
+    // '^exit' record and no '(gdb)' prompt — like -gdb-exit does.
+    fs.writeFileSync(
+      fakeGdbPath,
+      `#!/usr/bin/env node
+const readline = require('readline');
+process.stdout.write('Fake GNU gdb\\n(gdb) ');
+readline.createInterface({ input: process.stdin }).on('line', () => {
+  process.stdout.write('^exit\\n');
+});
+`,
+      { mode: 0o755 },
+    );
+  });
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(isWindows)('settles a pending command on ^exit', async () => {
+    const client = new GdbMiClient(fakeGdbPath, []);
+    await client.drainHandshake();
+    await expect(client.sendCommand('-gdb-exit')).resolves.toContain('^exit');
+    client.close();
+  }, 15_000);
+});
+
+// ---------------------------------------------------------------------------
+// gdbStubMain – memory reads partially overlapping the captured stack
+// ---------------------------------------------------------------------------
+
+describe('gdbStubMain – partial stack reads', () => {
+  const nodeRequire = createRequire(import.meta.url);
+  const { Stub } = nodeRequire('../panic/gdbStubMain.js') as {
+    Stub: new (info: {
+      stackBaseAddr: number;
+      stackData: Buffer;
+      regs: Record<string, number>;
+    }) => { out: string; respondMem(addr: number, size: number): void };
+  };
+
+  const mkStub = () =>
+    new Stub({
+      stackBaseAddr: 0x1000,
+      stackData: Buffer.from([0x11, 0x22, 0x33, 0x44]),
+      regs: {},
+    });
+  const packetData = (out: string) => out.replace(/^\$/, '').replace(/#[0-9a-f]{2}$/, '');
+
+  it('rejects reads that only partially overlap the captured stack', () => {
+    const stub = mkStub();
+    stub.respondMem(0xffe, 8); // spans the stack start
+    expect(packetData(stub.out)).toBe('E01');
+    stub.out = '';
+    stub.respondMem(0x1002, 4); // runs past the stack end
+    expect(packetData(stub.out)).toBe('E01');
+  });
+
+  it('returns real bytes inside the capture and zeros outside it', () => {
+    const stub = mkStub();
+    stub.respondMem(0x1000, 4);
+    expect(packetData(stub.out)).toBe('11223344');
+    stub.out = '';
+    stub.respondMem(0x2000, 4);
+    expect(packetData(stub.out)).toBe('00000000');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CrashFramer – provisional quiet-period emit keeps the block open
+// ---------------------------------------------------------------------------
+
+describe('CrashFramer – provisional quiet flush', () => {
+  it('keeps the block open for continuation rows after a quiet emit', () => {
+    const framer = new CrashFramer(500);
+    framer.pushLine('assert failed: boom', 0);
+    framer.pushLine('Backtrace: 0x42000001:0x3ffb0001', 10);
+
+    // Quiet-period emit reports the complete block but keeps it open.
+    const first = framer.flush(1000, true);
+    expect(first).toHaveLength(1);
+    expect(first[0].lines).toContain('Backtrace: 0x42000001:0x3ffb0001');
+
+    // No new rows → no duplicate emit.
+    expect(framer.flush(1500, true)).toEqual([]);
+
+    // A late stack row (even indented) joins the still-open block.
+    expect(framer.pushLine('  40800000: 0x42000000 0x42000001', 1600)).toEqual([]);
+    const second = framer.flush(1700, true);
+    expect(second).toHaveLength(1);
+    expect(second[0].lines.length).toBeGreaterThan(first[0].lines.length);
+    expect(second[0].lines).toContain('  40800000: 0x42000000 0x42000001');
+  });
+
+  it('closes a provisional block on an unrelated line without re-emitting', () => {
+    const framer = new CrashFramer(500);
+    framer.pushLine('assert failed: boom', 0);
+    framer.pushLine('Backtrace: 0x42000001:0x3ffb0001', 10);
+    expect(framer.flush(1000, true)).toHaveLength(1);
+
+    // Unrelated output ends the provisional block silently.
+    expect(framer.pushLine('normal log line', 1100)).toEqual([]);
+    // Explicit flush must not emit the unchanged provisional block again.
+    expect(framer.flush(1200)).toEqual([]);
+
+    // A subsequent crash starts a fresh block.
+    framer.pushLine('assert failed: second', 1300);
+    framer.pushLine('Backtrace: 0x42000009:0x3ffb0009', 1310);
+    const out = framer.flush(2000, true);
+    expect(out).toHaveLength(1);
+    expect(out[0].lines[0]).toBe('assert failed: second');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseRiscvPanicDetailed – whitespace-tolerant core dump headers
+// ---------------------------------------------------------------------------
+
+describe('parseRiscvPanicDetailed – indented dump headers', () => {
+  it('parses an indented Core register dump header', () => {
+    const text = [
+      '  Core 1 register dump:',
+      'MEPC    : 0x42100001  MCAUSE  : 0x00000002',
+    ].join('\n');
+    const result = parseRiscvPanicDetailed(text);
+    expect(result.regDumps).toHaveLength(1);
+    expect(result.regDumps[0].coreId).toBe(1);
+    expect(result.regDumps[0].regs.MEPC).toBe(0x42100001);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// decodeRiscv – printed Backtrace attribution & stack-dump precedence
+// ---------------------------------------------------------------------------
+
+describe('extractPrintedBacktraceAddrs – multi-core', () => {
+  const multiCore = [
+    'Core 0 register dump:',
+    'MEPC    : 0x42001000  MCAUSE  : 0x00000002',
+    'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002',
+    'Core 1 register dump:',
+    'MEPC    : 0x42101000  MCAUSE  : 0x00000002',
+    'Backtrace: 0x42100001:0x3ffb1001 0x42100002:0x3ffb1002',
+  ].join('\n');
+
+  it('collects only the selected core\'s printed backtrace', () => {
+    expect(extractPrintedBacktraceAddrs(multiCore, 0)).toEqual([0x42000001, 0x42000002]);
+    expect(extractPrintedBacktraceAddrs(multiCore, 1)).toEqual([0x42100001, 0x42100002]);
+  });
+
+  it('collects every Backtrace line when no core headers exist', () => {
+    const single = 'Backtrace: 0x42000001:0x3ffb0001\nBacktrace: 0x42000002:0x3ffb0002';
+    expect(extractPrintedBacktraceAddrs(single, 0)).toEqual([0x42000001, 0x42000002]);
+  });
+});
+
+describe('printedBacktraceApplies', () => {
+  it('requires printed PCs and an empty stack dump', () => {
+    expect(printedBacktraceApplies([0x42000001], Buffer.alloc(0))).toBe(true);
+    expect(printedBacktraceApplies([], Buffer.alloc(0))).toBe(false);
+    expect(printedBacktraceApplies([0x42000001], Buffer.alloc(16))).toBe(false);
+    expect(printedBacktraceApplies([], Buffer.alloc(16))).toBe(false);
+  });
+
+  it('a Stack memory dump keeps the MI unwind authoritative', () => {
+    const text = [
+      'Core 0 register dump:',
+      'MEPC    : 0x42001000  MCAUSE  : 0x00000002',
+      'Stack memory:',
+      '3fc80000: 0x00000000 0x42000001 0x00000000 0x00000000',
+      'Backtrace: 0x42000001:0x3ffb0001',
+    ].join('\n');
+    const info = parseRiscvPanicOutput(text);
+    const printed = extractPrintedBacktraceAddrs(text, info.coreId);
+    expect(printed.length).toBeGreaterThan(0);
+    expect(info.stackData.length).toBeGreaterThan(0);
+    expect(printedBacktraceApplies(printed, info.stackData)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// decodeCrash – raw fallback must not mix cores
+// ---------------------------------------------------------------------------
+
+describe('decodeCrash – raw fallback core isolation', () => {
+  const MISSING_CORE_DUMP = [
+    "Core  1 panic'ed (Store access fault). Exception was unhandled.",
+    '',
+    'Core  0 register dump:',
+    'MEPC    : 0x42000001  RA      : 0x42000002  SP      : 0x3fc80000',
+    'MCAUSE  : 0x00000007  MTVAL   : 0x3fc80002  MHARTID : 0x00000000',
+    '',
+    'Stack memory:',
+    '3fc80000: 0x00000000 0x400d1234 0x00000000 0x00000000',
+    '',
+    'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002',
+  ].join('\n');
+
+  const BOTH_CORES = [
+    "Core  1 panic'ed (Store access fault). Exception was unhandled.",
+    '',
+    'Core  0 register dump:',
+    'MEPC    : 0x42000001  MCAUSE  : 0x00000007',
+    '',
+    'Core  1 register dump:',
+    'MEPC    : 0x42100001  MCAUSE  : 0x0000000b  MTVAL   : 0x3fc90002',
+    '',
+    'Backtrace: 0x42100001:0x3ffb1001',
+  ].join('\n');
+
+  function makeEvent(rawText: string): CrashEvent {
+    return {
+      id: 'test-raw-core',
+      kind: 'riscv',
+      lines: rawText.split('\n').filter((l) => l.trim().length > 0),
+      rawText,
+      timestamp: Date.now(),
+    };
+  }
+
+  it('omits another core\'s registers and frames when the named core dump is missing', async () => {
+    const decoded = await decodeCrash(
+      makeEvent(MISSING_CORE_DUMP),
+      ELF_PATH,
+      '/nonexistent/riscv32-esp-elf-gdb',
+      'esp32s31',
+    );
+    expect(decoded.faultInfo?.coreId).toBe(1);
+    expect(decoded.regs).toBeUndefined();
+    expect(decoded.stacktrace).toEqual([]);
+    // The raw capture is preserved for display.
+    expect(decoded.rawOutput).toContain('Core  0 register dump:');
+  });
+
+  it('keeps structured data when the named core dump is present', async () => {
+    const decoded = await decodeCrash(
+      makeEvent(BOTH_CORES),
+      ELF_PATH,
+      '/nonexistent/riscv32-esp-elf-gdb',
+      'esp32s31',
+    );
+    expect(decoded.faultInfo?.coreId).toBe(1);
+    expect(decoded.regs?.['MEPC']).toBe(0x42100001);
+    expect(decoded.stacktrace.length).toBeGreaterThan(0);
+  });
+});
+

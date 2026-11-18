@@ -11,10 +11,15 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - name: Remove old files and folders
+        shell: bash
         run: |
           rm -rf package-lock.json
           rm -rf dist
@@ -25,13 +30,71 @@ jobs:
           node-version: 24
       - name: Install NPM
         run: npm install
+      - name: Cache ESP toolchains
+        id: toolchain-cache
+        uses: actions/cache@v4
+        with:
+          path: toolchains
+          key: esp-toolchains-${{ matrix.os }}-esp-16.2.0_20261109
+      # The decode tests resolve GDB via ESP_RISCV_GDB / ESP_XTENSA_GDB (or
+      # PlatformIO's packages dir). Download the matching crosstool-NG
+      # release assets so the real-GDB tests run instead of skipping.
+      - name: Download ESP toolchains
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER=16.2.0_20261109
+          BASE="https://github.com/espressif/crosstool-NG/releases/download/esp-${VER}"
+          case "${{ matrix.os }}" in
+            ubuntu-latest) TRIPLE=x86_64-linux-gnu; EXT=tar.gz ;;
+            macos-latest)
+              if [ "$(uname -m)" = "arm64" ]; then TRIPLE=aarch64-apple-darwin; else TRIPLE=x86_64-apple-darwin; fi
+              EXT=tar.gz ;;
+            windows-latest) TRIPLE=x86_64-w64-mingw32; EXT=zip ;;
+            *) echo "unsupported os"; exit 1 ;;
+          esac
+          mkdir -p toolchains/dl
+          for pkg in riscv32-esp-elf xtensa-esp-elf; do
+            curl -fL --retry 3 -o "toolchains/dl/${pkg}.${EXT}" \
+              "${BASE}/${pkg}-${VER}-${TRIPLE}.${EXT}"
+            if [ "$EXT" = "zip" ]; then
+              # Git Bash ships GNU tar (no zip support); use the bsdtar that
+              # ships with Windows, which handles .zip archives.
+              /c/Windows/System32/tar.exe -xf "toolchains/dl/${pkg}.${EXT}" -C toolchains
+            else
+              tar -xf "toolchains/dl/${pkg}.${EXT}" -C toolchains
+            fi
+          done
+          rm -rf toolchains/dl
+      - name: Locate GDB binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXT=; [ "${{ matrix.os }}" = "windows-latest" ] && EXT=.exe
+          RISCV_GDB="$(find toolchains -type f -name "riscv32-esp-elf-gdb${EXT}" | head -n1)"
+          # The unified xtensa-esp toolchain ships one multi-arch GDB; accept
+          # chip-specific names too in case the layout differs.
+          XTENSA_GDB="$(find toolchains -type f \( -name "xtensa-esp-elf-gdb${EXT}" -o -name "xtensa-esp32-elf-gdb${EXT}" -o -name "xtensa-esp32s3-elf-gdb${EXT}" \) | head -n1)"
+          if [ -z "$RISCV_GDB" ] || [ -z "$XTENSA_GDB" ]; then
+            echo "toolchain GDB binaries not found"; find toolchains -name '*gdb*' | head -20; exit 1
+          fi
+          to_native() { if [ "${{ matrix.os }}" = "windows-latest" ]; then cygpath -w "$1"; else (cd "$(dirname "$1")" && pwd)/$(basename "$1"); fi; }
+          RISCV_GDB="$(to_native "$RISCV_GDB")"
+          XTENSA_GDB="$(to_native "$XTENSA_GDB")"
+          echo "ESP_RISCV_GDB=$RISCV_GDB" >> "$GITHUB_ENV"
+          echo "ESP_XTENSA_GDB=$XTENSA_GDB" >> "$GITHUB_ENV"
+          echo "riscv gdb: $RISCV_GDB"; echo "xtensa gdb: $XTENSA_GDB"
       - name: Run tests
         run: npm run test
       - name: Compile vsix package
         run: |
           npm run build
           npm run package
+      # The vsix is platform-independent; upload it once (from the Linux leg)
+      # so the publish job keeps a single stable artifact name.
       - name: Upload vsix artifact
+        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v7
         with:
           name: esp-decoder-vsix

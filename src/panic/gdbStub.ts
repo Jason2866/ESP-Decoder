@@ -58,11 +58,14 @@ export class GdbStubServer {
       // { type: 'Buffer', data: [...] } which gdbStubMain.js revives.
       await writeFile(infoPath, JSON.stringify(this.panicInfo));
 
+      // The abort listener may have fired during the async setup above;
+      // do not hand out a remote spec for a cancelled decode.
+      if (signal?.aborted) {
+        throw new AbortError();
+      }
+
       const scriptPath = path.join(__dirname, 'gdbStubMain.js');
-      const remoteSpec =
-        process.platform === 'win32'
-          ? await this.buildWindowsRemoteSpec(scriptPath, infoPath)
-          : `|ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} ${shellQuote(scriptPath)} ${shellQuote(infoPath)}`;
+      const remoteSpec = this.buildRemoteSpec(scriptPath, infoPath);
       this.debug('gdb stub remote spec', remoteSpec);
       return { remoteSpec };
     } catch (err) {
@@ -73,23 +76,18 @@ export class GdbStubServer {
     }
   }
 
-  /**
-   * On Windows `|cmd` goes through cmd.exe, which cannot parse the POSIX
-   * `VAR=1 cmd` env prefix or single-quote escaping. Write a .cmd wrapper
-   * that sets ELECTRON_RUN_AS_NODE (the VS Code binary is Electron) and
-   * embeds the already-double-quoted paths.
-   */
-  private async buildWindowsRemoteSpec(scriptPath: string, infoPath: string): Promise<string> {
-    const cmdPath = path.join(this.tempDir!, 'gdbstub.cmd');
-    const q = (p: string) => `"${p.replace(/"/g, '""')}"`;
-    const content = [
-      '@echo off',
-      'set "ELECTRON_RUN_AS_NODE=1"',
-      `${q(process.execPath)} ${q(scriptPath)} ${q(infoPath)}`,
-      '',
-    ].join('\r\n');
-    await writeFile(cmdPath, content);
-    return `|"${cmdPath}"`;
+  private buildRemoteSpec(scriptPath: string, infoPath: string): string {
+    if (process.platform === 'win32') {
+      // MinGW GDB runs `|cmd` via CreateProcess on the first token — it does
+      // NOT invoke cmd.exe or a shell, so a .cmd wrapper or `VAR=1` prefix
+      // cannot work. Launch cmd.exe directly (it is a real executable) and
+      // let it set ELECTRON_RUN_AS_NODE (the VS Code binary is Electron)
+      // before starting the Node-compatible stub binary.
+      const comspec = process.env.ComSpec || 'cmd.exe';
+      const q = (p: string) => `"${p.replace(/"/g, '')}"`;
+      return `|${q(comspec)} /c set "ELECTRON_RUN_AS_NODE=1" && ${q(process.execPath)} ${q(scriptPath)} ${q(infoPath)}`;
+    }
+    return `|ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} ${shellQuote(scriptPath)} ${shellQuote(infoPath)}`;
   }
 
   close(): void {

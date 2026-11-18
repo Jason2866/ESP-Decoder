@@ -38,6 +38,10 @@ interface FramerState {
   startedAt: number;
   lastAt: number;
   reasonLine?: string;
+  /** Set after a quiet-period emit: the block stays open for continuation rows. */
+  provisional?: boolean;
+  /** Continuation rows arrived since the last provisional emit. */
+  dirty?: boolean;
 }
 
 /**
@@ -54,6 +58,24 @@ export class CrashFramer {
 
   pushLine(line: string, atMs: number): FramedCrashBlock[] {
     const finalized: FramedCrashBlock[] = [];
+
+    // A block already emitted by the quiet-period flush stays open for
+    // continuation rows (stack memory, register dumps, Backtrace) so a pause
+    // mid-dump cannot silently drop the rest of the capture. The first
+    // unrelated line closes it without re-emitting.
+    if (this.active?.provisional) {
+      const isTail = isImmediateFinalizeLine(line);
+      if (isTail || isContinuationLine(line)) {
+        this.active.lines.push(line);
+        this.active.lastAt = atMs;
+        this.active.dirty = true;
+        if (isTail || this.active.lines.length >= MAX_COMPLETE_BLOCK_LINES) {
+          this.finalize(finalized);
+        }
+        return finalized;
+      }
+      this.active = undefined;
+    }
 
     // `abort() was called` following an `assert failed:` line is part of the
     // same crash (ESP-IDF prints both before the backtrace), so it continues
@@ -110,7 +132,20 @@ export class CrashFramer {
     const finalized: FramedCrashBlock[] = [];
     if (onlyComplete) {
       if (this.active && this.isCompleteActive()) {
-        this.finalize(finalized);
+        // Provisional emit: the block is reported but stays open so late
+        // stack/register rows can still join it (dedup merges the richer
+        // capture into the same event). Re-emit only when new continuation
+        // rows arrived since the last emit.
+        if (!this.active.provisional || this.active.dirty) {
+          finalized.push({
+            lines: [...this.active.lines],
+            startedAt: this.active.startedAt,
+            lastAt: this.active.lastAt,
+            reasonLine: this.active.reasonLine,
+          });
+          this.active.provisional = true;
+          this.active.dirty = false;
+        }
       }
       return finalized;
     }
@@ -140,9 +175,13 @@ export class CrashFramer {
     if (!this.active) {
       return;
     }
+    // A provisional block with no new continuation rows was already
+    // reported by the quiet-period emit — clear it without re-emitting so
+    // explicit flushes and reboot lines do not inflate the event count.
+    const unchangedProvisional = this.active.provisional === true && !this.active.dirty;
     const lines = this.active.lines;
     const hasSignal = lines.some((line) => isStartLine(line));
-    if (hasSignal && lines.length > 0 && isFinalizableBlock(lines)) {
+    if (!unchangedProvisional && hasSignal && lines.length > 0 && isFinalizableBlock(lines)) {
       finalized.push({
         lines: [...lines],
         startedAt: this.active.startedAt,
@@ -228,6 +267,21 @@ function hasStackMemoryData(lines: string[]): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Lines that may continue an already-emitted crash block: stack-memory rows
+ * (RISC-V '0x'-prefixed and ESP8266 bare-hex), register-dump rows, and
+ * Backtrace lines. Used only while a block is in its provisional state.
+ */
+function isContinuationLine(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    isStackDataRow(trimmed) ||
+    /^[A-Z][A-Z0-9/]*\s*:\s*0x[0-9a-fA-F]+/.test(trimmed) ||
+    /Backtrace:/i.test(trimmed) ||
+    trimmed.includes('>>>stack>>>')
+  );
 }
 
 /** RISC-V 'Stack memory:' row: '<hexaddr>: <hexword> [<hexword> ...]'. */

@@ -258,7 +258,10 @@ export class Capturer {
       }
       const existingContains = containsNormalizedText(existing.rawText, candidate.rawText);
       const candidateContains = containsNormalizedText(candidate.rawText, existing.rawText);
-      if (existingContains || candidateContains) {
+      if (
+        (existingContains || candidateContains) &&
+        returnAddressesCompatible(existing.lightweight, candidate.lightweight)
+      ) {
         return existing;
       }
     }
@@ -284,7 +287,8 @@ export class Capturer {
         backtracesCompatible(
           existing.lightweight.backtraceAddrs,
           candidate.lightweight.backtraceAddrs,
-        )
+        ) &&
+        returnAddressesCompatible(existing.lightweight, candidate.lightweight)
       ) {
         return existing;
       }
@@ -309,7 +313,14 @@ export class Capturer {
     if (preferCandidate) {
       existing.lines = [...candidate.lines];
       existing.rawText = candidate.rawText;
-      existing.lightweight = candidate.lightweight;
+      // Keep a previously observed RA as dedup evidence when the richer
+      // capture omits it — the displayed snapshot still comes from the
+      // candidate, but a later capture with a conflicting RA must not merge.
+      const mergedRegs = { ...candidate.lightweight.regs };
+      if (mergedRegs.RA === undefined && existing.lightweight.regs.RA !== undefined) {
+        mergedRegs.RA = existing.lightweight.regs.RA;
+      }
+      existing.lightweight = { ...candidate.lightweight, regs: mergedRegs };
       this.reindexSignature(existing, candidate.signature);
     }
 

@@ -54,7 +54,7 @@ export {
   toHexString,
 } from './panicParse';
 export { addr2line } from './addr2line';
-export { decodeRiscv } from './decodeRiscv';
+export { decodeRiscv, extractPrintedBacktraceAddrs, printedBacktraceApplies } from './decodeRiscv';
 export { decodeXtensa } from './decodeXtensa';
 export { GdbMiClient, parseMiResultRecord, parseMiTupleList, extractMiListContent, stripMiList } from './gdbMi';
 export { parseLines, parseLine } from './gdbLineParse';

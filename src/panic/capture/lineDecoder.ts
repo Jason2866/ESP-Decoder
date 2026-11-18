@@ -95,11 +95,16 @@ export class LineDecoder {
     if (this.discardingLine) {
       // Drop everything through the next line break, then resume normal
       // line detection. A CR at the chunk end keeps the split-CRLF rule.
+      // `found` tracks delimiter consumption separately from buffer
+      // exhaustion: a delimiter as the chunk's last byte must still clear
+      // the discard state.
       let i = 0;
+      let found = false;
       while (i < this.buffer.length) {
         const ch = this.buffer.charCodeAt(i);
         if (ch === 10) {
           i += 1;
+          found = true;
           break;
         }
         if (ch === 13) {
@@ -111,11 +116,12 @@ export class LineDecoder {
             }
             i += 1;
           }
+          found = true;
           break;
         }
         i++;
       }
-      if (i >= this.buffer.length && !isFinal) {
+      if (!found && !isFinal) {
         this.buffer = '';
         this.scannedLength = 0;
         return lines;
@@ -131,7 +137,10 @@ export class LineDecoder {
         continue;
       }
 
-      lines.push(this.buffer.slice(start, i));
+      const line = this.buffer.slice(start, i);
+      if (line.length <= MAX_LINE_LENGTH) {
+        lines.push(line);
+      }
       if (ch === 13) {
         if (this.buffer.charCodeAt(i + 1) === 10) {
           i++;
@@ -146,7 +155,10 @@ export class LineDecoder {
 
     if (isFinal) {
       if (start < this.buffer.length) {
-        lines.push(this.buffer.slice(start));
+        const tail = this.buffer.slice(start);
+        if (tail.length <= MAX_LINE_LENGTH) {
+          lines.push(tail);
+        }
       }
       this.buffer = '';
       this.scannedLength = 0;

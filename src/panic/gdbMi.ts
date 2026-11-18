@@ -148,10 +148,17 @@ export class GdbMiClient {
   private drainResponses(): void {
     for (;;) {
       const promptMatch = /(?:^|\n)\(gdb\)[^\S\n]*(?=\n|$)/.exec(this.stdoutBuffer);
-      if (!promptMatch) {
+      // '-gdb-exit' answers with a terminal ^exit record and no prompt —
+      // the record itself delimits the response.
+      const exitMatch = /(?:^|\n)\d*\^exit\b[^\n]*/.exec(this.stdoutBuffer);
+      let end: number;
+      if (exitMatch && (!promptMatch || exitMatch.index <= promptMatch.index)) {
+        end = exitMatch.index + exitMatch[0].length;
+      } else if (promptMatch) {
+        end = promptMatch.index + promptMatch[0].length;
+      } else {
         return;
       }
-      const end = promptMatch.index + promptMatch[0].length;
       const raw = this.stdoutBuffer.slice(0, end);
       this.stdoutBuffer = this.stdoutBuffer.slice(end).replace(/^\n/, '');
       const { output, asyncRecords } = splitAsyncRecords(raw);

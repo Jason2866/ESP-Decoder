@@ -59,6 +59,9 @@ export function parseLine(line: string, _debug?: Debug): GDBLine | ParsedGDBLine
     /(?:#\d+\s+)?((?:[^()]|\((?:[^()]|\([^()]*\))*\))+)\s+at\s+(.+):(\d+)/,
     // GDB `info line` response: Line 42 of "/path/file.cpp" starts at address 0x...
     /Line\s+(\d+)\s+of\s+"((?:\\.|[^"\\])*)"\s+starts\s+at\s+address\s+(0x[0-9a-f]+)/i,
+    // GDB `info line` without line info keeps the symbol in angle brackets:
+    // "No line number information available for address 0x400d1234 <func+0x10>"
+    /No line number information available for address\s+(0x[0-9a-f]+)\s+<([^>]+)>/i,
   ];
 
   for (const [i, pattern] of patterns.entries()) {
@@ -96,6 +99,12 @@ export function parseLine(line: string, _debug?: Debug): GDBLine | ParsedGDBLine
           file: file.replace(/\\(["\\])/g, '$1'),
           lineNumber,
         });
+      }
+      if (i === 8) {
+        const [, regAddr, symbol] = match;
+        // '<func+0x10>' -> 'func'; keep the bare symbol as the method.
+        const method = symbol.replace(/\+0x[0-9a-f]+$/i, '').replace(/\+\d+$/, '');
+        return normalizeParsedLine({ regAddr, method, file: '??', lineNumber: '??' });
       }
     }
   }
