@@ -944,6 +944,58 @@ describe('decodeCoredumpElf', () => {
     },
     60_000,
   );
+
+  // Coredump + firmware ELF fixtures from espressif/esp-coredump@master/tests
+  // (+ test_apps/built_apps). Each entry pairs a base64 coredump with the
+  // matching firmware ELF; 'bin' variants use the binary core format.
+  const coredumpCases: Array<{
+    label: string;
+    chip: string;
+    arch: 'riscv' | 'xtensa';
+    coredumpFile: string;
+    elfFile: string;
+  }> = [
+    { label: 'esp32c3', chip: 'esp32c3', arch: 'riscv', coredumpFile: 'coredump_esp32c3.b64', elfFile: 'esp32c3_coredump_firmware.elf' },
+    { label: 'esp32c3 bin', chip: 'esp32c3', arch: 'riscv', coredumpFile: 'coredump_esp32c3_bin.b64', elfFile: 'esp32c3_bin_coredump_firmware.elf' },
+    { label: 'esp32c6', chip: 'esp32c6', arch: 'riscv', coredumpFile: 'coredump_esp32c6.b64', elfFile: 'esp32c6_coredump_firmware.elf' },
+    { label: 'esp32s2', chip: 'esp32s2', arch: 'xtensa', coredumpFile: 'coredump_esp32s2.b64', elfFile: 'esp32s2_coredump_firmware.elf' },
+    { label: 'esp32s3', chip: 'esp32s3', arch: 'xtensa', coredumpFile: 'coredump_esp32s3.b64', elfFile: 'esp32s3_coredump_firmware.elf' },
+    { label: 'esp32s31', chip: 'esp32s31', arch: 'riscv', coredumpFile: 'coredump_esp32s31.b64', elfFile: 'esp32s31_coredump_firmware.elf' },
+    { label: 'esp32s31 null_write', chip: 'esp32s31', arch: 'riscv', coredumpFile: 'coredump_esp32s31_null_write.b64', elfFile: 'esp32s31_null_write_coredump_firmware.elf' },
+    { label: 'esp32s31 print_vars', chip: 'esp32s31', arch: 'riscv', coredumpFile: 'coredump_esp32s31_print_vars.b64', elfFile: 'esp32s31_print_vars_coredump_firmware.elf' },
+    { label: 'esp32p4', chip: 'esp32p4', arch: 'riscv', coredumpFile: 'coredump_esp32p4.b64', elfFile: 'esp32p4_coredump_firmware.elf' },
+    // NOTE: upstream's Xtensa 'coredump_bin.b64' is the legacy binary core
+    // format (no embedded ELF) which this decoder does not support — GDB
+    // requires an ELF core. The RISC-V '_bin' variants carry ELF cores and
+    // are covered above.
+  ];
+
+  it.each(coredumpCases)(
+    'decodes the $label coredump with its matching firmware ELF',
+    async ({ chip, arch, coredumpFile, elfFile }) => {
+      const coredumpPath = path.join(FIXTURES_DIR, coredumpFile);
+      const elfPath = path.join(FIXTURES_DIR, elfFile);
+      const gdbPath = arch === 'riscv' ? GDB_PATH : XTENSA_GDB_PATH;
+      if (
+        !fs.existsSync(coredumpPath) ||
+        !fs.existsSync(elfPath) ||
+        !gdbPath ||
+        !fs.existsSync(gdbPath)
+      ) {
+        return; // fixtures or toolchain unavailable — passes trivially
+      }
+
+      const result = await decodeCoredumpElf(coredumpPath, elfPath, gdbPath, chip);
+
+      expect(result).toBeDefined();
+      expect(result.threads.length).toBeGreaterThan(0);
+
+      const currentThread = result.threads.find((t) => t.isCurrent);
+      expect(currentThread).toBeDefined();
+      expect(currentThread!.decoded.stacktrace.length).toBeGreaterThan(0);
+    },
+    60_000,
+  );
 });
 
 describe('containsBase64Coredump', () => {
