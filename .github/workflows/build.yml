@@ -81,7 +81,7 @@ jobs:
           if [ -z "$RISCV_GDB" ] || [ -z "$XTENSA_GDB" ]; then
             echo "toolchain GDB binaries not found"; find toolchains -name '*gdb*' | head -20; exit 1
           fi
-          to_native() { if [ "${{ matrix.os }}" = "windows-latest" ]; then cygpath -w "$1"; else (cd "$(dirname "$1")" && pwd)/$(basename "$1"); fi; }
+          to_native() { if [ "${{ matrix.os }}" = "windows-latest" ]; then cygpath -w "$1"; else echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"; fi; }
           RISCV_GDB="$(to_native "$RISCV_GDB")"
           XTENSA_GDB="$(to_native "$XTENSA_GDB")"
           echo "ESP_RISCV_GDB=$RISCV_GDB" >> "$GITHUB_ENV"
