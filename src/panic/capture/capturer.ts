@@ -33,6 +33,18 @@ export interface CapturerEvent {
 export type CapturerEventName = 'eventDetected' | 'eventUpdated';
 export type CapturerListener = (event: CapturerEvent) => void;
 
+/** One framed block's own capture, kept so an event can revert to it when
+ * a merged occurrence splits out. */
+interface BlockSnapshot {
+  kind: CapturerEventKind;
+  lines: string[];
+  rawText: string;
+  lightweight: CapturerLightweight;
+  signature: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+}
+
 export interface CapturerOptions {
   quietPeriodMs?: number;
   dedupWindowMs?: number;
@@ -95,6 +107,14 @@ export class Capturer {
    * so a later incompatible revision can roll the contribution back when
    * the block splits out into its own event. */
   private readonly countedBlockIndex = new Map<number, string>();
+  /** Latest emitted capture snapshot per framed block. When a provisional
+   * cross-block merge is later split out, the event restores the display
+   * and dedup evidence of a remaining block instead of keeping the
+   * departed block's capture. */
+  private readonly blockSnapshots = new Map<number, BlockSnapshot>();
+  /** Event id → framed block ids still associated with it (insertion
+   * order), used to recompute timestamps and RA evidence on a split. */
+  private readonly eventBlocks = new Map<string, Set<number>>();
   /** `${blockId}:${previewText}` of the last published pending-line preview. */
   private lastPreviewKey = '';
   /** First observed return address per event, kept as dedup evidence even
@@ -263,6 +283,19 @@ export class Capturer {
       signature,
     };
 
+    // Remember this block's own capture — if it later merges into another
+    // event and splits out again, the event restores a remaining block's
+    // snapshot rather than keeping the departed capture.
+    this.blockSnapshots.set(block.id, {
+      kind,
+      lines: [...block.lines],
+      rawText,
+      lightweight: { ...lightweight, regs: { ...lightweight.regs } },
+      signature,
+      firstSeenAt: block.startedAt,
+      lastSeenAt: block.lastAt,
+    });
+
     // A re-emit of a block the framer already reported (provisional quiet
     // emit followed by continuation rows or the final emit) is a revision of
     // the same crash occurrence — update the snapshot in place. This bypasses
@@ -295,8 +328,13 @@ export class Capturer {
         countedEventId === undefined ? undefined : this.eventsById.get(countedEventId);
       if (countedEvent && countedEvent.count > 1) {
         countedEvent.count -= 1;
-        this.emit('eventUpdated', countedEvent);
       }
+      // The departed block may have supplied the display snapshot, RA
+      // evidence, or the extreme timestamps — recompute the event's state
+      // from the blocks that remain associated with it.
+      this.eventBlocks.get(revision.id)?.delete(block.id);
+      this.restoreOccurrenceState(revision, block.id);
+      this.emit('eventUpdated', revision);
     }
 
     const exact = this.findRecentBySignature(candidate);
@@ -342,6 +380,7 @@ export class Capturer {
     this.signatureIndex.set(next.signature, next.id);
     this.blockEventIndex.set(block.id, next.id);
     this.eventOwnerBlock.set(next.id, block.id);
+    this.eventBlocks.set(next.id, new Set([block.id]));
     this.displayBlockIndex.set(next.id, block.id);
     this.trimEvents();
     this.emit('eventDetected', next);
@@ -424,6 +463,72 @@ export class Capturer {
       this.displayBlockIndex.set(existing.id, blockId);
     }
     this.emit('eventUpdated', existing);
+  }
+
+  /**
+   * After a merged block splits out, revert the event to the state implied
+   * by its remaining occurrences: extreme timestamps and RA dedup evidence
+   * are recomputed from their snapshots, and when the departed block
+   * supplied the displayed capture the display falls back to the event
+   * owner's block (or the earliest remaining block) so the event no longer
+   * presents another crash's lines/registers/backtrace.
+   */
+  private restoreOccurrenceState(event: CapturerEvent, departedBlockId: number): void {
+    const blockIds = this.eventBlocks.get(event.id);
+    if (!blockIds || blockIds.size === 0) {
+      return;
+    }
+    const snaps = [...blockIds]
+      .map((id) => ({ id, snap: this.blockSnapshots.get(id) }))
+      .filter((e): e is { id: number; snap: BlockSnapshot } => e.snap !== undefined);
+    if (snaps.length === 0) {
+      return;
+    }
+
+    event.firstSeenAt = Math.min(...snaps.map((e) => e.snap.firstSeenAt));
+    event.lastSeenAt = Math.max(...snaps.map((e) => e.snap.lastSeenAt));
+
+    // First observed RA among the remaining blocks, in merge order — the
+    // departed block's return address must not keep influencing dedup.
+    let ra: number | undefined;
+    for (const { snap } of snaps) {
+      const v = snap.lightweight.regs?.RA;
+      if (v !== undefined) {
+        ra = v;
+        break;
+      }
+    }
+    if (ra === undefined) {
+      this.raEvidence.delete(event.id);
+    } else {
+      this.raEvidence.set(event.id, ra);
+    }
+
+    if (this.displayBlockIndex.get(event.id) !== departedBlockId) {
+      return;
+    }
+    // Restore the richest remaining capture — the same completeness rule
+    // mergeIntoExisting applied when the display was last chosen.
+    let resume = snaps[0];
+    for (const e of snaps) {
+      if (
+        shouldPreferCandidate(
+          { rawText: resume.snap.rawText, lightweight: resume.snap.lightweight },
+          { rawText: e.snap.rawText, lightweight: e.snap.lightweight },
+        )
+      ) {
+        resume = e;
+      }
+    }
+    event.kind = resume.snap.kind;
+    event.lines = [...resume.snap.lines];
+    event.rawText = resume.snap.rawText;
+    event.lightweight = {
+      ...resume.snap.lightweight,
+      regs: { ...resume.snap.lightweight.regs },
+    };
+    this.reindexSignature(event, resume.snap.signature);
+    this.displayBlockIndex.set(event.id, resume.id);
   }
 
   private findRecentBySignature(candidate: {
@@ -514,6 +619,12 @@ export class Capturer {
     existing.count += 1;
     this.blockEventIndex.set(blockId, existing.id);
     this.countedBlockIndex.set(blockId, existing.id);
+    let blocks = this.eventBlocks.get(existing.id);
+    if (!blocks) {
+      blocks = new Set();
+      this.eventBlocks.set(existing.id, blocks);
+    }
+    blocks.add(blockId);
     existing.lastSeenAt = Math.max(existing.lastSeenAt, candidate.lastSeenAt);
 
     if (preferCandidate) {
@@ -585,6 +696,9 @@ export class Capturer {
       this.raEvidence.delete(removed.id);
       this.displayBlockIndex.delete(removed.id);
       this.eventOwnerBlock.delete(removed.id);
+      const removedBlocks = this.eventBlocks.get(removed.id);
+      this.eventBlocks.delete(removed.id);
+      removedBlocks?.forEach((blockId) => this.blockSnapshots.delete(blockId));
       for (const [blockId, eventId] of this.blockEventIndex) {
         if (eventId === removed.id) {
           this.blockEventIndex.delete(blockId);

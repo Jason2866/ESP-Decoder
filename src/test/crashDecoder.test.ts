@@ -1615,6 +1615,61 @@ describe('Capturer – block revisions', () => {
     capturer.dispose();
   });
 
+  it('restores the remaining block’s capture when a display-owning merge splits', async () => {
+    const capturer = new Capturer({ quietPeriodMs: 50, dedupWindowMs: 60_000 });
+    capturer.on('eventDetected', () => {});
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    // Event A: two-frame backtrace with RA — becomes its own event.
+    capturer.push(
+      Buffer.from(
+        'assert failed: shared_reason\n' +
+          'Backtrace: 0x400d1000:0x3ffb1000 0x400d2000:0x3ffb2000\n' +
+          'RA      : 0x11111111\n',
+        'utf8',
+      ),
+    );
+    capturer.flush();
+    await sleep(80);
+    expect(capturer.getEvents()).toHaveLength(1);
+
+    // Block B: compatible prefix plus a third frame — richer, so it takes
+    // over the display snapshot via the fingerprint merge (count=2).
+    capturer.push(
+      Buffer.from(
+        'assert failed: shared_reason\n' +
+          'Backtrace: 0x400d1000:0x3ffb1000 0x400d2000:0x3ffb2000 0x400d3000:0x3ffb3000\n',
+        'utf8',
+      ),
+    );
+    await sleep(120);
+    expect(capturer.getEvents()).toHaveLength(1);
+    expect(capturer.getEvents()[0].count).toBe(2);
+    expect(capturer.getEvents()[0].rawText).toContain('0x400d3000');
+
+    // B revises with a conflicting RA — the provisional merge was wrong.
+    // B splits out AND event A must revert to its own capture: lines,
+    // registers, backtrace, RA evidence, and count all roll back.
+    capturer.push(Buffer.from('RA      : 0x99999999\n', 'utf8'));
+    await sleep(120);
+    capturer.push(Buffer.from('Rebooting...\n', 'utf8'));
+    capturer.flush();
+    await sleep(80);
+
+    const events = capturer.getEvents();
+    expect(events).toHaveLength(2);
+    const [a, b] = events;
+    expect(a.count).toBe(1);
+    expect(a.rawText).toContain('RA      : 0x11111111');
+    expect(a.rawText).not.toContain('0x400d3000');
+    expect(a.lightweight.regs?.RA).toBe(0x11111111);
+    expect(a.lightweight.backtraceAddrs).toEqual([0x400d1000, 0x400d2000]);
+    expect(b.count).toBe(1);
+    expect(b.lightweight.regs?.RA).toBe(0x99999999);
+    expect(b.lightweight.backtraceAddrs).toContain(0x400d3000);
+    capturer.dispose();
+  });
+
   it('preserves the richer display snapshot when a shorter duplicate is revised', async () => {
     const capturer = new Capturer({ quietPeriodMs: 50, dedupWindowMs: 60_000 });
     capturer.on('eventDetected', () => {});
