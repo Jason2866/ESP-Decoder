@@ -30,40 +30,42 @@ jobs:
           node-version: 24
       - name: Install NPM
         run: npm install
-      - name: Cache ESP toolchains
+      - name: Cache ESP GDB toolchains
         id: toolchain-cache
         uses: actions/cache@v4
         with:
           path: toolchains
-          key: esp-toolchains-${{ matrix.os }}-esp-16.2.0_20261109
+          key: esp-gdb-esp-gdb-v17.1_20260402-${{ matrix.os }}
       # The decode tests resolve GDB via ESP_RISCV_GDB / ESP_XTENSA_GDB (or
-      # PlatformIO's packages dir). Download the matching crosstool-NG
-      # release assets so the real-GDB tests run instead of skipping.
-      - name: Download ESP toolchains
+      # PlatformIO's packages dir). The crosstool-NG release ships only
+      # GCC/binutils — ESP GDB lives in espressif/binutils-gdb. Download the
+      # matching gdb-only assets so the real-GDB tests run instead of skipping.
+      - name: Download ESP GDB toolchains
         if: steps.toolchain-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          VER=16.2.0_20261109
-          BASE="https://github.com/espressif/crosstool-NG/releases/download/esp-${VER}"
+          VER=17.1_20260402
+          TAG=esp-gdb-v${VER}
+          BASE="https://github.com/espressif/binutils-gdb/releases/download/${TAG}"
           case "${{ matrix.os }}" in
             ubuntu-latest) TRIPLE=x86_64-linux-gnu; EXT=tar.gz ;;
             macos-latest)
-              if [ "$(uname -m)" = "arm64" ]; then TRIPLE=aarch64-apple-darwin; else TRIPLE=x86_64-apple-darwin; fi
+              if [ "$(uname -m)" = "arm64" ]; then TRIPLE=aarch64-apple-darwin24.5; else TRIPLE=x86_64-apple-darwin24.5; fi
               EXT=tar.gz ;;
             windows-latest) TRIPLE=x86_64-w64-mingw32; EXT=zip ;;
             *) echo "unsupported os"; exit 1 ;;
           esac
           mkdir -p toolchains/dl
           for pkg in riscv32-esp-elf xtensa-esp-elf; do
-            curl -fL --retry 3 -o "toolchains/dl/${pkg}.${EXT}" \
-              "${BASE}/${pkg}-${VER}-${TRIPLE}.${EXT}"
+            curl -fL --retry 3 -o "toolchains/dl/${pkg}-gdb.${EXT}" \
+              "${BASE}/${pkg}-gdb-${VER}-${TRIPLE}.${EXT}"
             if [ "$EXT" = "zip" ]; then
               # Git Bash ships GNU tar (no zip support); use the bsdtar that
               # ships with Windows, which handles .zip archives.
-              /c/Windows/System32/tar.exe -xf "toolchains/dl/${pkg}.${EXT}" -C toolchains
+              /c/Windows/System32/tar.exe -xf "toolchains/dl/${pkg}-gdb.${EXT}" -C toolchains
             else
-              tar -xf "toolchains/dl/${pkg}.${EXT}" -C toolchains
+              tar -xf "toolchains/dl/${pkg}-gdb.${EXT}" -C toolchains
             fi
           done
           rm -rf toolchains/dl
