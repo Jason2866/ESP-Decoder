@@ -60,8 +60,11 @@ export function parseLine(line: string, _debug?: Debug): GDBLine | ParsedGDBLine
     // GDB `info line` response: Line 42 of "/path/file.cpp" starts at address 0x...
     /Line\s+(\d+)\s+of\s+"((?:\\.|[^"\\])*)"\s+starts\s+at\s+address\s+(0x[0-9a-f]+)/i,
     // GDB `info line` without line info keeps the symbol in angle brackets:
-    // "No line number information available for address 0x400d1234 <func+0x10>"
-    /No line number information available for address\s+(0x[0-9a-f]+)\s+<([^>]+)>/i,
+    // "No line number information available for address 0x400d1234 <func+0x10>".
+    // The symbol may itself contain angle brackets (template names like
+    // <ns::worker<int>()+16>), so allow one level of nesting and match the
+    // record's outer closing bracket.
+    /No line number information available for address\s+(0x[0-9a-f]+)\s+<((?:[^<>]|<[^<>]*>)*)>/i,
   ];
 
   for (const [i, pattern] of patterns.entries()) {

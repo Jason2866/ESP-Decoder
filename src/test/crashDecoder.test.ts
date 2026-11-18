@@ -61,11 +61,12 @@ import {
   LineDecoder,
   GdbMiClient,
   CrashFramer,
+  Capturer,
   parseRiscvPanicOutput,
   extractPrintedBacktraceAddrs,
   printedBacktraceApplies,
 } from '../panic/index.js';
-import type { ParsedGDBLine } from '../panic/index.js';
+import type { CapturerEvent, ParsedGDBLine } from '../panic/index.js';
 
 // ---------------------------------------------------------------------------
 // Fixture paths
@@ -1353,6 +1354,169 @@ describe('CrashCapturer – pending tail stays buffered', () => {
   }, 10_000);
 });
 
+describe('Capturer – block revisions', () => {
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('keeps count at 1 when a provisional block is enriched and finalized', async () => {
+    const capturer = new Capturer({ quietPeriodMs: 50 });
+    const detected: CapturerEvent[] = [];
+    const updates: CapturerEvent[] = [];
+    capturer.on('eventDetected', (e) => detected.push(e));
+    capturer.on('eventUpdated', (e) => updates.push(e));
+
+    capturer.push(
+      Buffer.from('assert failed: revision_count\nBacktrace: 0x42000001:0x3ffb0001\n', 'utf8'),
+    );
+    // Quiet timer emits the complete block provisionally.
+    await sleep(120);
+    expect(detected).toHaveLength(1);
+    expect(detected[0].count).toBe(1);
+
+    // 'Rebooting...' finalizes the SAME framed block — a revision, not a
+    // second occurrence.
+    capturer.push(Buffer.from('Rebooting...\n', 'utf8'));
+    expect(updates).toHaveLength(1);
+    expect(updates[0].id).toBe(detected[0].id);
+    expect(updates[0].count).toBe(1);
+    expect(updates[0].rawText).toContain('Rebooting...');
+    capturer.dispose();
+  });
+
+  it('updates the same event even after the dedup window elapsed', async () => {
+    const capturer = new Capturer({ quietPeriodMs: 50, dedupWindowMs: 1 });
+    const detected: CapturerEvent[] = [];
+    const updates: CapturerEvent[] = [];
+    capturer.on('eventDetected', (e) => detected.push(e));
+    capturer.on('eventUpdated', (e) => updates.push(e));
+
+    capturer.push(
+      Buffer.from('assert failed: slow_dump\nBacktrace: 0x42000001:0x3ffb0001\n', 'utf8'),
+    );
+    await sleep(120);
+    expect(detected).toHaveLength(1);
+
+    // Wait far beyond the 1 ms dedup window, then finalize the same block.
+    await sleep(20);
+    capturer.push(Buffer.from('Rebooting...\n', 'utf8'));
+    expect(detected).toHaveLength(1);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].count).toBe(1);
+    capturer.dispose();
+  });
+
+  it('refreshes the detected kind when late register lines flip architecture', async () => {
+    const capturer = new Capturer({ quietPeriodMs: 50 });
+    const detected: CapturerEvent[] = [];
+    const updates: CapturerEvent[] = [];
+    capturer.on('eventDetected', (e) => detected.push(e));
+    capturer.on('eventUpdated', (e) => updates.push(e));
+
+    // Provisional emit before any RISC-V register lines: 'assert failed:'
+    // classifies the block as xtensa.
+    capturer.push(
+      Buffer.from('assert failed: late_regs\nBacktrace: 0x42000001:0x3ffb0001\n', 'utf8'),
+    );
+    await sleep(120);
+    expect(detected).toHaveLength(1);
+    expect(detected[0].kind).toBe('xtensa');
+
+    // Register lines arrive as continuation rows; the final emit reclassifies
+    // the same block as riscv — still one event, kind updated in place.
+    capturer.push(
+      Buffer.from('MEPC    : 0x42004abc  MCAUSE  : 0x00000002\n', 'utf8'),
+    );
+    await sleep(120);
+    capturer.push(Buffer.from('Rebooting...\n', 'utf8'));
+    expect(detected).toHaveLength(1);
+    expect(updates.length).toBeGreaterThanOrEqual(1);
+    expect(updates.at(-1)?.kind).toBe('riscv');
+    expect(updates.at(-1)?.count).toBe(1);
+    capturer.dispose();
+  });
+
+  it('previews a complete pending Backtrace line without consuming its bytes', async () => {
+    const capturer = new Capturer({ quietPeriodMs: 50 });
+    const detected: CapturerEvent[] = [];
+    const updates: CapturerEvent[] = [];
+    capturer.on('eventDetected', (e) => detected.push(e));
+    capturer.on('eventUpdated', (e) => updates.push(e));
+
+    // The dump completes via 'Stack memory:' data; the trailing 'Backtrace:'
+    // line arrives WITHOUT its terminator and must still preview into the
+    // provisional event — its bytes stay buffered for the real line.
+    capturer.push(
+      Buffer.from(
+        "Core 0 panic'ed (Illegal instruction)\n" +
+          'Core 0 register dump:\n' +
+          'MEPC    : 0x42004abc  MCAUSE  : 0x00000002\n' +
+          'Stack memory:\n' +
+          '3fc8f2d0: 0x00000000 0x00000000 0x00000000 0x00000000\n' +
+          'Backtrace: 0x42004abc:0x3fc8f2d0 0x42000001:0x3fc8f2e0',
+        'utf8',
+      ),
+    );
+    await sleep(120);
+    expect(detected).toHaveLength(1);
+    expect(detected[0].rawText).toContain('Backtrace: 0x42004abc:0x3fc8f2d0');
+    expect(detected[0].lightweight.regs?.MEPC).toBe(0x42004abc);
+
+    // The terminator completes the SAME logical line — a revision, not a
+    // new event and not a duplicated line.
+    capturer.push(Buffer.from('\n', 'utf8'));
+    await sleep(120);
+    expect(detected).toHaveLength(1);
+    expect(updates.length).toBeGreaterThanOrEqual(1);
+    expect(updates.at(-1)?.rawText.split('Backtrace:').length).toBe(2);
+    capturer.dispose();
+  });
+
+  it('retains the first observed RA as dedup evidence without displaying it', async () => {
+    const capturer = new Capturer({ quietPeriodMs: 50 });
+    const detected: CapturerEvent[] = [];
+    capturer.on('eventDetected', (e) => detected.push(e));
+
+    const dump = (raLine: string | undefined, stackRows: number) =>
+      "Core 0 panic'ed (Illegal instruction)\n" +
+      'Core 0 register dump:\n' +
+      'MEPC    : 0x42004abc  SP      : 0x3fc80000\n' +
+      'MCAUSE  : 0x00000002  MTVAL   : 0x00000000\n' +
+      (raLine ? `${raLine}\n` : '') +
+      'Stack memory:\n' +
+      Array.from(
+        { length: stackRows },
+        (_, i) =>
+          `3fc8${(i * 0x10).toString(16).padStart(4, '0')}: 0x00000000 0x00000000 0x00000000 0x00000000`,
+      ).join('\n') +
+      '\nBacktrace: 0x42004abc:0x3fc80000\n';
+
+    const flush = async () => {
+      capturer.flush();
+      await sleep(80);
+    };
+
+    // Event A: no RA reported. Event B: same crash + RA, shorter capture —
+    // merges without becoming the display snapshot, RA kept as evidence.
+    capturer.push(Buffer.from(dump(undefined, 3), 'utf8'));
+    await flush();
+    capturer.push(Buffer.from(dump('RA      : 0x11111111', 1), 'utf8'));
+    await flush();
+    expect(detected).toHaveLength(1);
+    // getEvents() reflects merges; emitted snapshots are frozen at emit time.
+    expect(capturer.getEvents()).toHaveLength(1);
+    expect(capturer.getEvents()[0].count).toBe(2);
+    // Display snapshot still has no RA — evidence stays internal.
+    expect(capturer.getEvents()[0].lightweight.regs?.RA).toBeUndefined();
+
+    // Event C: same crash but a DIFFERENT RA — must not merge into the
+    // event whose retained evidence says 0x11111111.
+    capturer.push(Buffer.from(dump('RA      : 0x99999999', 1), 'utf8'));
+    await flush();
+    expect(capturer.getEvents()).toHaveLength(2);
+    expect(capturer.getEvents()[1].count).toBe(1);
+    capturer.dispose();
+  });
+});
+
 describe('GdbMiClient – close()', () => {
   const isWindows = process.platform === 'win32';
   let tmpDir: string;
@@ -1427,6 +1591,19 @@ describe('parseLine – symbol without line info', () => {
     expect(line.file).toBe('??');
     expect(line.lineNumber).toBe('??');
   });
+
+  it('captures template names through their inner closing bracket', () => {
+    const parsed = parseLine(
+      'No line number information available for address 0x400d5678 <ns::worker<int>()+16>',
+    );
+    expect(parsed).toBeDefined();
+    const line = parsed as ParsedGDBLine;
+    // Trailing '+16' offset stripped; the template's inner '>' must not
+    // truncate the symbol at 'ns::worker<int'.
+    expect(line.method).toContain('ns::worker<int>');
+    expect(line.file).toBe('??');
+    expect(line.lineNumber).toBe('??');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1462,10 +1639,44 @@ readline.createInterface({ input: process.stdin }).on('line', () => {
 
   it.skipIf(isWindows)('settles a pending command on ^exit', async () => {
     const client = new GdbMiClient(fakeGdbPath, []);
-    await client.drainHandshake();
-    await expect(client.sendCommand('-gdb-exit')).resolves.toContain('^exit');
-    client.close();
+    try {
+      await client.drainHandshake();
+      await expect(client.sendCommand('-gdb-exit')).resolves.toContain('^exit');
+    } finally {
+      client.close();
+    }
   }, 15_000);
+
+  it.skipIf(isWindows)(
+    'settles the terminal command when the child exits right after ^exit',
+    async () => {
+      // The child answers '-gdb-exit' with '^exit' and exits immediately —
+      // the 'exit' event can race the final stdout chunk, so the response
+      // must still settle the command before pending work is rejected.
+      const exitGdbPath = path.join(tmpDir, 'fake-gdb-exit.cjs');
+      fs.writeFileSync(
+        exitGdbPath,
+        `#!/usr/bin/env node
+const readline = require('readline');
+process.stdout.write('Fake GNU gdb\\n(gdb) ');
+readline.createInterface({ input: process.stdin }).on('line', (line) => {
+  process.stdout.write('^exit\\n', () => {
+    if (line.includes('-gdb-exit')) { process.exit(0); }
+  });
+});
+`,
+        { mode: 0o755 },
+      );
+      const client = new GdbMiClient(exitGdbPath, []);
+      try {
+        await client.drainHandshake();
+        await expect(client.sendCommand('-gdb-exit')).resolves.toContain('^exit');
+      } finally {
+        client.close();
+      }
+    },
+    15_000,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1553,6 +1764,53 @@ describe('CrashFramer – provisional quiet flush', () => {
     expect(out).toHaveLength(1);
     expect(out[0].lines[0]).toBe('assert failed: second');
   });
+
+  it('accepts section headers as continuation lines of a multi-core dump', () => {
+    const framer = new CrashFramer(500);
+    framer.pushLine("Core 0 panic'ed (Store access fault)", 0);
+    framer.pushLine('Backtrace: 0x42000001:0x3ffb0001', 10);
+    expect(framer.flush(1000, true)).toHaveLength(1);
+
+    // The second core's dump belongs to the same crash — its header and
+    // rows must join the still-open block instead of closing it.
+    expect(framer.pushLine('Core 1 register dump:', 1100)).toEqual([]);
+    expect(framer.pushLine('MEPC    : 0x42100001', 1110)).toEqual([]);
+    const out = framer.flush(2000, true);
+    expect(out).toHaveLength(1);
+    expect(out[0].lines).toContain('Core 1 register dump:');
+    expect(out[0].lines).toContain('MEPC    : 0x42100001');
+  });
+
+  it('emits pending continuation rows when an unrelated line closes the block', () => {
+    const framer = new CrashFramer(500);
+    framer.pushLine('assert failed: dirty_close', 0);
+    framer.pushLine('Backtrace: 0x42000001:0x3ffb0001', 10);
+    expect(framer.flush(1000, true)).toHaveLength(1);
+
+    // Continuation row arrives (dirty, not yet emitted), then unrelated
+    // output closes the block — the row must reach the decoder.
+    expect(framer.pushLine('  40800000: 0x42000000 0x42000001', 1100)).toEqual([]);
+    const out = framer.pushLine('normal log line', 1200);
+    expect(out).toHaveLength(1);
+    expect(out[0].lines).toContain('  40800000: 0x42000000 0x42000001');
+  });
+
+  it('starts a fresh block for a crash-start line that also matches continuation', () => {
+    const framer = new CrashFramer(500);
+    framer.pushLine('assert failed: first', 0);
+    framer.pushLine('Backtrace: 0x42000001:0x3ffb0001', 10);
+    expect(framer.flush(1000, true)).toHaveLength(1);
+
+    // 'assert failed:' is a crash start even though the text contains
+    // 'Backtrace:' — it must not be appended to the open block.
+    expect(
+      framer.pushLine('assert failed: second crash Backtrace: 0x42000009:0x3ffb0009', 1100),
+    ).toEqual([]);
+    framer.pushLine('Backtrace: 0x42000009:0x3ffb0009', 1110);
+    const out = framer.flush(2000, true);
+    expect(out).toHaveLength(1);
+    expect(out[0].lines[0]).toBe('assert failed: second crash Backtrace: 0x42000009:0x3ffb0009');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1570,6 +1828,35 @@ describe('parseRiscvPanicOutput – bare-hex stack words', () => {
     const info = parseRiscvPanicOutput(text);
     expect(info.stackBaseAddr).toBe(0x3fc8f2d0);
     expect(info.stackData.length).toBe(32);
+  });
+
+  it('stops accepting stack rows once Backtrace: is reached', () => {
+    const text = [
+      'Core 0 register dump:',
+      'MEPC    : 0x42004abc  MCAUSE  : 0x00000002',
+      'Stack memory:',
+      '3fc8f2d0: 00000000 00000000 00000000 00000000',
+      'Backtrace: 0x42004abc:0x3fc8f2d0',
+      // Looks like a stack row but follows the Backtrace — must be ignored.
+      '3fc8f310: 11111111 11111111 11111111 11111111',
+    ].join('\n');
+    const result = parseRiscvPanicDetailed(text);
+    expect(result.stackDump).toHaveLength(1);
+    expect(result.stackDump[0].data).toEqual([0, 0, 0, 0]);
+  });
+
+  it('rejects rows with glued or truncated stack-word tokens', () => {
+    const text = [
+      'Core 0 register dump:',
+      'MEPC    : 0x42004abc  MCAUSE  : 0x00000002',
+      'Stack memory:',
+      // '000000000x1111' glues two words without whitespace — invalid row.
+      '3fc8f2d0: 000000000x1111 00000000',
+      // Trailing non-hex junk invalidates the whole row.
+      '3fc8f2f0: 00000000 deadbeef xyz',
+    ].join('\n');
+    const result = parseRiscvPanicDetailed(text);
+    expect(result.stackDump).toHaveLength(0);
   });
 });
 
@@ -1608,6 +1895,19 @@ describe('extractPrintedBacktraceAddrs – multi-core', () => {
   it('collects every Backtrace line when no core headers exist', () => {
     const single = 'Backtrace: 0x42000001:0x3ffb0001\nBacktrace: 0x42000002:0x3ffb0002';
     expect(extractPrintedBacktraceAddrs(single, 0)).toEqual([0x42000001, 0x42000002]);
+  });
+
+  it('attributes backtraces per core with CR-only line endings', () => {
+    const crText = [
+      'Core 0 register dump:',
+      'MEPC    : 0x42001000  MCAUSE  : 0x00000002',
+      'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002',
+      'Core 1 register dump:',
+      'MEPC    : 0x42101000  MCAUSE  : 0x00000002',
+      'Backtrace: 0x42100001:0x3ffb1001 0x42100002:0x3ffb1002',
+    ].join('\r');
+    expect(extractPrintedBacktraceAddrs(crText, 0)).toEqual([0x42000001, 0x42000002]);
+    expect(extractPrintedBacktraceAddrs(crText, 1)).toEqual([0x42100001, 0x42100002]);
   });
 });
 
@@ -1709,3 +2009,82 @@ describe('decodeCrash – raw fallback core isolation', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// decodeCrash – raw fallback selects the panicking core's data
+// ---------------------------------------------------------------------------
+
+describe('decodeCrash – raw fallback selected-core extraction', () => {
+  const dumpSection = (core: number, mepc: string, mcause: string, bt: string) =>
+    [
+      `Core  ${core} register dump:`,
+      `MEPC    : ${mepc}  RA      : 0x${(parseInt(mepc, 16) + 1).toString(16)}  SP      : 0x3fc8${core}000`,
+      `MCAUSE  : ${mcause}  MTVAL   : 0x00000000`,
+      '',
+      'Stack memory:',
+      `3fc8${core}000: 0x00000000 0x00000000 0x00000000 0x00000000`,
+      '',
+      bt,
+    ].join('\n');
+
+  const makeTwoCoreText = (core0First: boolean) => {
+    const core0 = dumpSection(0, '0x42000001', '0x00000007', 'Backtrace: 0x42000001:0x3ffb0001 0x42000009:0x3ffb0009');
+    const core1 = dumpSection(1, '0x42100001', '0x0000000b', 'Backtrace: 0x42100001:0x3ffb1001 0x42100009:0x3ffb1009');
+    return [
+      "Core  1 panic'ed (Store access fault). Exception was unhandled.",
+      '',
+      core0First ? core0 : core1,
+      '',
+      core0First ? core1 : core0,
+    ].join('\n');
+  };
+
+  function makeEvent(rawText: string, kind: 'xtensa' | 'riscv' | 'unknown' = 'riscv'): CrashEvent {
+    return {
+      id: 'test-selected-core',
+      kind,
+      lines: rawText.split('\n').filter((l) => l.trim().length > 0),
+      rawText,
+      timestamp: Date.now(),
+    };
+  }
+
+  for (const core0First of [true, false]) {
+    it(`extracts only core 1's registers and PCs (core0 ${core0First ? 'first' : 'second'})`, async () => {
+      const decoded = await decodeCrash(
+        makeEvent(makeTwoCoreText(core0First)),
+        ELF_PATH,
+        '/nonexistent/riscv32-esp-elf-gdb',
+        'esp32s31',
+      );
+      expect(decoded.faultInfo?.coreId).toBe(1);
+      expect(decoded.regs?.['MEPC']).toBe(0x42100001);
+      expect(decoded.regs?.['MCAUSE']).toBe(0xb);
+      const addresses = decoded.stacktrace.map((f) => f.address.toLowerCase());
+      expect(addresses).toEqual(['0x42100001', '0x42100009']);
+      expect(addresses).not.toContain('0x42000001');
+      expect(addresses).not.toContain('0x42000009');
+    });
+  }
+
+  it('preserves unsectioned Xtensa registers and printed PC in the raw fallback', async () => {
+    // No 'Core N register dump:' sections — the missing-dump guard must
+    // not suppress this capture's own registers and backtrace.
+    const text = [
+      "Guru Meditation Error: Core  0 panic'ed (LoadProhibited). Exception was unhandled.",
+      'PC      : 0x400d1234  PS      : 0x00060030  A0      : 0x3ffb0001',
+      'EXCVADDR: 0x3ffb0004  EXCCAUSE: 0x0000000c',
+      'Backtrace: 0x400d1234:0x3ffb0001 0x400d5678:0x3ffb0002',
+    ].join('\n');
+    const decoded = await decodeCrash(
+      makeEvent(text, 'xtensa'),
+      ELF_PATH,
+      '/nonexistent/xtensa-esp-elf-gdb',
+      'esp32',
+    );
+    expect(decoded.regs?.['PC']).toBe(0x400d1234);
+    expect(decoded.regs?.['EXCVADDR']).toBe(0x3ffb0004);
+    const addresses = decoded.stacktrace.map((f) => f.address.toLowerCase());
+    expect(addresses).toContain('0x400d1234');
+    expect(addresses).toContain('0x400d5678');
+  });
+});

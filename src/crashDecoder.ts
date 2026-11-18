@@ -21,6 +21,7 @@ import {
   createCapturer,
   parseESP32PanicOutput,
   parseRiscvPanicDetailed,
+  extractPrintedBacktraceAddrs,
 } from './panic';
 import type {
   Capturer,
@@ -256,7 +257,16 @@ export async function decodeCrash(
     const isEsp8266Crash = crashEvent.kind === 'xtensa'
       && />>>stack>>>/.test(crashEvent.rawText)
       && !/Backtrace:/i.test(crashEvent.rawText);
-    toolPath = autoDetectPioToolPath(resolvedArch, log, isEsp8266Crash ? 'esp8266' : undefined);
+    // A configured chip/IDF target name lets discovery prefer the
+    // chip-specific GDB binary; family-only settings ('riscv', 'xtensa',
+    // 'auto') keep the generic lookup, and the ESP8266 text hint still
+    // applies when no chip is configured.
+    const configuredChip = configuredChipName(targetArch);
+    toolPath = autoDetectPioToolPath(
+      resolvedArch,
+      log,
+      configuredChip ?? (isEsp8266Crash ? 'esp8266' : undefined),
+    );
     if (!toolPath) {
       write('[ESP Decoder] No toolPath (GDB/addr2line) found — returning raw decode');
       const raw = createRawDecode(crashEvent.rawText);
@@ -786,6 +796,16 @@ async function detectElfArch(
  * decoder target — all RISC-V chips share the same generic ILP32 register
  * layout and decoder (mirroring esp-idf-panic-decoder's single target).
  */
+/**
+ * Normalized chip name when the configured targetArch is a known chip/IDF
+ * target (e.g. 'esp32s3', 'esp32c6'); undefined for family names ('xtensa',
+ * 'riscv', 'auto') and unrecognized values.
+ */
+function configuredChipName(targetArch: string | undefined): string | undefined {
+  const normalized = targetArch?.trim().toLowerCase();
+  return normalized && KNOWN_CHIPS.includes(normalized) ? normalized : undefined;
+}
+
 function resolveTargetArch(
   configArch: string | undefined,
   crashKind: 'xtensa' | 'riscv' | 'unknown'
@@ -907,6 +927,41 @@ function stringifyAddrLocation(location: any): string {
     return location.regAddr;
   }
   return String(location);
+}
+
+/**
+ * Reduce a RISC-V panic capture to the section of the selected (panicking)
+ * core: the 'Core N register dump:' block named by the panic header, or the
+ * first dump when no core is named. Returns '' when sections exist but the
+ * selected core's section is missing — never another core's section.
+ * Unsectioned captures are returned unchanged.
+ */
+function extractRiscvCoreSection(crashText: string): string {
+  try {
+    const parsed = parseRiscvPanicDetailed(crashText);
+    if (parsed.regDumps.length === 0) {
+      return crashText;
+    }
+    const selectedCore = parsed.panicCoreId ?? parsed.regDumps[0].coreId;
+    const out: string[] = [];
+    // Lines before the first dump header (panic/assert preamble) belong to
+    // the panicking core — the selected one.
+    let currentCore: number | undefined = selectedCore;
+    let captured = false;
+    for (const line of crashText.split('\n')) {
+      const header = line.match(/^\s*Core\s+(\d+)\s+register dump:/);
+      if (header) {
+        currentCore = parseInt(header[1], 10);
+      }
+      if (currentCore === selectedCore) {
+        out.push(line);
+        captured = true;
+      }
+    }
+    return captured ? out.join('\n') : '';
+  } catch {
+    return crashText;
+  }
 }
 
 /**
@@ -1271,8 +1326,9 @@ async function enhanceWithHeuristicStackFrames(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const write = (msg: string) => log?.appendLine(msg);
 
-  // Extract ALL candidate code addresses from the crash text
-  const candidateAddrs = extractAllCandidateAddresses(crashEvent.rawText);
+  // Extract candidate code addresses only from the selected core's section —
+  // a multi-core dump must not resolve another core's addresses as frames.
+  const candidateAddrs = extractAllCandidateAddresses(extractRiscvCoreSection(crashEvent.rawText));
 
   if (candidateAddrs.length === 0) {
     return;
@@ -1736,54 +1792,119 @@ function parseRegisters(text: string): Record<string, number> {
  * Create a raw (unparsed) decode result as fallback.
  */
 /**
- * True when a RISC-V panic header names a core ('Core N panic'ed') but the
- * capture contains no 'Core N register dump:' section for it — any
- * register/stack data present belongs to a different core.
+ * Parse sectioned RISC-V dumps only when the capture really is RISC-V:
+ * 'Core N register dump:' headers are shared with Xtensa output, so the
+ * result is trusted only when a RISC-V register (MEPC/MCAUSE/MTVAL) or a
+ * 'Stack memory:' segment was actually parsed.
  */
-function riscvNamedCoreDumpMissing(crashText: string): boolean {
+function parseRiscvSections(crashText: string) {
   try {
     const parsed = parseRiscvPanicDetailed(crashText);
-    if (parsed.panicCoreId === undefined) {
-      return false;
+    if (parsed.regDumps.length === 0) {
+      return undefined;
     }
-    return !parsed.regDumps.some((d) => d.coreId === parsed.panicCoreId);
+    const hasRiscvRegs = parsed.regDumps.some(
+      (d) =>
+        d.regs.MEPC !== undefined ||
+        d.regs.MCAUSE !== undefined ||
+        d.regs.MTVAL !== undefined,
+    );
+    return hasRiscvRegs || parsed.stackDump.length > 0 ? parsed : undefined;
   } catch {
-    return false;
+    return undefined;
+  }
+}
+
+/** Safe Xtensa parse for the raw fallback; undefined when it yields nothing. */
+function parseXtensaSections(crashText: string) {
+  try {
+    const parsed = parseESP32PanicOutput(crashText);
+    return Object.keys(parsed.regs).length > 0 || parsed.backtraceAddrs.length > 0
+      ? parsed
+      : undefined;
+  } catch {
+    return undefined;
   }
 }
 
 function createRawDecode(crashText: string): DecodedCrash {
   const faultInfo = parseFaultInfo(crashText);
-  // When the panic header names a core whose register dump never arrived,
-  // the capture only holds another core's data — keep the raw text and the
-  // header-derived fault info but omit structured registers and frames.
-  const missingCoreDump = riscvNamedCoreDumpMissing(crashText);
-  const regs = missingCoreDump ? {} : parseRegisters(crashText);
-
   const frames: StackFrame[] = [];
+  let regs: Record<string, number> = {};
+  // Core the structured data belongs to; undefined = unsectioned capture.
+  let selectedCoreId: number | undefined;
+  let suppressStructured = false;
 
-  // Try Xtensa-style backtrace: 0xADDR:0xADDR pairs
-  const btMatch = missingCoreDump
-    ? null
-    : crashText.match(/Backtrace:\s*((?:0x[0-9a-fA-F]+[:\s]*)+)/i);
-  if (btMatch) {
-    const pairs = btMatch[1].trim().split(/\s+/);
-    for (const pair of pairs) {
-      const addr = pair.split(':')[0];
-      if (addr) {
-        frames.push({ address: addr });
+  const riscv = parseRiscvSections(crashText);
+  if (riscv) {
+    // When the panic header names a core whose register dump never
+    // arrived, the capture only holds another core's data — keep the raw
+    // text and header-derived fault info but omit structured fields.
+    suppressStructured =
+      riscv.panicCoreId !== undefined &&
+      riscv.regDumps.length > 0 &&
+      !riscv.regDumps.some((d) => d.coreId === riscv.panicCoreId);
+    if (!suppressStructured) {
+      const active =
+        riscv.panicCoreId !== undefined
+          ? riscv.regDumps.find((d) => d.coreId === riscv.panicCoreId)
+          : riscv.regDumps[0];
+      if (active) {
+        // Scan only the selected core's section so register names the
+        // detailed parser does not keep (MCAUSE, MTVAL, MHARTID, ...) are
+        // still captured — scoped to the panicking core, not the whole
+        // multi-core capture.
+        regs = parseRegisters(extractRiscvCoreSection(crashText));
+        selectedCoreId = riscv.panicCoreId ?? active.coreId;
+        // Printed 'Backtrace:' PCs attributed to the selected core only.
+        for (const addr of extractPrintedBacktraceAddrs(crashText, selectedCoreId)) {
+          frames.push({ address: `0x${addr.toString(16)}` });
+        }
+      }
+    }
+  } else {
+    // Xtensa / ESP8266 / unknown / unsectioned captures: the Xtensa parser
+    // already attributes registers and backtrace PCs to the panicking
+    // core's section (or the only section present).
+    const xtensa = parseXtensaSections(crashText);
+    if (xtensa) {
+      regs = { ...xtensa.regs };
+      selectedCoreId = xtensa.coreId;
+      for (const addr of xtensa.backtraceAddrs) {
+        frames.push({ address: `0x${addr.toString(16)}` });
+      }
+    } else {
+      regs = parseRegisters(crashText);
+      // Try Xtensa-style backtrace: 0xADDR:0xADDR pairs
+      const btMatch = crashText.match(/Backtrace:\s*((?:0x[0-9a-fA-F]+[:\s]*)+)/i);
+      if (btMatch) {
+        const pairs = btMatch[1].trim().split(/\s+/);
+        for (const pair of pairs) {
+          const addr = pair.split(':')[0];
+          if (addr) {
+            frames.push({ address: addr });
+          }
+        }
       }
     }
   }
 
   // If no backtrace frames found, extract addresses from stack dumps
-  if (frames.length === 0 && !missingCoreDump) {
+  if (frames.length === 0 && !suppressStructured) {
     const lines = crashText.split('\n');
     let inStackMemory = false;
     let inEsp8266Stack = false;
+    let currentCore: number | undefined;
     for (const line of lines) {
       const trimmed = line.trim();
-      // RISC-V "Stack memory:" format (values prefixed with 0x)
+      const dumpHeader = trimmed.match(/^Core\s+(\d+)\s+register dump:/i);
+      if (dumpHeader) {
+        currentCore = parseInt(dumpHeader[1], 10);
+        inStackMemory = false;
+        inEsp8266Stack = false;
+        continue;
+      }
+      // RISC-V "Stack memory:" format (values may be 0x-prefixed or bare hex)
       if (/^Stack memory:/i.test(trimmed)) {
         inStackMemory = true;
         inEsp8266Stack = false;
@@ -1799,14 +1920,21 @@ function createRawDecode(crashText: string): DecodedCrash {
         inEsp8266Stack = false;
         continue;
       }
-      if (inStackMemory) {
-        const hexMatch = trimmed.match(/^[0-9a-fA-F]+:\s*((?:0x[0-9a-fA-F]+\s*)+)/);
+      // Sectioned captures only contribute the selected core's rows.
+      const otherCore =
+        selectedCoreId !== undefined &&
+        currentCore !== undefined &&
+        currentCore !== selectedCoreId;
+      if (inStackMemory && !otherCore) {
+        const hexMatch = trimmed.match(/^[0-9a-fA-F]+:\s*((?:(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})\s*)+)/);
         if (hexMatch) {
           const addrs = hexMatch[1].trim().split(/\s+/);
           for (const addr of addrs) {
             const val = parseInt(addr, 16);
             if (val >= 0x40000000 && val < 0x50000000) {
-              frames.push({ address: addr });
+              frames.push({
+                address: addr.toLowerCase().startsWith('0x') ? addr : `0x${addr}`,
+              });
             }
           }
         } else {

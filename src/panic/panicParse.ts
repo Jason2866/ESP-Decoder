@@ -112,9 +112,20 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
         inStackMemory = true;
       }
     } else if (inStackMemory && currentRegDump) {
+      // 'Backtrace:' ends the stack section — rows after it belong to the
+      // printed backtrace or the next core, not this stack dump.
+      if (/^\s*Backtrace:/i.test(line)) {
+        inStackMemory = false;
+        continue;
+      }
       // Stack words may be '0x'-prefixed or bare hex (ESP32-S31 prints
       // bare words); accept both, mirroring the framer's isStackDataRow.
-      const match = line.match(/^\s*([0-9a-fA-F]+):\s*((?:(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})\s*)+)/);
+      // Tokens must be whitespace-separated and run to end-of-line so a
+      // truncated or glued token rejects the row instead of parsing a
+      // partial word.
+      const match = line.match(
+        /^\s*([0-9a-fA-F]+):\s*((?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})(?:\s+(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,}))*)\s*$/,
+      );
       if (match) {
         const baseAddr = parseInt(match[1], 16);
         const data = match[2]

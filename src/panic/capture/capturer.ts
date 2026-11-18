@@ -78,6 +78,11 @@ export class Capturer {
   private events: CapturerEvent[] = [];
   private readonly eventsById = new Map<string, CapturerEvent>();
   private readonly signatureIndex = new Map<string, string>();
+  /** Framer block id → event id, so revisions of one block update in place. */
+  private readonly blockEventIndex = new Map<number, string>();
+  /** First observed return address per event, kept as dedup evidence even
+   * when no display snapshot reports it. */
+  private readonly raEvidence = new Map<string, number>();
   private quietTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: CapturerOptions = {}) {
@@ -142,7 +147,9 @@ export class Capturer {
       // (unterminated) line is deliberately NOT flushed here: flushing it
       // mid-line would split one logical line into two and corrupt frames.
       // It completes via its terminator, the next push, or flush()/dispose().
-      this.finalizeBlocks(this.framer.flush(this.options.now(), true));
+      const blocks = this.framer.flush(this.options.now(), true);
+      this.attachPendingPreview(blocks);
+      this.finalizeBlocks(blocks);
     }, this.options.quietPeriodMs);
     this.quietTimer.unref?.();
   }
@@ -157,6 +164,26 @@ export class Capturer {
   private finalizeBlocks(blocks: FramedCrashBlock[]): void {
     for (const block of blocks) {
       this.mergeEvent(block);
+    }
+  }
+
+  /**
+   * Preview the buffered unterminated line into the last emitted block when
+   * it already holds a complete crash record (e.g. a full 'Backtrace:' line
+   * whose terminator has not arrived yet). The bytes stay buffered — the
+   * completed line later revises the same block through the normal path.
+   */
+  private attachPendingPreview(blocks: FramedCrashBlock[]): void {
+    if (blocks.length === 0) {
+      return;
+    }
+    const pending = this.lineDecoder.peekPendingLine().trim();
+    if (!pending || !isCompletePendingCrashLine(pending)) {
+      return;
+    }
+    const last = blocks[blocks.length - 1];
+    if (!last.lines.includes(pending)) {
+      last.lines.push(pending);
     }
   }
 
@@ -175,6 +202,18 @@ export class Capturer {
       signature,
     };
 
+    // A re-emit of a block the framer already reported (provisional quiet
+    // emit followed by continuation rows or the final emit) is a revision of
+    // the same crash occurrence — update the snapshot in place. This bypasses
+    // the dedup window and kind/signature matching, which revisions could
+    // legitimately fail (register lines arriving late change detectKind).
+    const revisionId = this.blockEventIndex.get(block.id);
+    const revision = revisionId === undefined ? undefined : this.eventsById.get(revisionId);
+    if (revision) {
+      this.applyRevision(revision, candidate);
+      return;
+    }
+
     const exact = this.findRecentBySignature(candidate);
     if (exact) {
       // Signature only covers the first few backtrace frames; a matching
@@ -182,22 +221,22 @@ export class Capturer {
       // different crash.
       if (
         backtracesCompatible(exact.lightweight.backtraceAddrs, candidate.lightweight.backtraceAddrs) &&
-        returnAddressesCompatible(exact.lightweight, candidate.lightweight)
+        returnAddressesCompatible(this.matchLightweight(exact), candidate.lightweight)
       ) {
-        this.mergeIntoExisting(exact, candidate, shouldPreferCandidate(exact, candidate));
+        this.mergeIntoExisting(exact, candidate, shouldPreferCandidate(exact, candidate), block.id);
         return;
       }
     }
 
     const byContainment = this.findRecentContainmentMatch(candidate);
     if (byContainment && returnAddressesCompatible(byContainment.lightweight, candidate.lightweight)) {
-      this.mergeIntoExisting(byContainment, candidate, shouldPreferCandidate(byContainment, candidate));
+      this.mergeIntoExisting(byContainment, candidate, shouldPreferCandidate(byContainment, candidate), block.id);
       return;
     }
 
     const byFingerprint = this.findRecentFingerprintMatch(candidate);
     if (byFingerprint && returnAddressesCompatible(byFingerprint.lightweight, candidate.lightweight)) {
-      this.mergeIntoExisting(byFingerprint, candidate, shouldPreferCandidate(byFingerprint, candidate));
+      this.mergeIntoExisting(byFingerprint, candidate, shouldPreferCandidate(byFingerprint, candidate), block.id);
       return;
     }
 
@@ -216,8 +255,45 @@ export class Capturer {
     this.events.push(next);
     this.eventsById.set(next.id, next);
     this.signatureIndex.set(next.signature, next.id);
+    this.blockEventIndex.set(block.id, next.id);
     this.trimEvents();
     this.emit('eventDetected', next);
+  }
+
+  /**
+   * Adopt a richer snapshot of the SAME framed block (provisional emit →
+   * continuation rows → final emit). The block id proves identity, so no
+   * dedup heuristics run: count stays untouched (one occurrence), while
+   * lines/rawText/lightweight/kind/signature refresh — including a kind
+   * change when late register lines flip architecture detection.
+   */
+  private applyRevision(
+    existing: CapturerEvent,
+    candidate: {
+      kind: CapturerEventKind;
+      lines: string[];
+      rawText: string;
+      lightweight: CapturerLightweight;
+      signature: string;
+      firstSeenAt: number;
+      lastSeenAt: number;
+    },
+  ): void {
+    existing.kind = candidate.kind;
+    existing.lines = [...candidate.lines];
+    existing.rawText = candidate.rawText;
+    existing.firstSeenAt = Math.min(existing.firstSeenAt, candidate.firstSeenAt);
+    existing.lastSeenAt = Math.max(existing.lastSeenAt, candidate.lastSeenAt);
+    // Same RA-evidence preservation as mergeIntoExisting: a richer capture
+    // that omits RA must not erase a previously observed return address.
+    const mergedRegs = { ...candidate.lightweight.regs };
+    if (mergedRegs.RA === undefined && existing.lightweight.regs.RA !== undefined) {
+      mergedRegs.RA = existing.lightweight.regs.RA;
+    }
+    existing.lightweight = { ...candidate.lightweight, regs: mergedRegs };
+    this.retainRa(existing, candidate.lightweight.regs?.RA);
+    this.reindexSignature(existing, candidate.signature);
+    this.emit('eventUpdated', existing);
   }
 
   private findRecentBySignature(candidate: {
@@ -250,7 +326,11 @@ export class Capturer {
       const candidateContains = containsNormalizedText(candidate.rawText, existing.rawText);
       if (
         (existingContains || candidateContains) &&
-        returnAddressesCompatible(existing.lightweight, candidate.lightweight)
+        backtracesCompatible(
+          existing.lightweight.backtraceAddrs,
+          candidate.lightweight.backtraceAddrs,
+        ) &&
+        returnAddressesCompatible(this.matchLightweight(existing), candidate.lightweight)
       ) {
         return existing;
       }
@@ -278,7 +358,7 @@ export class Capturer {
           existing.lightweight.backtraceAddrs,
           candidate.lightweight.backtraceAddrs,
         ) &&
-        returnAddressesCompatible(existing.lightweight, candidate.lightweight)
+        returnAddressesCompatible(this.matchLightweight(existing), candidate.lightweight)
       ) {
         return existing;
       }
@@ -296,8 +376,13 @@ export class Capturer {
       lastSeenAt: number;
     },
     preferCandidate: boolean,
+    blockId: number,
   ): void {
+    // count tracks distinct crash occurrences: only a different framed
+    // block merging via dedup increments it — revisions of the same block
+    // take the applyRevision path and leave count untouched.
     existing.count += 1;
+    this.blockEventIndex.set(blockId, existing.id);
     existing.lastSeenAt = Math.max(existing.lastSeenAt, candidate.lastSeenAt);
 
     if (preferCandidate) {
@@ -313,8 +398,32 @@ export class Capturer {
       existing.lightweight = { ...candidate.lightweight, regs: mergedRegs };
       this.reindexSignature(existing, candidate.signature);
     }
+    this.retainRa(existing, candidate.lightweight.regs?.RA);
 
     this.emit('eventUpdated', existing);
+  }
+
+  /**
+   * Lightweight view used ONLY for dedup matching: fills RA from retained
+   * evidence when the display snapshot never reported it. The first
+   * observed RA stays dedup evidence regardless of which snapshot
+   * preferCandidate selected — it is never written into a display snapshot
+   * that did not report it.
+   */
+  private matchLightweight(event: CapturerEvent): CapturerLightweight {
+    const ra = this.raEvidence.get(event.id);
+    if (ra === undefined || event.lightweight.regs?.RA !== undefined) {
+      return event.lightweight;
+    }
+    return { ...event.lightweight, regs: { ...event.lightweight.regs, RA: ra } };
+  }
+
+  /** Keep the earliest observed RA as dedup evidence for the event. */
+  private retainRa(existing: CapturerEvent, candidateRa: number | undefined): void {
+    const ra = existing.lightweight.regs?.RA ?? this.raEvidence.get(existing.id) ?? candidateRa;
+    if (ra !== undefined) {
+      this.raEvidence.set(existing.id, ra);
+    }
   }
 
   private reindexSignature(existing: CapturerEvent, signature: string): void {
@@ -341,6 +450,7 @@ export class Capturer {
         break;
       }
       this.eventsById.delete(removed.id);
+      this.raEvidence.delete(removed.id);
       if (this.signatureIndex.get(removed.signature) === removed.id) {
         this.signatureIndex.delete(removed.signature);
       }
@@ -594,4 +704,20 @@ function toHex(value: number): string {
 
 function toArray(value: number | undefined): number[] {
   return value === undefined ? [] : [value];
+}
+
+/**
+ * A pending (unterminated) line that already holds a complete crash record:
+ * a Backtrace line with at least one full PC:SP pair, a stack-data row, a
+ * register-dump row, or a section header. Truncated records (e.g. a
+ * 'Backtrace:' line cut before its first PC:SP pair) do not qualify.
+ */
+function isCompletePendingCrashLine(text: string): boolean {
+  return (
+    /^Backtrace:\s*0x[0-9a-fA-F]+\s*:\s*0x[0-9a-fA-F]+/i.test(text) ||
+    /^[0-9a-fA-F]{4,}\s*:\s+(?:(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})\s*)+$/.test(text) ||
+    /^[A-Z][A-Z0-9/]*\s*:\s*0x[0-9a-fA-F]+/i.test(text) ||
+    /^Stack memory:/i.test(text) ||
+    /^Core\s+\d+\s+register dump:/i.test(text)
+  );
 }

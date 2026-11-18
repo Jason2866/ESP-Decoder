@@ -1,4 +1,10 @@
 export interface FramedCrashBlock {
+  /**
+   * Stable identity of the framed block: every emit of the same active
+   * block (provisional quiet emits and the final emit) carries the same id,
+   * so consumers can distinguish a revision from a distinct crash block.
+   */
+  id: number;
   lines: string[];
   startedAt: number;
   lastAt: number;
@@ -34,6 +40,7 @@ const startPatterns = crashPatterns;
 const reasonPatterns = crashPatterns;
 
 interface FramerState {
+  id: number;
   lines: string[];
   startedAt: number;
   lastAt: number;
@@ -53,6 +60,7 @@ interface FramerState {
  */
 export class CrashFramer {
   private active: FramerState | undefined;
+  private nextBlockId = 1;
 
   constructor(private readonly quietPeriodMs: number) {}
 
@@ -61,9 +69,13 @@ export class CrashFramer {
 
     // A block already emitted by the quiet-period flush stays open for
     // continuation rows (stack memory, register dumps, Backtrace) so a pause
-    // mid-dump cannot silently drop the rest of the capture. The first
-    // unrelated line closes it without re-emitting.
-    if (this.active?.provisional) {
+    // mid-dump cannot silently drop the rest of the capture. A recognized
+    // crash start is never a continuation — even when its text also matches
+    // a continuation pattern — it finalizes the open block and starts a
+    // fresh one below. Any other unrelated line closes the block, but the
+    // finalize still emits pending continuation rows instead of dropping
+    // them; an unchanged provisional block stays suppressed.
+    if (this.active?.provisional && !isStartLine(line)) {
       const isTail = isImmediateFinalizeLine(line);
       if (isTail || isContinuationLine(line)) {
         this.active.lines.push(line);
@@ -74,7 +86,7 @@ export class CrashFramer {
         }
         return finalized;
       }
-      this.active = undefined;
+      this.finalize(finalized);
     }
 
     // `abort() was called` following an `assert failed:` line is part of the
@@ -89,7 +101,13 @@ export class CrashFramer {
 
     if (isStartLine(line) && !continuesAssertBlock) {
       this.finalize(finalized);
-      this.active = { lines: [], startedAt: atMs, lastAt: atMs, reasonLine: undefined };
+      this.active = {
+        id: this.nextBlockId++,
+        lines: [],
+        startedAt: atMs,
+        lastAt: atMs,
+        reasonLine: undefined,
+      };
     }
 
     if (!this.active) {
@@ -138,6 +156,7 @@ export class CrashFramer {
         // rows arrived since the last emit.
         if (!this.active.provisional || this.active.dirty) {
           finalized.push({
+            id: this.active.id,
             lines: [...this.active.lines],
             startedAt: this.active.startedAt,
             lastAt: this.active.lastAt,
@@ -183,6 +202,7 @@ export class CrashFramer {
     const hasSignal = lines.some((line) => isStartLine(line));
     if (!unchangedProvisional && hasSignal && lines.length > 0 && isFinalizableBlock(lines)) {
       finalized.push({
+        id: this.active.id,
         lines: [...lines],
         startedAt: this.active.startedAt,
         lastAt: this.active.lastAt,
@@ -271,8 +291,10 @@ function hasStackMemoryData(lines: string[]): boolean {
 
 /**
  * Lines that may continue an already-emitted crash block: stack-memory rows
- * (RISC-V '0x'-prefixed and ESP8266 bare-hex), register-dump rows, and
- * Backtrace lines. Used only while a block is in its provisional state.
+ * (RISC-V '0x'-prefixed and ESP8266 bare-hex), register-dump rows, section
+ * headers ('Stack memory:', 'Core N register dump:' — multi-core dumps of
+ * the same crash must stay in one block), and Backtrace lines. Used only
+ * while a block is in its provisional state.
  */
 function isContinuationLine(line: string): boolean {
   const trimmed = line.trim();
@@ -280,6 +302,8 @@ function isContinuationLine(line: string): boolean {
     isStackDataRow(trimmed) ||
     /^[A-Z][A-Z0-9/]*\s*:\s*0x[0-9a-fA-F]+/.test(trimmed) ||
     /Backtrace:/i.test(trimmed) ||
+    /^Stack memory:/i.test(trimmed) ||
+    /^Core\s+\d+\s+register dump:/i.test(trimmed) ||
     trimmed.includes('>>>stack>>>')
   );
 }

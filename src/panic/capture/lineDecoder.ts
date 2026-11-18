@@ -54,6 +54,15 @@ export class LineDecoder {
   }
 
   /**
+   * The buffered unterminated line text, without consuming it. Returns an
+   * empty string while discarding an oversized line. Bytes still held in
+   * byteBuffer (incomplete UTF-8) are not decodable yet and are excluded.
+   */
+  peekPendingLine(): string {
+    return this.discardingLine ? '' : this.buffer;
+  }
+
+  /**
    * Length of the longest prefix ending on a complete UTF-8 sequence. A
    * trailing incomplete sequence (lead byte plus fewer continuation bytes
    * than its length requires) stays in byteBuffer so hasPendingLine()

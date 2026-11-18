@@ -42,6 +42,10 @@ export class GdbMiClient {
   private commandInFlight = false;
   private stdoutBuffer = '';
   private handshakeSettled = false;
+  /** Set on child 'exit': stops new command dispatch but lets buffered
+   * stdout settle the in-flight command before 'close' rejects the rest. */
+  private processExited = false;
+  private exitError: Error | undefined;
   private handshakeResolve: (() => void) | null = null;
   private handshakeReject: ((err: Error) => void) | null = null;
 
@@ -69,8 +73,20 @@ export class GdbMiClient {
     this.cp.on('error', (err) => this.fail(err));
     this.cp.on('exit', (code, signal) => {
       this.log('process exit', { code, signal });
-      if (!this.cp.killed) {
-        this.fail(new Error(`GDB exited unexpectedly (code=${code}, signal=${signal})`));
+      if (this.cp.killed) {
+        return;
+      }
+      // 'exit' can fire while the final stdout chunk (e.g. a terminal
+      // '^exit' record) is still buffered. Stop dispatching new commands
+      // but do NOT fail yet — drainResponses() keeps running on 'data' and
+      // may still settle the in-flight command. 'close' (stdio drained)
+      // rejects whatever remains unanswered.
+      this.processExited = true;
+      this.exitError = new Error(`GDB exited unexpectedly (code=${code}, signal=${signal})`);
+    });
+    this.cp.on('close', () => {
+      if (this.exitError) {
+        this.fail(this.exitError);
       }
     });
   }
@@ -111,7 +127,7 @@ export class GdbMiClient {
    * with its command.
    */
   private pumpCommandQueue(): void {
-    if (this.commandInFlight || this.error) {
+    if (this.commandInFlight || this.error || this.processExited) {
       return;
     }
     const executor = this.commandQueue[0];

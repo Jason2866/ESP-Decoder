@@ -267,7 +267,7 @@ export function extractPrintedBacktraceAddrs(input: string, coreId: number): num
   const addrs: number[] = [];
   let currentCore: number | undefined;
   let sawCoreHeader = false;
-  for (const line of input.split(/\r?\n/)) {
+  for (const line of input.split(/\r?\n|\r/)) {
     // 'Backtrace:' lines belong to the core section they appear under — the
     // same attribution parseRiscvPanicDetailed applies to register dumps.
     const dumpMatch = line.match(/^\s*Core\s+(\d+)\s+register dump:/);
