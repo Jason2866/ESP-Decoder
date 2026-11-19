@@ -26,6 +26,10 @@ function shellQuote(arg: string): string {
  */
 export class GdbStubServer {
   private tempDir?: string;
+  /** Synchronous startup reservation: concurrent start() calls must not
+   * both pass the tempDir check while mkdtemp is in flight. */
+  private starting = false;
+  private abortSignal?: AbortSignal;
   private abortHandler?: () => void;
 
   constructor(
@@ -38,12 +42,17 @@ export class GdbStubServer {
    * `-target-select remote <remoteSpec>` (e.g. `|node stub.js info.json`).
    */
   async start(signal?: AbortSignal): Promise<{ remoteSpec: string }> {
-    if (this.tempDir) {
+    if (this.tempDir || this.starting) {
       throw new Error('Server already started');
     }
     if (signal?.aborted) {
       throw new AbortError();
     }
+    this.starting = true;
+    // The directory stays local until setup succeeds; this.tempDir is only
+    // assigned on success so a failed start leaves no half-initialized
+    // state and close() cannot delete a directory it does not own yet.
+    let dir: string | undefined;
 
     // During setup, cancellation is only recorded — start() still owns the
     // temp directory and cleans it up itself before rejecting. Removing it
@@ -57,28 +66,29 @@ export class GdbStubServer {
     signal?.addEventListener('abort', onSetupAbort, { once: true });
 
     try {
-      this.tempDir = await mkdtemp(path.join(tmpdir(), 'esp-decoder-gdbstub-'));
-      const infoPath = path.join(this.tempDir, 'panic-info.json');
+      dir = await mkdtemp(path.join(tmpdir(), 'esp-decoder-gdbstub-'));
+      const infoPath = path.join(dir, 'panic-info.json');
       // stackData is a Buffer; JSON.stringify encodes it as
       // { type: 'Buffer', data: [...] } which gdbStubMain.js revives.
       await writeFile(infoPath, JSON.stringify(this.panicInfo));
 
       // The abort listener may have fired during the async setup above;
-      // do not hand out a remote spec for a cancelled decode. Cleanup
-      // ownership is still ours — remove the temp dir before rejecting.
+      // do not hand out a remote spec for a cancelled decode.
       if (cancelled || signal?.aborted) {
         signal?.removeEventListener('abort', onSetupAbort);
-        await this.close();
         throw new AbortError();
       }
 
       const scriptPath = path.join(__dirname, 'gdbStubMain.js');
       const remoteSpec = this.buildRemoteSpec(scriptPath, infoPath);
       this.debug('gdb stub remote spec', remoteSpec);
-      // Startup succeeded — transfer cleanup ownership to the abort
-      // handler. No await sits between the cancellation check above and
-      // this swap, so an abort cannot slip through unhandled.
+      // Startup succeeded — publish the directory, then transfer cleanup
+      // ownership to the abort handler. No await sits between the
+      // cancellation check above and this swap, so an abort cannot slip
+      // through unhandled.
+      this.tempDir = dir;
       signal?.removeEventListener('abort', onSetupAbort);
+      this.abortSignal = signal;
       this.abortHandler = () => {
         this.debug('User abort');
         void this.close();
@@ -87,9 +97,14 @@ export class GdbStubServer {
       return { remoteSpec };
     } catch (err) {
       signal?.removeEventListener('abort', onSetupAbort);
+      if (dir) {
+        await rm(dir, { recursive: true, force: true }).catch(() => {});
+      }
       this.abortHandler = undefined;
-      await this.close();
+      this.abortSignal = undefined;
       throw err;
+    } finally {
+      this.starting = false;
     }
   }
 
@@ -110,6 +125,13 @@ export class GdbStubServer {
   async close(): Promise<void> {
     const dir = this.tempDir;
     this.tempDir = undefined;
+    // Detach the abort listener registered by THIS startup so a stale
+    // signal cannot close a later run on the same server instance.
+    if (this.abortHandler) {
+      this.abortSignal?.removeEventListener('abort', this.abortHandler);
+    }
+    this.abortSignal = undefined;
+    this.abortHandler = undefined;
     if (dir) {
       // Best-effort cleanup; the stub process exits on stdin EOF anyway.
       await rm(dir, { recursive: true, force: true }).catch(() => {});

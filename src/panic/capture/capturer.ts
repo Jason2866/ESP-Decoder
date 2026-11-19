@@ -138,6 +138,10 @@ export class Capturer {
   /** First observed return address per event, kept as dedup evidence even
    * when no display snapshot reports it. */
   private readonly raEvidence = new Map<string, number>();
+  /** Longest backtrace trace among an event's FINALIZED occurrences —
+   * dedup evidence kept separate from the display snapshot so a shorter
+   * duplicate winning the display score cannot hide later frames. */
+  private readonly btEvidence = new Map<string, number[]>();
   private quietTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: CapturerOptions = {}) {
@@ -257,6 +261,7 @@ export class Capturer {
         ) {
           this.eventFallback.set(eventId, { blockId, snap });
         }
+        this.noteBtEvidence(eventId, snap.lightweight.backtraceAddrs);
       }
       this.blockEventIndex.delete(blockId);
       // The count contribution already applied stays — only the dead
@@ -363,6 +368,25 @@ export class Capturer {
     });
   }
 
+  /** Keep the longest backtrace trace compatible with the stored one. */
+  private noteBtEvidence(eventId: string, addrs: number[]): void {
+    const prev = this.btEvidence.get(eventId);
+    if (!prev) {
+      if (addrs.length > 0) {
+        this.btEvidence.set(eventId, [...addrs]);
+      }
+      return;
+    }
+    if (addrs.length > prev.length && backtracesCompatible(prev, addrs)) {
+      this.btEvidence.set(eventId, [...addrs]);
+    }
+  }
+
+  /** Backtrace evidence for dedup: finalized trace, else the display's. */
+  private btEvidenceFor(event: CapturerEvent): number[] {
+    return this.btEvidence.get(event.id) ?? event.lightweight.backtraceAddrs;
+  }
+
   private mergeEvent(block: FramedCrashBlock): void {
     const rawText = block.lines.join('\n');
     const kind = detectKind(block.lines);
@@ -437,7 +461,7 @@ export class Capturer {
       // signature with a conflicting backtrace or return address is a
       // different crash.
       if (
-        backtracesCompatible(exact.lightweight.backtraceAddrs, candidate.lightweight.backtraceAddrs) &&
+        backtracesCompatible(this.btEvidenceFor(exact), candidate.lightweight.backtraceAddrs) &&
         returnAddressesCompatible(this.matchLightweight(exact), candidate.lightweight)
       ) {
         this.mergeIntoExisting(exact, candidate, shouldPreferCandidate(exact, candidate), block.id);
@@ -509,15 +533,15 @@ export class Capturer {
     ) {
       return false;
     }
-    // The backtrace check compares the revised frames against the event's
-    // FINALIZED occurrence evidence — the provisional display may still be
-    // growing and its truncated trace must not split the merge.
-    const evidence =
-      this.eventFallback.get(existing.id)?.snap.lightweight ?? existing.lightweight;
+    // The backtrace/kind check compares the revised frames against the
+    // event's FINALIZED occurrence evidence — the provisional display may
+    // still be growing and its truncated trace must not split the merge.
+    const fallback = this.eventFallback.get(existing.id);
+    const evidenceKind = fallback?.snap.kind ?? existing.kind;
     return (
-      existing.kind !== candidate.kind ||
+      evidenceKind !== candidate.kind ||
       backtracesCompatible(
-        evidence.backtraceAddrs,
+        this.btEvidenceFor(existing),
         candidate.lightweight.backtraceAddrs,
       )
     );
@@ -643,7 +667,7 @@ export class Capturer {
       if (
         (existingContains || candidateContains) &&
         backtracesCompatible(
-          existing.lightweight.backtraceAddrs,
+          this.btEvidenceFor(existing),
           candidate.lightweight.backtraceAddrs,
         ) &&
         returnAddressesCompatible(this.matchLightweight(existing), candidate.lightweight)
@@ -671,7 +695,7 @@ export class Capturer {
       if (
         createFingerprint(existing.kind, existing.lightweight) === candidateFingerprint &&
         backtracesCompatible(
-          existing.lightweight.backtraceAddrs,
+          this.btEvidenceFor(existing),
           candidate.lightweight.backtraceAddrs,
         ) &&
         returnAddressesCompatible(this.matchLightweight(existing), candidate.lightweight)
@@ -770,6 +794,7 @@ export class Capturer {
       }
       this.eventsById.delete(removed.id);
       this.raEvidence.delete(removed.id);
+      this.btEvidence.delete(removed.id);
       this.displayBlockIndex.delete(removed.id);
       this.eventOwnerBlock.delete(removed.id);
       this.eventAggregate.delete(removed.id);

@@ -226,11 +226,35 @@ function getStackAddrAndData(stackDump: StackDumpSegment[]): {
  * When multiple cores are dumped, the first one is used (typically the
  * crashing core in ESP-IDF panic output).
  */
+/**
+ * True when the input contains a line-initial 'Backtrace:' row with at
+ * least one PC:SP pair — the printed unwind some RISC-V targets emit
+ * instead of a register/stack dump.
+ */
+function hasPrintedBacktrace(input: string): boolean {
+  return input
+    .split(/\r?\n|\r/)
+    .some((line) => /^\s*Backtrace:\s*0x[0-9a-fA-F]+\s*:\s*0x[0-9a-fA-F]+/i.test(line));
+}
+
 export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
   const parsed = parseRiscvPanicDetailed(input);
   const { regDumps, stackDump } = parsed;
-  if (regDumps.length === 0) {
+  if (regDumps.length === 0 && !hasPrintedBacktrace(input)) {
     throw new Error('No register dumps found');
+  }
+  if (regDumps.length === 0) {
+    // Printed 'Backtrace:' only: no registers or stack bytes to serve, but
+    // the PCs remain available to decodeRiscv's printed-backtrace path.
+    return {
+      coreId: parsed.panicCoreId ?? 0,
+      programCounter: undefined,
+      faultAddr: undefined,
+      faultCode: undefined,
+      regs: {},
+      stackBaseAddr: 0,
+      stackData: Buffer.alloc(0),
+    };
   }
   const active = selectActiveDump(parsed);
   if (!active) {
@@ -269,8 +293,20 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
 export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrace {
   const parsed = parseRiscvPanicDetailed(input);
   const { regDumps } = parsed;
-  if (regDumps.length === 0) {
+  if (regDumps.length === 0 && !hasPrintedBacktrace(input)) {
     throw new Error('No register dumps found');
+  }
+  if (regDumps.length === 0) {
+    // Printed 'Backtrace:' only — the capturer recovers the PCs via
+    // extractPrintedBacktraceAddrs.
+    return {
+      coreId: parsed.panicCoreId ?? 0,
+      programCounter: undefined,
+      faultCode: undefined,
+      faultAddr: undefined,
+      regs: {},
+      backtraceAddrs: [],
+    };
   }
   const active = selectActiveDump(parsed);
   if (!active) {

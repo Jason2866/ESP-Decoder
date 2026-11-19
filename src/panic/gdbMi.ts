@@ -102,14 +102,21 @@ export class GdbMiClient {
       onAbort();
     }
 
-    this.cp.stdout!.setEncoding('utf8');
-    this.cp.stderr!.setEncoding('utf8');
-    this.cp.stdout!.on('data', (chunk: string) => this.onData(chunk));
-    // stderr carries diagnostics, not MI records — keep it out of the
-    // response buffer so a warning cannot corrupt a result record.
-    this.cp.stderr!.on('data', (chunk: string) => this.log('stderr', preview(chunk)));
-    this.cp.stdin!.on('error', (err) => this.fail(err instanceof Error ? err : new Error(String(err))));
+    // Terminal handlers go in before the streams are touched: a failed
+    // spawn must reject pending work through 'error', not throw on a
+    // missing stdout.
     this.cp.on('error', (err) => this.fail(err));
+    this.cp.stdin?.on('error', (err) => this.fail(err instanceof Error ? err : new Error(String(err))));
+    if (this.cp.stdout) {
+      this.cp.stdout.setEncoding('utf8');
+      this.cp.stdout.on('data', (chunk: string) => this.onData(chunk));
+    }
+    if (this.cp.stderr) {
+      this.cp.stderr.setEncoding('utf8');
+      // stderr carries diagnostics, not MI records — keep it out of the
+      // response buffer so a warning cannot corrupt a result record.
+      this.cp.stderr.on('data', (chunk: string) => this.log('stderr', preview(chunk)));
+    }
     this.cp.on('exit', (code, signal) => {
       this.log('process exit', { code, signal });
       if (this.cp.killed) {
@@ -461,15 +468,6 @@ function splitMiListItems(listContent: string): string[] {
   }
 
   return items;
-}
-
-/**
- * Escape a string for embedding in an MI c-string argument (inverse of
- * unescapeMiString): backslashes and double quotes are backslash-escaped
- * so GDB's MI parser hands the original text to the command unchanged.
- */
-export function escapeMiString(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 export function unescapeMiString(value: string): string {

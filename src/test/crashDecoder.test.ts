@@ -2621,15 +2621,18 @@ describe('parseLine – argument values containing equals signs', () => {
 // GdbStubServer – Windows remote spec must survive MI c-string parsing
 // ---------------------------------------------------------------------------
 
-import { GdbStubServer } from '../panic/gdbStub.js';
-import { escapeMiString, unescapeMiString } from '../panic/gdbMi.js';
-import type { PanicInfoWithStackData } from '../panic/types.js';
+import { fetchStacktraceWithMi } from '../panic/decodeRiscv.js';
+import type { DecodeParams, PanicInfoWithStackData } from '../panic/types.js';
 
 describe('GdbStubServer – Windows remote spec', () => {
-  it('round-trips the cmd.exe spec through MI c-string escaping', async () => {
+  it('passes the cmd.exe spec to target-select unchanged', async () => {
     const platformSpy = vi
       .spyOn(process, 'platform', 'get')
       .mockReturnValue('win32');
+    const sendSpy = vi
+      .spyOn(GdbMiClient.prototype, 'sendCommand')
+      .mockResolvedValue('^done\n');
+    vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
     try {
       const panicInfo: PanicInfoWithStackData = {
         coreId: 0,
@@ -2638,18 +2641,23 @@ describe('GdbStubServer – Windows remote spec', () => {
         stackBaseAddr: 0,
         stackData: Buffer.alloc(0),
       };
-      const stub = new GdbStubServer(panicInfo);
-      const { remoteSpec } = await stub.start();
-      await stub.close();
+      // fetchStacktraceWithMi builds its own stub + MI client; the mocked
+      // platform makes buildRemoteSpec emit the Windows cmd.exe spec, and
+      // the sendCommand spy captures the exact argument GDB receives.
+      const params = { elfPath: '/nonexistent.elf', toolPath: '/bin/cat' } as DecodeParams;
+      await fetchStacktraceWithMi(params, panicInfo, {}, () => {});
 
-      expect(remoteSpec).toContain('cmd.exe');
-      expect(remoteSpec).toContain('ELECTRON_RUN_AS_NODE=1');
-
-      // What GDB's MI parser hands to `target remote` after c-string
-      // unescaping must equal the spec buildRemoteSpec produced.
-      const miArg = `"${escapeMiString(remoteSpec)}"`;
-      expect(unescapeMiString(miArg.slice(1, -1))).toBe(remoteSpec);
+      const targetCmd = sendSpy.mock.calls
+        .map((c) => c[0])
+        .find((c) => c.startsWith('-target-select remote '));
+      expect(targetCmd).toBeDefined();
+      const spec = targetCmd!.slice('-target-select remote '.length);
+      expect(spec).toContain('cmd.exe');
+      expect(spec).toContain('"ELECTRON_RUN_AS_NODE=1"');
+      // The spec's embedded quotes must reach GDB unescaped.
+      expect(spec.startsWith('|"')).toBe(true);
     } finally {
+      sendSpy.mockRestore();
       platformSpy.mockRestore();
     }
   });

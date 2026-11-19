@@ -16,16 +16,29 @@ function parseMethodSignature(sig: string): {
   // without a trailing ')' (e.g. 'app_main+0x10') is kept whole.
   let openIdx = -1;
   if (trimmed.endsWith(')')) {
-    let depth = 0;
-    for (let i = trimmed.length - 1; i >= 0; i--) {
+    // Forward scan with a paren stack so parentheses inside quoted strings
+    // (e.g. 'foo("a)b")') cannot corrupt the depth count; quotes honor
+    // backslash escapes.
+    const stack: number[] = [];
+    let quote: string | undefined;
+    for (let i = 0; i < trimmed.length; i++) {
       const ch = trimmed[i];
-      if (ch === ')') {
-        depth++;
+      if (quote) {
+        if (ch === '\\') {
+          i++;
+        } else if (ch === quote) {
+          quote = undefined;
+        }
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
       } else if (ch === '(') {
-        depth--;
-        if (depth === 0) {
-          openIdx = i;
-          break;
+        stack.push(i);
+      } else if (ch === ')') {
+        const open = stack.pop();
+        if (i === trimmed.length - 1) {
+          openIdx = open ?? -1;
         }
       }
     }
@@ -89,7 +102,7 @@ export function parseLine(line: string, _debug?: Debug): GDBLine | ParsedGDBLine
     // The symbol may itself contain angle brackets (template names like
     // <ns::worker<int>()+16>), so allow one level of nesting and match the
     // record's outer closing bracket.
-    /No line number information available for address\s+(0x[0-9a-f]+)\s+<((?:[^<>]|<[^<>]*>)*)>/i,
+    /No line number information available for address\s+(0x[0-9a-f]+)\s+<(.+)>/i,
   ];
 
   for (const [i, pattern] of patterns.entries()) {

@@ -22,6 +22,8 @@ class GDBSession {
   private didExecuteFirstCommand = false;
   private readonly gdb: ReturnType<typeof spawn>;
   private buffer = '';
+  /** stderr text kept separately for startup diagnostics (ELF errors). */
+  private diagnostics = '';
   private readonly queue: CommandQueueItem[] = [];
   private current: { resolve: (r: string) => void; reject: (e: unknown) => void } | null = null;
   private startReject: ((err: Error) => void) | null = null;
@@ -34,14 +36,9 @@ class GDBSession {
       stdio: 'pipe',
       signal: options.signal,
     });
-    this.gdb.stdout!.setEncoding('utf8');
-    this.gdb.stderr!.setEncoding('utf8');
-    this.gdb.stdout!.on('data', (chunk: string) => this.onData(chunk));
-    this.gdb.stderr!.on('data', (chunk: string) => this.onData(chunk));
+    // Install the terminal handlers before touching the streams: a failed
+    // spawn must surface through 'error'/'exit', not a null-stream throw.
     this.gdb.on('error', (err) =>
-      this.terminate(err instanceof Error ? err : new Error(String(err))),
-    );
-    this.gdb.stdin!.on('error', (err) =>
       this.terminate(err instanceof Error ? err : new Error(String(err))),
     );
     this.gdb.on('exit', (code, signal) => {
@@ -60,6 +57,23 @@ class GDBSession {
       }
       this.terminate(new Error(`GDB exited (code=${code}, signal=${signal})`));
     });
+
+    const { stdout, stderr, stdin } = this.gdb;
+    if (stdout) {
+      stdout.setEncoding('utf8');
+      stdout.on('data', (chunk: string) => this.onData(chunk));
+    }
+    if (stderr) {
+      stderr.setEncoding('utf8');
+      // stderr carries diagnostics (e.g. ELF format errors), not command
+      // responses — keep it out of the prompt-scanning buffer.
+      stderr.on('data', (chunk: string) => {
+        this.diagnostics = (this.diagnostics + chunk).slice(-16384);
+      });
+    }
+    stdin?.on('error', (err) =>
+      this.terminate(err instanceof Error ? err : new Error(String(err))),
+    );
   }
 
   private terminate(err: Error): void {
@@ -169,8 +183,11 @@ class GDBSession {
       };
 
       const onData = () => {
+        // Startup diagnostics may arrive on stderr (ELF errors) — scan
+        // both streams for the known failure signatures.
+        const diagText = this.buffer + this.diagnostics;
         // ELF is not found
-        if (!this.didExecuteFirstCommand && this.buffer.includes(noSuchFileOrDirectory)) {
+        if (!this.didExecuteFirstCommand && diagText.includes(noSuchFileOrDirectory)) {
           if (!this.error) {
             this.error = new Error(
               `The ELF file does not exist or is not readable: ${this.elfPath}`,
@@ -184,8 +201,8 @@ class GDBSession {
         // Not an ELF
         if (
           !this.didExecuteFirstCommand &&
-          (this.buffer.includes(notExecutableFormat) ||
-            this.buffer.includes(fileFormatNotRecognized))
+          (diagText.includes(notExecutableFormat) ||
+            diagText.includes(fileFormatNotRecognized))
         ) {
           if (!this.error) {
             this.error = new Error(

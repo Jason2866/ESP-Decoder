@@ -316,8 +316,10 @@ export async function decodeCoredumpFile(
 
       const btOut = await client.sendCommand('-stack-list-frames');
       const btError = miErrorRecord(btOut);
+      // A stack-frame failure is recorded for this thread but must not
+      // abort decoding of the remaining threads.
       if (btError) {
-        throw new Error(`GDB -stack-list-frames failed for thread ${tid}: ${btError}`);
+        log('stack-list-frames failed; continuing without frames', btError);
       }
       log('stack frames raw length', btOut.length);
 
@@ -364,7 +366,7 @@ export async function decodeCoredumpFile(
         }
       }
 
-      const btParsed = parseBacktrace(btOut);
+      const btParsed = btError ? [] : parseBacktrace(btOut);
       const stacktraceLines = btParsed.map((frame, index) => {
         const args = frameArgs[index]?.args || [];
         // Prefer GDB's resolved fullname (comp_dir + file) over the bare file.

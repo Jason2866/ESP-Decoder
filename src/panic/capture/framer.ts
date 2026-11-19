@@ -138,7 +138,10 @@ export class CrashFramer {
         this.active.lines.length >= MAX_INCOMPLETE_BLOCK_LINES &&
         !isCompleteBlock(this.active.lines)
       ) {
-        this.active = undefined;
+        // Finalize rather than drop outright: the lenient predicate still
+        // emits recognized partial dumps (stack rows, register dumps)
+        // while rejecting marker-only noise.
+        this.finalize(finalized);
       } else if (this.active.lines.length >= MAX_COMPLETE_BLOCK_LINES) {
         this.finalize(finalized);
       }

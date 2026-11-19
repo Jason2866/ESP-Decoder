@@ -1,5 +1,5 @@
 import { addr2line } from './addr2line';
-import { GdbMiClient, escapeMiString, extractMiListContent, parseMiTupleList, stripMiList } from './gdbMi';
+import { GdbMiClient, extractMiListContent, parseMiTupleList, stripMiList } from './gdbMi';
 import { parseLines } from './gdbLineParse';
 import { GdbStubServer } from './gdbStub';
 import {
@@ -160,7 +160,7 @@ function dedupeArgs(args: FrameArg[] | undefined): FrameArg[] {
     .filter((a): a is FrameArg => a !== undefined);
 }
 
-async function fetchStacktraceWithMi(
+export async function fetchStacktraceWithMi(
   params: DecodeParams,
   panicInfo: PanicInfoWithStackData,
   options: DecodeOptions = {},
@@ -180,11 +180,7 @@ async function fetchStacktraceWithMi(
 
     client = new GdbMiClient(toolPath, ['--interpreter=mi2', '-n', elfPath], options);
     await client.drainHandshake();
-    // The remote spec is an MI c-string argument: escape it so embedded
-    // quotes/backslashes (e.g. the Windows cmd.exe spec) reach
-    // `target remote` unchanged. POSIX specs contain neither and pass
-    // through unmodified.
-    const targetResult = await client.sendCommand(`-target-select remote ${escapeMiString(remoteSpec)}`);
+    const targetResult = await client.sendCommand(`-target-select remote ${remoteSpec}`);
     if (miErrorPattern.test(targetResult)) {
       throw new Error(`Failed to connect to GDB remote target: ${describeMiFailure(targetResult)}`);
     }
@@ -200,19 +196,29 @@ async function fetchStacktraceWithMi(
 
     for (let i = 0; i < frames.length; i++) {
       const frameLevel = frames[i].level ?? `${i}`;
-      await client.sendCommand(`-stack-select-frame ${frameLevel}`);
+      try {
+        await client.sendCommand(`-stack-select-frame ${frameLevel}`);
 
-      const argsRaw = await client.sendCommand(
-        `-stack-list-arguments --simple-values ${frameLevel} ${frameLevel}`,
-      );
-      const rawArgs = parseMiStackArgs(argsRaw, frameLevel);
-      const args = dedupeArgs(rawArgs);
-      const parsedFrame = isParsedGDBLine(stacktraceLines[i])
-        ? (stacktraceLines[i] as ParsedGDBLine)
-        : undefined;
-      if (args.length && parsedFrame) {
-        parsedFrame.args = args;
-        log('frame args', frameLevel, parsedFrame.args);
+        const argsRaw = await client.sendCommand(
+          `-stack-list-arguments --simple-values ${frameLevel} ${frameLevel}`,
+        );
+        const rawArgs = parseMiStackArgs(argsRaw, frameLevel);
+        const args = dedupeArgs(rawArgs);
+        const parsedFrame = isParsedGDBLine(stacktraceLines[i])
+          ? (stacktraceLines[i] as ParsedGDBLine)
+          : undefined;
+        if (args.length && parsedFrame) {
+          parsedFrame.args = args;
+          log('frame args', frameLevel, parsedFrame.args);
+        }
+      } catch (err) {
+        // A transport failure stops argument annotation but keeps the
+        // frames already collected; cancellation stays terminal.
+        if (options.signal?.aborted) {
+          throw err;
+        }
+        log('frame argument lookup failed; keeping unannotated frames', err);
+        break;
       }
     }
 
@@ -280,7 +286,9 @@ export function extractPrintedBacktraceAddrs(input: string, coreId: number): num
       sawCoreHeader = true;
       continue;
     }
-    if (!/Backtrace:/.test(line)) {
+    // 'Backtrace:' must start the line (after optional indentation) so a
+    // diagnostic mention mid-line cannot contribute PCs.
+    if (!/^\s*Backtrace:/i.test(line)) {
       continue;
     }
     if (sawCoreHeader && currentCore !== coreId) {
