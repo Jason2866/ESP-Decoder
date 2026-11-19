@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events';
 import {
-  parseESP32PanicOutput,
-  parseESP8266PanicOutput,
   parseRiscvPanicLightweight,
+  parseXtensaPanicOutput,
 } from '../panicParse';
+import { extractPrintedBacktraceAddrs } from '../decodeRiscv';
 import { CrashFramer, type FramedCrashBlock } from './framer';
 import { LineDecoder } from './lineDecoder';
 
@@ -293,6 +293,7 @@ export class Capturer {
     // preview is never written into the framer: when the line's terminator
     // arrives, the real line replaces it through the normal path.
     if (!preview) {
+      this.retractPendingPreview();
       this.lastPreviewKey = '';
       return;
     }
@@ -327,6 +328,35 @@ export class Capturer {
     this.mergeEvent({
       id: active.id,
       lines,
+      startedAt: active.startedAt,
+      lastAt: active.lastAt,
+      reasonLine: active.reasonLine,
+    });
+  }
+
+  /**
+   * A pending-line preview that is no longer pending (the buffered line was
+   * discarded, e.g. oversized, or stopped qualifying) must be retracted:
+   * republish the block's committed snapshot so the phantom row — and any
+   * RA value it produced — leaves the already-published event.
+   */
+  private retractPendingPreview(): void {
+    if (this.lastPreviewKey === '') {
+      return;
+    }
+    const sep = this.lastPreviewKey.indexOf(':');
+    const blockId = Number(this.lastPreviewKey.slice(0, sep));
+    const eventId = this.blockEventIndex.get(blockId);
+    if (eventId === undefined || !this.eventsById.has(eventId)) {
+      return;
+    }
+    const active = this.framer.peekActiveBlock();
+    if (!active || active.id !== blockId) {
+      return;
+    }
+    this.mergeEvent({
+      id: active.id,
+      lines: [...active.lines],
       startedAt: active.startedAt,
       lastAt: active.lastAt,
       reasonLine: active.reasonLine,
@@ -479,10 +509,15 @@ export class Capturer {
     ) {
       return false;
     }
+    // The backtrace check compares the revised frames against the event's
+    // FINALIZED occurrence evidence — the provisional display may still be
+    // growing and its truncated trace must not split the merge.
+    const evidence =
+      this.eventFallback.get(existing.id)?.snap.lightweight ?? existing.lightweight;
     return (
       existing.kind !== candidate.kind ||
       backtracesCompatible(
-        existing.lightweight.backtraceAddrs,
+        evidence.backtraceAddrs,
         candidate.lightweight.backtraceAddrs,
       )
     );
@@ -515,13 +550,13 @@ export class Capturer {
       existing.kind = candidate.kind;
       existing.lines = [...candidate.lines];
       existing.rawText = candidate.rawText;
-      // Same RA-evidence preservation as mergeIntoExisting: a richer capture
-      // that omits RA must not erase a previously observed return address.
-      const mergedRegs = { ...candidate.lightweight.regs };
-      if (mergedRegs.RA === undefined && existing.lightweight.regs.RA !== undefined) {
-        mergedRegs.RA = existing.lightweight.regs.RA;
-      }
-      existing.lightweight = { ...candidate.lightweight, regs: mergedRegs };
+      // The published snapshot carries only the selected candidate's
+      // registers — a retained RA stays dedup evidence in raEvidence
+      // (retainRa/matchLightweight) and is never copied into regs here.
+      existing.lightweight = {
+        ...candidate.lightweight,
+        regs: { ...candidate.lightweight.regs },
+      };
       this.reindexSignature(existing, candidate.signature);
       this.displayBlockIndex.set(existing.id, blockId);
     }
@@ -667,22 +702,22 @@ export class Capturer {
     this.blockEventIndex.set(blockId, existing.id);
     this.countedBlockIndex.set(blockId, existing.id);
     existing.lastSeenAt = Math.max(existing.lastSeenAt, candidate.lastSeenAt);
+    // Retain RA evidence BEFORE any display replacement below — once the
+    // outgoing snapshot is overwritten its RA is only reachable through
+    // raEvidence, and the published regs must carry only the selected
+    // candidate's registers.
+    this.retainRa(existing, candidate.lightweight.regs?.RA);
 
     if (preferCandidate) {
       existing.lines = [...candidate.lines];
       existing.rawText = candidate.rawText;
-      // Keep a previously observed RA as dedup evidence when the richer
-      // capture omits it — the displayed snapshot still comes from the
-      // candidate, but a later capture with a conflicting RA must not merge.
-      const mergedRegs = { ...candidate.lightweight.regs };
-      if (mergedRegs.RA === undefined && existing.lightweight.regs.RA !== undefined) {
-        mergedRegs.RA = existing.lightweight.regs.RA;
-      }
-      existing.lightweight = { ...candidate.lightweight, regs: mergedRegs };
+      existing.lightweight = {
+        ...candidate.lightweight,
+        regs: { ...candidate.lightweight.regs },
+      };
       this.reindexSignature(existing, candidate.signature);
       this.displayBlockIndex.set(existing.id, blockId);
     }
-    this.retainRa(existing, candidate.lightweight.regs?.RA);
 
     this.emit('eventUpdated', existing);
   }
@@ -796,21 +831,22 @@ function parseLightweight(
   try {
     if (kind === 'riscv') {
       const parsed = parseRiscvPanicLightweight(rawText);
+      // Dumps that printed a 'Backtrace:' carry its PCs (panicking core
+      // only) as frame evidence; dumps without one leave the list empty
+      // so matching falls back to the register-based RA/PC comparison.
+      const printed = extractPrintedBacktraceAddrs(rawText, parsed.coreId);
       return {
         reasonLine: reasonLine?.trim(),
         programCounter: parsed.programCounter,
         faultCode: parsed.faultCode,
         faultAddr: parsed.faultAddr,
         regs: parsed.regs,
-        backtraceAddrs: toArray(parsed.programCounter),
+        backtraceAddrs: printed,
       };
     }
 
     if (kind === 'xtensa') {
-      let parsed = parseESP32PanicOutput(rawText);
-      if (Object.keys(parsed.regs).length === 0 && parsed.backtraceAddrs.length === 0 && !parsed.programCounter) {
-        parsed = parseESP8266PanicOutput(rawText);
-      }
+      const parsed = parseXtensaPanicOutput(rawText);
       return {
         reasonLine: reasonLine?.trim(),
         programCounter: parsed.programCounter,
@@ -998,10 +1034,6 @@ function toHex(value: number): string {
   return `0x${(value >>> 0).toString(16)}`;
 }
 
-function toArray(value: number | undefined): number[] {
-  return value === undefined ? [] : [value];
-}
-
 /**
  * A pending (unterminated) line that already holds a complete crash record:
  * a Backtrace line with at least one full PC:SP pair, a stack-data row, a
@@ -1021,7 +1053,13 @@ function endsWithCompleteBacktracePair(text: string): boolean {
     return true;
   }
   const tokens = match[1].trim().split(/\s+/).filter(Boolean);
-  const last = tokens[tokens.length - 1];
+  let last = tokens[tokens.length - 1];
+  // ESP-IDF marks a truncated/corrupted backtrace tail with a final
+  // '|<-CORRUPTED' or '|<-CONTINUES' token — accept it only when it
+  // follows a complete PC:SP pair.
+  if (last === '|<-CORRUPTED' || last === '|<-CONTINUES') {
+    last = tokens[tokens.length - 2];
+  }
   return last !== undefined && /^0x[0-9a-fA-F]+:0x[0-9a-fA-F]+$/.test(last);
 }
 

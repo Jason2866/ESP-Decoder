@@ -60,16 +60,20 @@ export async function decodeCoredump(
   const result = await decodeCoredumpFile(params, inputPath, options);
   return result.map((threadDecodeResult) => ({
     ...threadDecodeResult,
-    result: fixDecodeResult(threadDecodeResult.result),
+    // GDB coredump frames come from a real unwind — they carry no stack
+    // pointers, so the stack-pointer filter must not drop them.
+    result: fixDecodeResult(threadDecodeResult.result, false),
   }));
 }
 
 // --- result post-processing ------------------------------------------------
 
-function fixDecodeResult(result: DecodeResult): DecodeResult {
+function fixDecodeResult(result: DecodeResult, filterStackPointers = true): DecodeResult {
   const fixedPathsResult = fixWindowsPaths(result);
   let filteredResult = filterFreeRTOSStackLines(fixedPathsResult);
-  filteredResult = filterStackPointerLines(filteredResult);
+  if (filterStackPointers) {
+    filteredResult = filterStackPointerLines(filteredResult);
+  }
   return fixFaultInfo(filteredResult);
 }
 
@@ -139,15 +143,9 @@ function filterFreeRTOSStackLines(result: DecodeResult): DecodeResult {
 function filterStackPointerLines(result: DecodeResult): DecodeResult {
   return {
     ...result,
-    stacktraceLines: result.stacktraceLines.reduce(
-      (acc, currentLine, index, thisArray) => {
-        const prevLine = thisArray[index - 1];
-        if (prevLine && isStackPointerLine(currentLine, prevLine)) {
-          return acc;
-        }
-        return [...acc, currentLine];
-      },
-      [] as (GDBLine | ParsedGDBLine)[],
+    stacktraceLines: result.stacktraceLines.filter(
+      (line, index, lines) =>
+        !(lines[index - 1] && isStackPointerLine(line, lines[index - 1])),
     ),
   };
 }

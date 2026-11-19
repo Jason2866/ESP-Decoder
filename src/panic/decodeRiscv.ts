@@ -1,5 +1,5 @@
 import { addr2line } from './addr2line';
-import { GdbMiClient, extractMiListContent, parseMiTupleList, stripMiList } from './gdbMi';
+import { GdbMiClient, escapeMiString, extractMiListContent, parseMiTupleList, stripMiList } from './gdbMi';
 import { parseLines } from './gdbLineParse';
 import { GdbStubServer } from './gdbStub';
 import {
@@ -180,7 +180,11 @@ async function fetchStacktraceWithMi(
 
     client = new GdbMiClient(toolPath, ['--interpreter=mi2', '-n', elfPath], options);
     await client.drainHandshake();
-    const targetResult = await client.sendCommand(`-target-select remote ${remoteSpec}`);
+    // The remote spec is an MI c-string argument: escape it so embedded
+    // quotes/backslashes (e.g. the Windows cmd.exe spec) reach
+    // `target remote` unchanged. POSIX specs contain neither and pass
+    // through unmodified.
+    const targetResult = await client.sendCommand(`-target-select remote ${escapeMiString(remoteSpec)}`);
     if (miErrorPattern.test(targetResult)) {
       throw new Error(`Failed to connect to GDB remote target: ${describeMiFailure(targetResult)}`);
     }
@@ -405,13 +409,35 @@ export async function decodeRiscv(
   const tasks = [
     miTask,
     hasLookupAddrs
-      ? addr2line(params, addr2lineAddrs, childOptions)
+      ? addr2line(params, addr2lineAddrs, childOptions).catch((err: unknown) => {
+          // An ordinary symbol-lookup failure must not discard valid MI
+          // frames — the caller falls back to raw fault addresses.
+          // Cancellation stays terminal.
+          if (childOptions.signal?.aborted) {
+            throw err;
+          }
+          log('addr2line resolution failed; using raw addresses', err);
+          return [] as (AddrLine | undefined)[];
+        })
       : Promise.resolve([] as (AddrLine | undefined)[]),
   ] as const;
 
+  const rawAddrLine = (addr: number | undefined): AddrLine | undefined =>
+    addr === undefined
+      ? undefined
+      : { addr, location: { regAddr: toHexString(addr), lineNumber: '??' } };
+
   try {
     const [miLines, resolved] = await Promise.all(tasks);
-    const [programCounter, faultAddr, ...printedLocations] = resolved;
+    let [programCounter, faultAddr, ...printedLocations] = resolved;
+    if (resolved.length === 0) {
+      // Resolution unavailable: keep the raw fault addresses (and printed
+      // backtrace PCs as unresolved frames) so the result still identifies
+      // where the panic occurred.
+      programCounter = rawAddrLine(panicInfo.programCounter);
+      faultAddr = rawAddrLine(panicInfo.faultAddr);
+      printedLocations = printedBacktrace.map(rawAddrLine);
+    }
     const printedLines = printedLocations
       .map((line) => line?.location)
       .filter(isGDBLine);

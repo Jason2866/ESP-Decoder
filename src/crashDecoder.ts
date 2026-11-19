@@ -21,6 +21,7 @@ import {
   createCapturer,
   parseESP32PanicOutput,
   parseRiscvPanicDetailed,
+  parseStackDataRow,
   extractPrintedBacktraceAddrs,
 } from './panic';
 import type {
@@ -290,7 +291,7 @@ export async function decodeCrash(
     // === Xtensa fast-path: resolve stack/backtrace addresses directly via addr2line ===
     // Covers both the "Backtrace: 0xPC:0xSP ..." format and the ESP8266
     // ">>>stack>>>" hex dump format (no Backtrace: lines).
-    if (crashEvent.kind === 'xtensa') {
+    if (crashEvent.kind === 'xtensa' && resolvedArch === 'xtensa') {
       const isEsp8266Stack = />>>stack>>>/.test(crashEvent.rawText) && !/Backtrace:/i.test(crashEvent.rawText);
       // ESP32-family dumps can contain a register dump per core; select the
       // panicking core's registers and backtrace so another core's dump
@@ -635,14 +636,17 @@ async function decodeCoredumpElfInternal(
 
   let chosenArch: 'xtensa' | 'riscv' | 'unknown' = crashKind;
   if (!toolPath) {
-    // Use the detected architecture to pick the right GDB
+    // Use the detected architecture to pick the right GDB; a configured
+    // chip name lets discovery prefer the chip-specific Xtensa binary,
+    // matching the panic-text path above.
+    const configuredChip = configuredChipName(targetArch);
     const primaryKind = crashKind === 'xtensa' ? 'xtensa' : 'riscv';
     const fallbackKind = primaryKind === 'riscv' ? 'xtensa' : 'riscv';
-    toolPath = autoDetectPioToolPath(primaryKind, log);
+    toolPath = autoDetectPioToolPath(primaryKind, log, configuredChip);
     if (toolPath) {
       chosenArch = primaryKind;
     } else {
-      toolPath = autoDetectPioToolPath(fallbackKind, log);
+      toolPath = autoDetectPioToolPath(fallbackKind, log, configuredChip);
       if (toolPath) {
         chosenArch = fallbackKind;
       }
@@ -1972,14 +1976,12 @@ function createRawDecode(crashText: string): DecodedCrash {
         currentCore !== undefined &&
         currentCore !== selectedCoreId;
       if (inStackMemory && !otherCore) {
-        const hexMatch = trimmed.match(/^[0-9a-fA-F]+:\s*((?:(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})\s*)+)/);
-        if (hexMatch) {
-          const addrs = hexMatch[1].trim().split(/\s+/);
-          for (const addr of addrs) {
-            const val = parseInt(addr, 16);
-            if (val >= 0x40000000 && val < 0x50000000) {
+        const row = parseStackDataRow(trimmed);
+        if (row) {
+          for (const word of row.data) {
+            if (word >= 0x40000000 && word < 0x50000000) {
               frames.push({
-                address: addr.toLowerCase().startsWith('0x') ? addr : `0x${addr}`,
+                address: `0x${word.toString(16)}`,
               });
             }
           }

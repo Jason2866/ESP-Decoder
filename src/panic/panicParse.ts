@@ -65,6 +65,35 @@ export interface RisvPanicParseResult {
 
 const RISCV_REG_NAMES = new Set<string>(gdbRegsInfoRiscvIlp32);
 
+/**
+ * Whole-row validation for a 'Stack memory:' data row: '<hexaddr>: <word>
+ * [<word> ...]' where words are '0x'-prefixed or bare hex (ESP32-S31
+ * prints bare words), whitespace-separated, and run to end-of-line so a
+ * truncated or glued token rejects the row instead of parsing a partial
+ * word. Stack words and addresses are 32-bit; a wider value means the
+ * row is not stack data (e.g. a glued token).
+ */
+export function parseStackDataRow(
+  line: string,
+): { baseAddr: number; data: number[] } | undefined {
+  const match = line.match(
+    /^\s*([0-9a-fA-F]+):\s*((?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})(?:\s+(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,}))*)\s*$/,
+  );
+  if (!match) {
+    return undefined;
+  }
+  const baseAddr = parseInt(match[1], 16);
+  const data = match[2]
+    .trim()
+    .split(/\s+/)
+    .map((hex) => parseInt(hex, 16));
+  const fits32 = (v: number) => Number.isFinite(v) && v >= 0 && v <= 0xffffffff;
+  if (!fits32(baseAddr) || data.some((w) => !fits32(w))) {
+    return undefined;
+  }
+  return { baseAddr, data };
+}
+
 export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
   const lines = input.split(/\r?\n|\r/);
   const regDumps: RegisterDump[] = [];
@@ -129,27 +158,9 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
         dumpClosed = true;
         continue;
       }
-      // Stack words may be '0x'-prefixed or bare hex (ESP32-S31 prints
-      // bare words); accept both, mirroring the framer's isStackDataRow.
-      // Tokens must be whitespace-separated and run to end-of-line so a
-      // truncated or glued token rejects the row instead of parsing a
-      // partial word.
-      const match = line.match(
-        /^\s*([0-9a-fA-F]+):\s*((?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})(?:\s+(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,}))*)\s*$/,
-      );
-      if (match) {
-        const baseAddr = parseInt(match[1], 16);
-        const data = match[2]
-          .trim()
-          .split(/\s+/)
-          .map((hex) => parseInt(hex, 16));
-        // Stack words and addresses are 32-bit; a wider value means the row
-        // is not stack data (e.g. a glued token) — skip the whole segment.
-        const fits32 = (v: number) => Number.isFinite(v) && v >= 0 && v <= 0xffffffff;
-        if (!fits32(baseAddr) || data.some((w) => !fits32(w))) {
-          continue;
-        }
-        stackDump.push({ coreId: currentRegDump.coreId, baseAddr, data });
+      const row = parseStackDataRow(line);
+      if (row) {
+        stackDump.push({ coreId: currentRegDump.coreId, ...row });
       }
     }
   }

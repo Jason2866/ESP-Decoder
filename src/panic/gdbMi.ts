@@ -463,6 +463,15 @@ function splitMiListItems(listContent: string): string[] {
   return items;
 }
 
+/**
+ * Escape a string for embedding in an MI c-string argument (inverse of
+ * unescapeMiString): backslashes and double quotes are backslash-escaped
+ * so GDB's MI parser hands the original text to the command unchanged.
+ */
+export function escapeMiString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 export function unescapeMiString(value: string): string {
   let result = '';
   // MI octal escapes (\ooo) encode raw bytes; consecutive ones may form a

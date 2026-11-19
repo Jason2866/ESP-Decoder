@@ -49,6 +49,7 @@ export {
   parseRiscvPanicDetailed,
   parseRiscvPanicLightweight,
   parseRiscvPanicOutput,
+  parseStackDataRow,
   parseXtensaPanicOutput,
   registerSets,
   toHexString,

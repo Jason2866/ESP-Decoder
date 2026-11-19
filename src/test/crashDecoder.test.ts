@@ -1335,10 +1335,11 @@ describe.skipIf(isWindows)('addr2line – prompt boundary', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-a2l-'));
   const fakeGdbPath = path.join(tmpDir, 'fake-gdb.cjs');
 
-  // Fake interactive GDB: emits a '(gdb) ' prompt after each command. The
-  // `list` response embeds a standalone '(gdb)' token mid-output — split
-  // across two stdout chunks so the first ends exactly at the token. It
-  // must not terminate the command before the real source line arrives.
+  // Fake interactive GDB: emits a '(gdb) ' prompt after each command. Each
+  // `list` response embeds a standalone '(gdb)' token mid-output, emitted
+  // as a separate stdout event on the next tick so it really lands on a
+  // transport chunk boundary. Each lookup gets a distinct location so the
+  // test proves the second command still received its own response.
   fs.writeFileSync(
     fakeGdbPath,
     `#!/usr/bin/env node
@@ -1346,8 +1347,14 @@ const readline = require('readline');
 process.stdout.write('Fake GNU gdb\\n(gdb) ');
 readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (line.startsWith('list ')) {
+    const addr = line.slice(5).trim();
+    const num = parseInt(addr.replace('*', ''), 16);
+    const file = '/src/main-' + num.toString(16) + '.c';
+    const lineNo = (num & 0xff) + 1;
     process.stdout.write('note: token (gdb)', () => {
-      process.stdout.write(' appears mid-output\\n0x40000000 is at /src/main.c:42\\n(gdb) ');
+      setImmediate(() => {
+        process.stdout.write(' appears mid-output\\n' + addr + ' is at ' + file + ':' + lineNo + '\\n(gdb) ');
+      });
     });
   } else {
     process.stdout.write('OK\\n(gdb) ');
@@ -1370,13 +1377,17 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     );
 
     expect(results).toHaveLength(2);
-    for (const result of results) {
-      expect(result).toBeDefined();
-      expect(isParsedGDBLine(result?.location)).toBe(true);
-      const location = result!.location as ParsedGDBLine;
-      expect(location.file).toBe('/src/main.c');
-      expect(location.lineNumber).toBe('42');
-    }
+    // Each lookup resolved to its own distinct location — proving the
+    // embedded '(gdb)' token did not truncate the first response and the
+    // second command was still processed.
+    const first = results[0]?.location as ParsedGDBLine | undefined;
+    const second = results[1]?.location as ParsedGDBLine | undefined;
+    expect(isParsedGDBLine(first)).toBe(true);
+    expect(isParsedGDBLine(second)).toBe(true);
+    expect(first?.file).toBe('/src/main-40000000.c');
+    expect(first?.lineNumber).toBe('1');
+    expect(second?.file).toBe('/src/main-40000004.c');
+    expect(second?.lineNumber).toBe('5');
   }, 30_000);
 });
 
@@ -2603,5 +2614,43 @@ describe('parseLine – argument values containing equals signs', () => {
       { name: 'count', value: '1' },
       { name: 'blob', value: 'a=b=c' },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GdbStubServer – Windows remote spec must survive MI c-string parsing
+// ---------------------------------------------------------------------------
+
+import { GdbStubServer } from '../panic/gdbStub.js';
+import { escapeMiString, unescapeMiString } from '../panic/gdbMi.js';
+import type { PanicInfoWithStackData } from '../panic/types.js';
+
+describe('GdbStubServer – Windows remote spec', () => {
+  it('round-trips the cmd.exe spec through MI c-string escaping', async () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
+      const panicInfo: PanicInfoWithStackData = {
+        coreId: 0,
+        programCounter: 0x40000000,
+        regs: {},
+        stackBaseAddr: 0,
+        stackData: Buffer.alloc(0),
+      };
+      const stub = new GdbStubServer(panicInfo);
+      const { remoteSpec } = await stub.start();
+      await stub.close();
+
+      expect(remoteSpec).toContain('cmd.exe');
+      expect(remoteSpec).toContain('ELECTRON_RUN_AS_NODE=1');
+
+      // What GDB's MI parser hands to `target remote` after c-string
+      // unescaping must equal the spec buildRemoteSpec produced.
+      const miArg = `"${escapeMiString(remoteSpec)}"`;
+      expect(unescapeMiString(miArg.slice(1, -1))).toBe(remoteSpec);
+    } finally {
+      platformSpy.mockRestore();
+    }
   });
 });

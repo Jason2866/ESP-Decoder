@@ -350,6 +350,9 @@ function isContinuationLine(line: string): boolean {
     /Backtrace:/i.test(trimmed) ||
     /^Stack memory:/i.test(trimmed) ||
     /^Core\s+\d+\s+register dump:/i.test(trimmed) ||
+    // ESP-IDF prints the firmware ELF SHA256 between the panic data and
+    // 'Rebooting...' — keep a provisionally emitted block open for it.
+    /ELF file SHA256:/i.test(trimmed) ||
     trimmed.includes('>>>stack>>>')
   );
 }
