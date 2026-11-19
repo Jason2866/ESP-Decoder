@@ -328,6 +328,11 @@ export class GdbMiClient {
    * after a bounded timeout so no process or pipe is left behind.
    */
   private async shutdownChild(): Promise<void> {
+    // A failed spawn has no PID and never emits 'exit' — don't run the
+    // bounded waits for a child that never existed.
+    if (this.cp.pid === undefined) {
+      return;
+    }
     if (this.cp.exitCode !== null || this.cp.signalCode !== null) {
       return;
     }
@@ -379,20 +384,24 @@ function splitAsyncRecords(raw: string): { output: string; asyncRecords: string[
 }
 
 export function extractMiListContent(str: string, key: string): string | undefined {
+  // Console text preceding the result record can echo the same 'key=['
+  // shape (e.g. an empty list) — search only the '^...' result record.
+  const resultLine = str.split('\n').find((line) => line.startsWith('^'));
+  const scope = resultLine ?? str;
   const keyPattern = `${key}=[`;
-  const idx = str.indexOf(keyPattern);
+  const idx = scope.indexOf(keyPattern);
   if (idx < 0) {
     return undefined;
   }
-  const start = str.indexOf('[', idx);
+  const start = scope.indexOf('[', idx);
   if (start < 0) {
     return undefined;
   }
   let depth = 0;
   let inQuotes = false;
   let escape = false;
-  for (let i = start; i < str.length; i++) {
-    const c = str[i];
+  for (let i = start; i < scope.length; i++) {
+    const c = scope[i];
     if (escape) {
       escape = false;
       continue;
@@ -413,7 +422,7 @@ export function extractMiListContent(str: string, key: string): string | undefin
     } else if (c === ']') {
       depth--;
       if (depth === 0) {
-        return str.substring(start + 1, i);
+        return scope.substring(start + 1, i);
       }
     }
   }

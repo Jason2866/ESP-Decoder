@@ -249,15 +249,20 @@ export async function decodeCrash(
     log?.appendLine(msg);
   };
 
+  // Capture the event's kind/text once: async waits below must not observe
+  // a mutated crashEvent.
+  const crashKind = crashEvent.kind;
+  const crashText = crashEvent.rawText;
+
   // Resolve the configured architecture up front so tool discovery uses the
   // same family the decoder will use — a recognized targetArch override must
   // not fall back to crash-kind guessing (e.g. kind 'unknown' + riscv).
-  const resolvedArch = resolveTargetArch(targetArch, crashEvent.kind);
+  const resolvedArch = resolveTargetArch(targetArch, crashKind);
 
   if (!toolPath) {
-    const isEsp8266Crash = crashEvent.kind === 'xtensa'
-      && />>>stack>>>/.test(crashEvent.rawText)
-      && !/Backtrace:/i.test(crashEvent.rawText);
+    const isEsp8266Crash = crashKind === 'xtensa'
+      && />>>stack>>>/.test(crashText)
+      && !/Backtrace:/i.test(crashText);
     // A configured chip/IDF target name lets discovery prefer the
     // chip-specific GDB binary; family-only settings ('riscv', 'xtensa',
     // 'auto') keep the generic lookup, and the ESP8266 text hint still
@@ -270,7 +275,7 @@ export async function decodeCrash(
     );
     if (!toolPath) {
       write('[ESP Decoder] No toolPath (GDB/addr2line) found — returning raw decode');
-      const raw = createRawDecode(crashEvent.rawText);
+      const raw = createRawDecode(crashText);
       raw.toolsMissing = true;
       return raw;
     }
@@ -281,7 +286,7 @@ export async function decodeCrash(
     await fsPromises.access(toolPath, fs.constants.X_OK);
   } catch {
     write(`[ESP Decoder] toolPath '${toolPath}' is not executable or does not exist — returning raw decode`);
-    const raw = createRawDecode(crashEvent.rawText);
+    const raw = createRawDecode(crashText);
     raw.toolsMissing = true;
     return raw;
   }
@@ -291,26 +296,26 @@ export async function decodeCrash(
     // === Xtensa fast-path: resolve stack/backtrace addresses directly via addr2line ===
     // Covers both the "Backtrace: 0xPC:0xSP ..." format and the ESP8266
     // ">>>stack>>>" hex dump format (no Backtrace: lines).
-    if (crashEvent.kind === 'xtensa' && resolvedArch === 'xtensa') {
-      const isEsp8266Stack = />>>stack>>>/.test(crashEvent.rawText) && !/Backtrace:/i.test(crashEvent.rawText);
+    if (crashKind === 'xtensa' && resolvedArch === 'xtensa') {
+      const isEsp8266Stack = />>>stack>>>/.test(crashText) && !/Backtrace:/i.test(crashText);
       // ESP32-family dumps can contain a register dump per core; select the
       // panicking core's registers and backtrace so another core's dump
       // (e.g. core 0 printed before core 1) cannot leak into the result.
       const xtensaParsed = isEsp8266Stack
         ? undefined
-        : parseESP32PanicOutput(crashEvent.rawText);
+        : parseESP32PanicOutput(crashText);
       const candidateAddrs = isEsp8266Stack
-        ? extractEsp8266StackAddresses(crashEvent.rawText)
+        ? extractEsp8266StackAddresses(crashText)
         : (xtensaParsed?.backtraceAddrs ?? []).map((a) => `0x${a.toString(16)}`);
 
       if (candidateAddrs.length > 0) {
         const addr2linePath = deriveAddr2linePath(toolPath!, log);
         if (addr2linePath) {
           const faultInfo = isEsp8266Stack
-            ? parseXtensaFaultInfo(crashEvent.rawText)
-            : parseXtensaFaultInfoForCore(crashEvent.rawText, xtensaParsed);
+            ? parseXtensaFaultInfo(crashText)
+            : parseXtensaFaultInfoForCore(crashText, xtensaParsed);
           const regs = isEsp8266Stack
-            ? parseRegisters(crashEvent.rawText)
+            ? parseRegisters(crashText)
             : (xtensaParsed?.regs ?? {});
           const hasRegs = Object.keys(regs).length > 0;
 
@@ -346,7 +351,7 @@ export async function decodeCrash(
     // monitor; on timeout the AbortError falls through to the raw decode.
     const decodeTimeout = setTimeout(() => abortController.abort(), DECODE_TIMEOUT_MS);
     decodeTimeout.unref?.();
-    const result = await decodePanicText(params, crashEvent.rawText, decodeOptions)
+    const result = await decodePanicText(params, crashText, decodeOptions)
       .finally(() => clearTimeout(decodeTimeout));
 
     const decRes = Array.isArray(result) ? result[0]?.result ?? result[0] : result;
@@ -356,7 +361,7 @@ export async function decodeCrash(
     }
 
     // Convert the decoder's DecodeResult to our DecodedCrash format
-    const decoded = convertDecodeResult(result, crashEvent.rawText);
+    const decoded = convertDecodeResult(result, crashText);
 
     // Post-processing: heuristic stack enhancement (RISC-V) + register annotations.
     // These use independent addr2line invocations, so run them in parallel.
@@ -365,8 +370,8 @@ export async function decodeCrash(
     // For RISC-V crashes: enhance with heuristic stack analysis when
     // the decoder's GDB-server-based unwinding yields few frames.
     if (
-      crashEvent.kind === 'riscv' &&
-      /Stack memory:/i.test(crashEvent.rawText) &&
+      crashKind === 'riscv' &&
+      /Stack memory:/i.test(crashText) &&
       toolPath
     ) {
       postProcessTasks.push(
@@ -393,7 +398,7 @@ export async function decodeCrash(
   } catch (err) {
     const errMsg = err instanceof Error ? err.stack || err.message : String(err);
     write(`[ESP Decoder] decode failed: ${errMsg}`);
-    const raw = createRawDecode(crashEvent.rawText);
+    const raw = createRawDecode(crashText);
     
     // Only set toolsMissing for actual tool access/execution errors
     if (isToolAccessError(err)) {
@@ -634,21 +639,33 @@ async function decodeCoredumpElfInternal(
   const crashKind: 'xtensa' | 'riscv' | 'unknown' = detectedArch ?? 'unknown';
   write(`[ESP Decoder] Coredump: firmware ELF arch detection = ${detectedArch ?? 'unknown'}`);
 
+  // Resolve the decoder family BEFORE tool discovery: an explicit
+  // targetArch or a readable ELF header identifies the family, and only a
+  // compatible GDB can decode the coredump — never fall back to the other
+  // family. Only a fully unknown ELF keeps the riscv-first/xtensa-fallback
+  // search.
+  const configuredFamily = configuredArchFamily(targetArch);
+  const resolvedFamily = configuredFamily ?? detectedArch;
+
   let chosenArch: 'xtensa' | 'riscv' | 'unknown' = crashKind;
   if (!toolPath) {
-    // Use the detected architecture to pick the right GDB; a configured
-    // chip name lets discovery prefer the chip-specific Xtensa binary,
-    // matching the panic-text path above.
     const configuredChip = configuredChipName(targetArch);
-    const primaryKind = crashKind === 'xtensa' ? 'xtensa' : 'riscv';
-    const fallbackKind = primaryKind === 'riscv' ? 'xtensa' : 'riscv';
-    toolPath = autoDetectPioToolPath(primaryKind, log, configuredChip);
-    if (toolPath) {
-      chosenArch = primaryKind;
-    } else {
-      toolPath = autoDetectPioToolPath(fallbackKind, log, configuredChip);
+    if (resolvedFamily) {
+      toolPath = autoDetectPioToolPath(resolvedFamily, log, configuredChip);
       if (toolPath) {
-        chosenArch = fallbackKind;
+        chosenArch = resolvedFamily;
+      }
+    } else {
+      const primaryKind = crashKind === 'xtensa' ? 'xtensa' : 'riscv';
+      const fallbackKind = primaryKind === 'riscv' ? 'xtensa' : 'riscv';
+      toolPath = autoDetectPioToolPath(primaryKind, log, configuredChip);
+      if (toolPath) {
+        chosenArch = primaryKind;
+      } else {
+        toolPath = autoDetectPioToolPath(fallbackKind, log, configuredChip);
+        if (toolPath) {
+          chosenArch = fallbackKind;
+        }
       }
     }
     if (!toolPath) {
@@ -808,6 +825,30 @@ async function detectElfArch(
 function configuredChipName(targetArch: string | undefined): string | undefined {
   const normalized = targetArch?.trim().toLowerCase();
   return normalized && KNOWN_CHIPS.includes(normalized) ? normalized : undefined;
+}
+
+/**
+ * Architecture family explicitly identified by the configured targetArch
+ * ('xtensa'/'riscv'/chip names); undefined for 'auto' and unrecognized
+ * values so callers can fall back to ELF-header detection.
+ */
+function configuredArchFamily(
+  targetArch: string | undefined,
+): 'xtensa' | 'riscv' | undefined {
+  const normalized = targetArch?.trim().toLowerCase();
+  if (!normalized || normalized === 'auto') {
+    return undefined;
+  }
+  if (normalized === 'xtensa') {
+    return 'xtensa';
+  }
+  if (normalized === 'riscv' || normalized === 'riscv32') {
+    return 'riscv';
+  }
+  if (KNOWN_CHIPS.includes(normalized)) {
+    return chipArch(normalized);
+  }
+  return undefined;
 }
 
 function resolveTargetArch(
@@ -1911,6 +1952,13 @@ function createRawDecode(crashText: string): DecodedCrash {
           frames.push({ address: `0x${addr.toString(16)}` });
         }
       }
+    } else {
+      // The named core's register dump never arrived, but a printed
+      // 'Backtrace:' may still carry its PCs — keep them without
+      // borrowing another core's registers or stack data.
+      for (const addr of extractPrintedBacktraceAddrs(crashText, riscv.panicCoreId ?? 0)) {
+        frames.push({ address: `0x${addr.toString(16)}` });
+      }
     }
   } else {
     // Xtensa / ESP8266 / unknown / unsectioned captures: the Xtensa parser
@@ -1941,12 +1989,33 @@ function createRawDecode(crashText: string): DecodedCrash {
 
   // If no backtrace frames found, extract addresses from stack dumps
   if (frames.length === 0 && !suppressStructured) {
+    // Recognized RISC-V dumps: reuse the detailed parser's per-core stack
+    // segments — they retain valid rows after blank or diagnostic lines
+    // that the generic rescan below would treat as a section end.
+    if (riscv && selectedCoreId !== undefined) {
+      for (const seg of riscv.stackDump) {
+        if (seg.coreId !== selectedCoreId) {
+          continue;
+        }
+        for (const word of seg.data) {
+          if (word >= 0x40000000 && word < 0x50000000) {
+            frames.push({ address: `0x${word.toString(16)}` });
+          }
+        }
+      }
+    }
+    if (frames.length === 0) {
     const lines = crashText.split(/\r\n?|\n/);
     let inStackMemory = false;
     let inEsp8266Stack = false;
     let currentCore: number | undefined;
     for (const line of lines) {
       const trimmed = line.trim();
+      // Blank separator lines must not end an open 'Stack memory:' section —
+      // dumps can contain them between data rows.
+      if (trimmed === '') {
+        continue;
+      }
       const dumpHeader = trimmed.match(/^Core\s+(\d+)\s+register dump:/i);
       if (dumpHeader) {
         currentCore = parseInt(dumpHeader[1], 10);
@@ -2003,6 +2072,7 @@ function createRawDecode(crashText: string): DecodedCrash {
           }
         }
       }
+    }
     }
   }
 

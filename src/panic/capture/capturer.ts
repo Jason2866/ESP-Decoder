@@ -462,6 +462,7 @@ export class Capturer {
       // different crash.
       if (
         backtracesCompatible(this.btEvidenceFor(exact), candidate.lightweight.backtraceAddrs) &&
+        !faultPcsConflict(exact.lightweight, candidate.lightweight) &&
         returnAddressesCompatible(this.matchLightweight(exact), candidate.lightweight)
       ) {
         this.mergeIntoExisting(exact, candidate, shouldPreferCandidate(exact, candidate), block.id);
@@ -525,12 +526,18 @@ export class Capturer {
       lightweight: CapturerLightweight;
     },
   ): boolean {
-    if (
-      !returnAddressesCompatible(
-        this.matchLightweight(existing),
-        candidate.lightweight,
-      )
-    ) {
+    // RA evidence comes from the event's FINALIZED occurrences
+    // (raEvidence), not whichever snapshot currently owns the display —
+    // a provisional display RA must not veto or force a split.
+    const finalizedRa = this.raEvidence.get(existing.id);
+    const raEvidence =
+      finalizedRa === undefined
+        ? existing.lightweight
+        : {
+            ...existing.lightweight,
+            regs: { ...existing.lightweight.regs, RA: finalizedRa },
+          };
+    if (!returnAddressesCompatible(raEvidence, candidate.lightweight)) {
       return false;
     }
     // The backtrace/kind check compares the revised frames against the
@@ -538,12 +545,23 @@ export class Capturer {
     // still be growing and its truncated trace must not split the merge.
     const fallback = this.eventFallback.get(existing.id);
     const evidenceKind = fallback?.snap.kind ?? existing.kind;
-    return (
-      evidenceKind !== candidate.kind ||
-      backtracesCompatible(
-        this.btEvidenceFor(existing),
-        candidate.lightweight.backtraceAddrs,
-      )
+    // Conflicting KNOWN architectures are different crashes — roll the
+    // cross-block match back. A flip to or from 'unknown' is not evidence
+    // of another family, and addresses are not comparable across families,
+    // so the backtrace check only runs when the kinds agree.
+    if (
+      evidenceKind !== 'unknown' &&
+      candidate.kind !== 'unknown' &&
+      evidenceKind !== candidate.kind
+    ) {
+      return false;
+    }
+    if (evidenceKind !== candidate.kind) {
+      return true;
+    }
+    return backtracesCompatible(
+      this.btEvidenceFor(existing),
+      candidate.lightweight.backtraceAddrs,
     );
   }
 
@@ -670,6 +688,7 @@ export class Capturer {
           this.btEvidenceFor(existing),
           candidate.lightweight.backtraceAddrs,
         ) &&
+        !faultPcsConflict(existing.lightweight, candidate.lightweight) &&
         returnAddressesCompatible(this.matchLightweight(existing), candidate.lightweight)
       ) {
         return existing;
@@ -698,6 +717,7 @@ export class Capturer {
           this.btEvidenceFor(existing),
           candidate.lightweight.backtraceAddrs,
         ) &&
+        !faultPcsConflict(existing.lightweight, candidate.lightweight) &&
         returnAddressesCompatible(this.matchLightweight(existing), candidate.lightweight)
       ) {
         return existing;
@@ -825,7 +845,7 @@ export function createCapturer(options?: CapturerOptions): Capturer {
 // --- helpers ---------------------------------------------------------------
 
 function detectKind(lines: string[]): CapturerEventKind {
-  const riscvHints = [/MCAUSE/i, /\bMEPC\b/i, /MHARTID/i];
+  const riscvHints = [/\bMCAUSE\b/i, /\bMEPC\b/i, /\bMHARTID\b/i];
   if (lines.some((line) => riscvHints.some((hint) => hint.test(line)))) {
     return 'riscv';
   }
@@ -1035,6 +1055,19 @@ function returnAddressesCompatible(
     return true;
   }
   return raA === raB;
+}
+
+/**
+ * Two captures reporting different known fault PCs (e.g. RISC-V MEPC) are
+ * different crashes even when their printed backtrace frames share a
+ * prefix. A missing PC on either side never conflicts.
+ */
+function faultPcsConflict(a: CapturerLightweight, b: CapturerLightweight): boolean {
+  return (
+    a.programCounter !== undefined &&
+    b.programCounter !== undefined &&
+    a.programCounter !== b.programCounter
+  );
 }
 
 /**

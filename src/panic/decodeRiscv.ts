@@ -1,5 +1,5 @@
 import { addr2line } from './addr2line';
-import { GdbMiClient, extractMiListContent, parseMiTupleList, stripMiList } from './gdbMi';
+import { GdbMiClient, extractMiListContent, parseMiTupleList, stripMiList, type GdbMiOptions } from './gdbMi';
 import { parseLines } from './gdbLineParse';
 import { GdbStubServer } from './gdbStub';
 import {
@@ -163,7 +163,7 @@ function dedupeArgs(args: FrameArg[] | undefined): FrameArg[] {
 export async function fetchStacktraceWithMi(
   params: DecodeParams,
   panicInfo: PanicInfoWithStackData,
-  options: DecodeOptions = {},
+  options: DecodeOptions & GdbMiOptions = {},
   log: Debug = () => {},
 ): Promise<(GDBLine | ParsedGDBLine)[]> {
   const { elfPath, toolPath } = params;

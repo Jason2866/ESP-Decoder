@@ -110,8 +110,15 @@ class Stub {
     let response = '';
     const regs = this.panicInfo.regs || {};
     for (const regName of RISCV_REGS_ILP32) {
+      const value = regs[regName];
+      if (value === undefined && regName !== 'X0') {
+        // 'x' marks a register the capture did not provide; a captured
+        // zero (and X0, hardwired to zero) still encodes as 0.
+        response += 'x';
+        continue;
+      }
       const regBytes = Buffer.alloc(4);
-      regBytes.writeUInt32LE((regs[regName] || 0) >>> 0);
+      regBytes.writeUInt32LE((value || 0) >>> 0);
       response += regBytes.toString('hex');
     }
     this.respond(response);

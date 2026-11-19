@@ -1,3 +1,5 @@
+import { parseStackDataRow } from '../panicParse';
+
 export interface FramedCrashBlock {
   /**
    * Stable identity of the framed block: every emit of the same active
@@ -288,7 +290,9 @@ function isCompleteBlock(lines: string[]): boolean {
     !trimmed.some((line) => line.startsWith('<<<stack<<<'));
   for (const line of trimmed) {
     if (
-      /Backtrace:/i.test(line) ||
+      // Only a line-initial 'Backtrace:' record marks a complete dump —
+      // an assertion message merely mentioning the marker does not.
+      /^Backtrace:/i.test(line) ||
       /^Rebooting\.\.\./i.test(line) ||
       /ELF file SHA256:/i.test(line) ||
       line.startsWith('<<<stack<<<')
@@ -360,9 +364,11 @@ function isContinuationLine(line: string): boolean {
   );
 }
 
-/** RISC-V 'Stack memory:' row: '<hexaddr>: <hexword> [<hexword> ...]'. */
+/** RISC-V 'Stack memory:' row — validated by the same parser the decoder
+ * uses, so a row the framer accepts always supplies stack bytes and a
+ * truncated/glued row never triggers emission. */
 function isStackDataRow(line: string): boolean {
-  return /^[0-9a-fA-F]{4,}\s*:\s+(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})(\s|$)/.test(line);
+  return parseStackDataRow(line) !== undefined;
 }
 
 /** End-of-crash lines that finalize immediately (without quiet timeout). */

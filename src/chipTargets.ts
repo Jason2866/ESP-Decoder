@@ -63,13 +63,17 @@ export function detectElfArch(elfPath: string): ChipArch | undefined {
         fs.readSync(fd, buf, 0, 20, 0) === 20 &&
         buf.readUInt32BE(0) === 0x7f454c46 // \x7fELF
       ) {
-        // EI_DATA at offset 5: 1 = little-endian, 2 = big-endian.
-        const machine =
-          buf[5] === 2 ? buf.readUInt16BE(18) : buf.readUInt16LE(18);
-        if (machine === ELF_MACHINE_XTENSA) {
-          arch = 'xtensa';
-        } else if (machine === ELF_MACHINE_RISCV) {
-          arch = 'riscv';
+        // EI_DATA at offset 5: 1 = little-endian, 2 = big-endian. Any other
+        // value is an invalid ELF marker — bail before reading e_machine so
+        // it cannot produce a bogus architecture.
+        if (buf[5] === 1 || buf[5] === 2) {
+          const machine =
+            buf[5] === 2 ? buf.readUInt16BE(18) : buf.readUInt16LE(18);
+          if (machine === ELF_MACHINE_XTENSA) {
+            arch = 'xtensa';
+          } else if (machine === ELF_MACHINE_RISCV) {
+            arch = 'riscv';
+          }
         }
       }
     } finally {

@@ -817,50 +817,57 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
     const chipName = getChipName(board || envName, workspaceFolder, coreDir);
     // The firmware ELF's e_machine is authoritative for the arch family —
     // an unreadable board definition must not default to ESP32/Xtensa and
-    // select the wrong GDB for RISC-V builds.
-    const targetArch =
-      (elfFiles[0] ? detectElfArch(elfFiles[0]) : undefined) ??
-      (chipName ? chipArch(chipName) : undefined);
-
+    // select the wrong GDB for RISC-V builds. Each selectable ELF is
+    // classified from its own header; board detection is the fallback.
     const packagesDir = getPioPackagesDir(coreDir);
-    let toolPath: string | undefined;
-    let romElfPath: string | undefined;
-
-    if (packagesDir) {
-      if (targetArch) {
-        toolPath = findPioGdbToolPath(packagesDir, targetArch, chipName);
-      } else {
-        // Arch unknown even after ELF/board detection: probe both toolchain
-        // families instead of assuming Xtensa — a RISC-V-only installation
-        // must not be missed. The platform string breaks ties when it names
-        // the family ('espressif32_riscv', '...-riscv...').
-        const riscvHint = /riscv/i.test(parsed?.platform ?? '');
-        const order: ChipArch[] = riscvHint
-          ? ['riscv', 'xtensa']
-          : ['xtensa', 'riscv'];
-        for (const arch of order) {
-          toolPath = findPioGdbToolPath(packagesDir, arch, chipName);
-          if (toolPath) {
-            break;
+    const riscvHint = /riscv/i.test(parsed?.platform ?? '');
+    const toolPathByArch = new Map<string, string | undefined>();
+    const gdbForArch = (arch: ChipArch | undefined): string | undefined => {
+      if (!packagesDir) {
+        return undefined;
+      }
+      const key = arch ?? 'unknown';
+      if (!toolPathByArch.has(key)) {
+        let found: string | undefined;
+        if (arch) {
+          found = findPioGdbToolPath(packagesDir, arch, chipName);
+        } else {
+          // Arch unknown even after ELF/board detection: probe both
+          // toolchain families instead of assuming Xtensa — a RISC-V-only
+          // installation must not be missed. The platform string breaks
+          // ties when it names the family ('espressif32_riscv', ...).
+          const order: ChipArch[] = riscvHint
+            ? ['riscv', 'xtensa']
+            : ['xtensa', 'riscv'];
+          for (const probe of order) {
+            found = findPioGdbToolPath(packagesDir, probe, chipName);
+            if (found) {
+              break;
+            }
           }
         }
+        toolPathByArch.set(key, found);
       }
-      romElfPath = chipName ? findRomElf(packagesDir, chipName) : undefined;
-    }
+      return toolPathByArch.get(key);
+    };
+    const romElfPath =
+      packagesDir && chipName ? findRomElf(packagesDir, chipName) : undefined;
 
     // Create an entry for each .elf file found
     for (let i = 0; i < elfFiles.length; i++) {
-      const elfPath = elfFiles[i];
+      const elfPath = elfFiles[i]!;
       const elfName = path.basename(elfPath, '.elf');
-      
+      const targetArch =
+        (detectElfArch(elfPath) ?? (chipName ? chipArch(chipName) : undefined));
+
       // First .elf gets the standard name, others get suffixed
       const displayName = i === 0 ? envName : `${envName}:${elfName}`;
-      
+
       envs.push({
         environmentName: envName,
         name: displayName,
         elfPath,
-        toolPath,
+        toolPath: gdbForArch(targetArch),
         targetArch,
         romElfPath,
       });

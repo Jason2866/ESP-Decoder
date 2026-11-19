@@ -49,22 +49,61 @@ function parseMethodSignature(sig: string): {
 
   const name = trimmed.slice(0, openIdx).trim();
   const argsStr = trimmed.slice(openIdx + 1, -1);
-  const args =
-    argsStr
-      .match(/(?:[^,"']+|"[^"]*"|'[^']*')+/g)
-      ?.map((arg) => {
-        // Split only at the first '=' so values containing '=' (e.g.
-        // 'key=a=b') keep their full text; 'n=1' still parses normally.
-        const eq = arg.indexOf('=');
-        if (eq > 0) {
-          return {
-            name: arg.slice(0, eq).trim(),
-            value: arg.slice(eq + 1).trim(),
-          };
-        }
-        return { name: arg.trim() };
-      }) || [];
+  const args = splitTopLevelArgs(argsStr).map((arg) => {
+    // Split only at the first '=' so values containing '=' (e.g.
+    // 'key=a=b') keep their full text; 'n=1' still parses normally.
+    const eq = arg.indexOf('=');
+    if (eq > 0) {
+      return {
+        name: arg.slice(0, eq).trim(),
+        value: arg.slice(eq + 1).trim(),
+      };
+    }
+    return { name: arg.trim() };
+  });
   return { name: name.trim(), args };
+}
+
+/**
+ * Split an argument list on top-level commas only: commas inside quoted
+ * strings (honoring backslash escapes) and inside nested parentheses stay
+ * part of the argument, so `msg="a, b", n=1` yields two args.
+ */
+function splitTopLevelArgs(argsStr: string): string[] {
+  const args: string[] = [];
+  let current = '';
+  let quote: string | undefined;
+  let depth = 0;
+  for (let i = 0; i < argsStr.length; i++) {
+    const ch = argsStr[i];
+    if (quote) {
+      current += ch;
+      if (ch === '\\' && i + 1 < argsStr.length) {
+        current += argsStr[++i];
+      } else if (ch === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') {
+      depth++;
+    } else if (ch === ')' || ch === ']' || ch === '}') {
+      depth = Math.max(0, depth - 1);
+    }
+    if (ch === ',' && depth === 0) {
+      args.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  args.push(current);
+  return args.filter((arg) => arg.trim() !== '');
 }
 
 export function parseLines(
@@ -100,9 +139,9 @@ export function parseLine(line: string, _debug?: Debug): GDBLine | ParsedGDBLine
     // GDB `info line` without line info keeps the symbol in angle brackets:
     // "No line number information available for address 0x400d1234 <func+0x10>".
     // The symbol may itself contain angle brackets (template names like
-    // <ns::worker<int>()+16>), so allow one level of nesting and match the
-    // record's outer closing bracket.
-    /No line number information available for address\s+(0x[0-9a-f]+)\s+<(.+)>/i,
+    // <ns::worker<int>()+16>), so the capture below scans to the matching
+    // outer close instead of stopping at the first '>'.
+    /No line number information available for address\s+(0x[0-9a-f]+)\s+</i,
   ];
 
   for (const [i, pattern] of patterns.entries()) {
@@ -142,8 +181,27 @@ export function parseLine(line: string, _debug?: Debug): GDBLine | ParsedGDBLine
         });
       }
       if (i === 8) {
-        const [, regAddr, symbol] = match;
-        // '<func+0x10>' -> 'func'; keep the bare symbol as the method.
+        const [, regAddr] = match;
+        // Extract the complete symbol inside the outer '<...>', honoring
+        // nested template brackets, then strip the trailing '+0x..'/'+N'
+        // offset before returning it as the method.
+        const openIdx = line.indexOf('<', match.index);
+        let symbol = '';
+        if (openIdx >= 0) {
+          let depth = 0;
+          for (let j = openIdx; j < line.length; j++) {
+            const ch = line[j];
+            if (ch === '<') {
+              depth++;
+            } else if (ch === '>') {
+              depth--;
+              if (depth === 0) {
+                symbol = line.slice(openIdx + 1, j);
+                break;
+              }
+            }
+          }
+        }
         const method = symbol.replace(/\+0x[0-9a-f]+$/i, '').replace(/\+\d+$/, '');
         return normalizeParsedLine({ regAddr, method, file: '??', lineNumber: '??' });
       }

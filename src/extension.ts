@@ -364,6 +364,13 @@ async function tryAutoDetectElf(): Promise<void> {
     return;
   }
 
+  // Read the arch setting once: an explicit (non-'auto') value is a user
+  // override used for both the decision and the assignment below.
+  const configuredTargetArch = vscode.workspace
+    .getConfiguration('esp-decoder')
+    .get<string>('targetArch', 'auto');
+  const explicitArch = configuredTargetArch !== 'auto' ? configuredTargetArch : undefined;
+
   try {
     const envs = await findPioEnvironments(workspaceFolder);
     const idfBuilds = await findEspIdfBuilds(workspaceFolder);
@@ -389,17 +396,20 @@ async function tryAutoDetectElf(): Promise<void> {
       }
 
       if (newest) {
-        // An explicit targetArch setting is a user override and always wins.
-        // Otherwise the newest build's detected arch replaces any previous
-        // auto-detected value — including clearing it when the ELF is
-        // unreadable and no target was detected.
-        const explicitArch =
-          vscode.workspace.getConfiguration('esp-decoder').get<string>('targetArch', 'auto') !== 'auto';
+        // A manual ELF selection may have arrived while discovery was
+        // pending — do not clobber it with the auto-detected candidate.
+        if (manualElfOverride || sessionConfig.elfPath) {
+          return;
+        }
+        // An explicit targetArch setting is a user override and always
+        // wins; otherwise the newest build's detected arch replaces any
+        // previous auto-detected value — including clearing it when the
+        // ELF is unreadable and no target was detected.
         sessionConfig = {
           ...sessionConfig,
           elfPath: newest.elfPath,
           toolPath: sessionConfig.toolPath || newest.toolPath,
-          targetArch: explicitArch ? sessionConfig.targetArch : newest.targetArch,
+          targetArch: explicitArch ?? newest.targetArch,
           romElfPath: newest.romElfPath,
         };
         if (viewProvider) {

@@ -275,21 +275,31 @@ export async function findEspIdfBuilds(workspaceFolder: string): Promise<EspIdfB
   const projectName = readProjectName(workspaceFolder);
   const idfTarget = parseIdfTarget(workspaceFolder);
   const elfCandidates = findElfCandidates(buildDir, projectName);
-  // sdkconfig is authoritative when present; otherwise the firmware ELF's
-  // e_machine decides — never guess Xtensa for an unreadable target.
-  const targetArch =
-    idfTargetFamily(idfTarget) ??
-    (elfCandidates[0] ? detectElfArch(elfCandidates[0]) : undefined);
-  // Unknown arch: try Xtensa first (legacy default), then RISC-V — a
-  // RISC-V-only ESP-IDF tool install must not be missed.
-  let toolPath = findGdbFromIdfTools(targetArch ?? 'xtensa', idfTarget);
-  if (!toolPath && targetArch === undefined) {
-    toolPath = findGdbFromIdfTools('riscv', idfTarget);
-  }
-  return elfCandidates.map((elfPath, index) => ({
-    name: index === 0 ? 'ESP-IDF (build)' : `ESP-IDF (build:${path.basename(elfPath, '.elf')})`,
-    elfPath,
-    toolPath,
-    targetArch,
-  }));
+  // sdkconfig is authoritative when present; otherwise EACH firmware ELF's
+  // e_machine decides its own arch and debugger lookup — candidates in one
+  // build dir can mix architectures.
+  const configuredFamily = idfTargetFamily(idfTarget);
+  const toolPathByArch = new Map<string, string | undefined>();
+  const gdbForArch = (arch: ChipArch | undefined): string | undefined => {
+    const key = arch ?? 'unknown';
+    if (!toolPathByArch.has(key)) {
+      // Unknown arch: try Xtensa first (legacy default), then RISC-V — a
+      // RISC-V-only ESP-IDF tool install must not be missed.
+      let found = findGdbFromIdfTools(arch ?? 'xtensa', idfTarget);
+      if (!found && arch === undefined) {
+        found = findGdbFromIdfTools('riscv', idfTarget);
+      }
+      toolPathByArch.set(key, found);
+    }
+    return toolPathByArch.get(key);
+  };
+  return elfCandidates.map((elfPath, index) => {
+    const targetArch = configuredFamily ?? detectElfArch(elfPath);
+    return {
+      name: index === 0 ? 'ESP-IDF (build)' : `ESP-IDF (build:${path.basename(elfPath, '.elf')})`,
+      elfPath,
+      toolPath: gdbForArch(targetArch),
+      targetArch,
+    };
+  });
 }

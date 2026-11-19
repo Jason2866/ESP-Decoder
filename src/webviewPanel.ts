@@ -3562,7 +3562,11 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       // Anchored paths (drive letter, leading slash, './' or '../') may
       // contain spaces — same rule as the serial link matcher — so Windows
       // paths like 'C:\My Project\src\main.cpp:42' stay one data-file.
-      var re = /((?:(?:[A-Za-z]:)?[\\\\/]|\\.{1,2}[\\\\/])[\\w.\\-\\/\\\\ ]+\\.\\w+):(\\d+)/g;
+      // A space inside the path is only allowed when the next character
+      // continues the same path — a space followed by a separator starts a
+      // new rooted path, so preceding diagnostic text is never absorbed
+      // into the captured file (e.g. '/old.log see C:\\real\\f.cpp:12').
+      var re = /((?:(?:[A-Za-z]:)?[\\\\/]|\\.{1,2}[\\\\/])(?:[\\w.\\-\\/\\\\]| +(?=[\\w.\\-]))+\\.\\w+):(\\d+)/g;
       var m;
       while ((m = re.exec(text)) !== null) {
         result += escapeHtml(text.slice(lastIndex, m.index));

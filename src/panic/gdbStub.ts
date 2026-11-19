@@ -26,6 +26,8 @@ function shellQuote(arg: string): string {
  */
 export class GdbStubServer {
   private tempDir?: string;
+  /** In-flight directory removal shared by repeated close() calls. */
+  private cleanupPromise?: Promise<void>;
   /** Synchronous startup reservation: concurrent start() calls must not
    * both pass the tempDir check while mkdtemp is in flight. */
   private starting = false;
@@ -85,7 +87,9 @@ export class GdbStubServer {
       // Startup succeeded — publish the directory, then transfer cleanup
       // ownership to the abort handler. No await sits between the
       // cancellation check above and this swap, so an abort cannot slip
-      // through unhandled.
+      // through unhandled. A new run also drops the previous run's
+      // retained cleanup promise.
+      this.cleanupPromise = undefined;
       this.tempDir = dir;
       signal?.removeEventListener('abort', onSetupAbort);
       this.abortSignal = signal;
@@ -123,6 +127,12 @@ export class GdbStubServer {
   }
 
   async close(): Promise<void> {
+    // Repeated/concurrent calls await the same in-flight removal rather
+    // than returning early while the directory is still being deleted.
+    if (this.cleanupPromise) {
+      await this.cleanupPromise;
+      return;
+    }
     const dir = this.tempDir;
     this.tempDir = undefined;
     // Detach the abort listener registered by THIS startup so a stale
@@ -134,7 +144,8 @@ export class GdbStubServer {
     this.abortHandler = undefined;
     if (dir) {
       // Best-effort cleanup; the stub process exits on stdin EOF anyway.
-      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      this.cleanupPromise = rm(dir, { recursive: true, force: true }).catch(() => {});
+      await this.cleanupPromise;
     }
   }
 }

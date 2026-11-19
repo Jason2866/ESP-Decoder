@@ -126,6 +126,13 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
       // crash registers. A new 'Core N register dump:' header reopens it.
       continue;
     } else if (currentRegDump && !inStackMemory) {
+      // 'Backtrace:' ends this core's section even when no 'Stack memory:'
+      // header appeared — later diagnostics must not be read as registers.
+      // A new 'Core N register dump:' header still reopens parsing.
+      if (/^\s*Backtrace:/i.test(line)) {
+        dumpClosed = true;
+        continue;
+      }
       for (const match of line.matchAll(/([A-Z_0-9/]+)\s*:\s*(0x[0-9a-fA-F]+)/g)) {
         const regName = match[1];
         const regAddr = parseInt(match[2], 16);
@@ -258,6 +265,20 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
   }
   const active = selectActiveDump(parsed);
   if (!active) {
+    // The named core has no register dump, but a printed 'Backtrace:' may
+    // still carry its PCs — return them with empty registers/stack rather
+    // than another core's data or a thrown parse.
+    if (hasPrintedBacktrace(input)) {
+      return {
+        coreId: parsed.panicCoreId ?? 0,
+        programCounter: undefined,
+        faultAddr: undefined,
+        faultCode: undefined,
+        regs: {},
+        stackBaseAddr: 0,
+        stackData: Buffer.alloc(0),
+      };
+    }
     throw new Error(
       `No register dump found for panicking core ${parsed.panicCoreId}`,
     );
@@ -310,6 +331,18 @@ export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrac
   }
   const active = selectActiveDump(parsed);
   if (!active) {
+    // Same printed-only fallback as parseRiscvPanicOutput: the capturer
+    // recovers the PCs via extractPrintedBacktraceAddrs.
+    if (hasPrintedBacktrace(input)) {
+      return {
+        coreId: parsed.panicCoreId ?? 0,
+        programCounter: undefined,
+        faultCode: undefined,
+        faultAddr: undefined,
+        regs: {},
+        backtraceAddrs: [],
+      };
+    }
     throw new Error(
       `No register dump found for panicking core ${parsed.panicCoreId}`,
     );
@@ -385,7 +418,7 @@ export function parseESP8266PanicOutput(input: string): PanicInfoWithBacktrace {
  */
 export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
   const lines = input.split(/\r?\n|\r/);
-  const coreIdMatch = input.match(/Guru Meditation Error: Core\s+(\d+)/);
+  const coreIdMatch = input.match(/Guru Meditation Error:\s*Core\s+(\d+)/i);
   const panicCoreId = coreIdMatch ? parseInt(coreIdMatch[1], 10) : undefined;
 
   interface CoreSection {

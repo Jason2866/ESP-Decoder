@@ -66,9 +66,21 @@ class GDBSession {
     if (stderr) {
       stderr.setEncoding('utf8');
       // stderr carries diagnostics (e.g. ELF format errors), not command
-      // responses — keep it out of the prompt-scanning buffer.
+      // responses — keep it out of the prompt-scanning buffer. This
+      // listener is permanent (start()'s cleanup only detaches its own
+      // handlers): a format diagnostic flushed after the first '(gdb)'
+      // prompt must still fail the session.
       stderr.on('data', (chunk: string) => {
         this.diagnostics = (this.diagnostics + chunk).slice(-16384);
+        if (
+          !this.didExecuteFirstCommand &&
+          (this.diagnostics.includes(notExecutableFormat) ||
+            this.diagnostics.includes(fileFormatNotRecognized))
+        ) {
+          this.terminate(
+            new Error(`The ELF file is not in executable format: ${this.elfPath}`),
+          );
+        }
       });
     }
     stdin?.on('error', (err) =>

@@ -2643,9 +2643,35 @@ describe('GdbStubServer – Windows remote spec', () => {
       };
       // fetchStacktraceWithMi builds its own stub + MI client; the mocked
       // platform makes buildRemoteSpec emit the Windows cmd.exe spec, and
-      // the sendCommand spy captures the exact argument GDB receives.
-      const params = { elfPath: '/nonexistent.elf', toolPath: '/bin/cat' } as DecodeParams;
-      await fetchStacktraceWithMi(params, panicInfo, {}, () => {});
+      // the sendCommand spy captures the exact argument GDB receives. The
+      // spawn seam supplies a fake child so '/bin/cat' is never launched.
+      const stdout = Object.assign(new EventEmitter(), {
+        setEncoding: () => {},
+      });
+      const stderr = Object.assign(new EventEmitter(), {
+        setEncoding: () => {},
+      });
+      const stdin = Object.assign(new EventEmitter(), {
+        write: () => true,
+        end: () => {},
+      });
+      const child = Object.assign(new EventEmitter(), {
+        killed: false,
+        pid: undefined,
+        exitCode: null,
+        signalCode: null,
+        stdout,
+        stderr,
+        stdin,
+        kill: () => true,
+      }) as unknown as cp.ChildProcess;
+      const params = { elfPath: '/nonexistent.elf', toolPath: 'fake-gdb' } as DecodeParams;
+      await fetchStacktraceWithMi(
+        params,
+        panicInfo,
+        { spawnProcess: (() => child) as unknown as typeof cp.spawn },
+        () => {},
+      );
 
       const targetCmd = sendSpy.mock.calls
         .map((c) => c[0])
