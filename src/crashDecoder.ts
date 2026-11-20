@@ -429,7 +429,6 @@ export async function decodeCoredumpElf(
   targetArch?: string,
   log?: DecodeLogger,
 ): Promise<CoredumpDecodedResult> {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const write = (msg: string) => log?.appendLine(msg);
 
   // Detect whether the file is b64-encoded and convert if necessary
@@ -441,12 +440,12 @@ export async function decodeCoredumpElf(
   } finally {
     if (needsCleanup) {
       // Clean up temporary decoded file
+      const tmpDir = path.dirname(resolvedPath);
       try {
-        await fsPromises.unlink(resolvedPath);
-        const tmpDir = path.dirname(resolvedPath);
-        await fsPromises.rmdir(tmpDir).catch(() => {});
-      } catch {
-        // Ignore cleanup errors
+        await fsPromises.rm(tmpDir, { recursive: true, force: true, maxRetries: 3 });
+      } catch (cleanupErr) {
+        write(`[ESP Decoder] Warning: Failed to clean up temp coredump dir ${tmpDir}: ${cleanupErr}`);
+        console.warn('Failed to clean up temp coredump dir:', cleanupErr);
       }
     }
   }
@@ -491,10 +490,10 @@ export async function decodeCoredumpBase64(
     return await decodeCoredumpElfInternal(tmpPath, elfPath, toolPath, targetArch, log);
   } finally {
     try {
-      await fsPromises.unlink(tmpPath);
-      await fsPromises.rmdir(tmpDir).catch(() => {});
-    } catch {
-      // Ignore cleanup errors
+      await fsPromises.rm(tmpDir, { recursive: true, force: true, maxRetries: 3 });
+    } catch (cleanupErr) {
+      write(`[ESP Decoder] Warning: Failed to clean up temp coredump dir ${tmpDir}: ${cleanupErr}`);
+      console.warn('Failed to clean up temp coredump dir:', cleanupErr);
     }
   }
 }

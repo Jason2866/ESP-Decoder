@@ -68,6 +68,7 @@ import {
   parseRiscvPanicOutput,
   extractPrintedBacktraceAddrs,
   printedBacktraceApplies,
+  decodeCoredumpFile,
 } from '../panic/index.js';
 import type { CapturerEvent, ParsedGDBLine } from '../panic/index.js';
 
@@ -2758,6 +2759,205 @@ describe('GdbStubServer – Windows remote spec', () => {
     } finally {
       sendSpy.mockRestore();
       platformSpy.mockRestore();
+    }
+  });
+});
+
+describe('Capturer – retained PC evidence prevents conflict merges', () => {
+  it('preserves initial fault PC as evidence when a richer PC-less snapshot replaces display', () => {
+    const capturer = new Capturer({ dedupWindowMs: 5000 });
+    const detected: CapturerEvent[] = [];
+    const updated: CapturerEvent[] = [];
+    capturer.on('eventDetected', (e) => detected.push(e));
+    capturer.on('eventUpdated', (e) => updated.push(e));
+
+    const enc = (s: string) => new TextEncoder().encode(s);
+
+    // Crash 1: Has fault PC 0x42000001 (via MEPC) and short backtrace
+    capturer.push(
+      enc(
+        "Core 0 panic'ed (Load access fault)\n" +
+          'Core 0 register dump:\n' +
+          'MCAUSE  : 0x00000005\n' +
+          'MEPC    : 0x42000001\n' +
+          'RA      : 0x42000001\n' +
+          'Backtrace: 0x42000001:0x3ffb0001\n\n',
+      ),
+    );
+    capturer.flush();
+    expect(detected).toHaveLength(1);
+    expect(detected[0].lightweight.programCounter).toBe(0x42000001);
+
+    // Crash 2: Merges into Crash 1. Richer (longer backtrace + stack rows) but lacks MEPC/fault PC row
+    capturer.push(
+      enc(
+        "Core 0 panic'ed (Load access fault)\n" +
+          'Core 0 register dump:\n' +
+          'MCAUSE  : 0x00000005\n' +
+          'RA      : 0x42000001\n' +
+          'Backtrace: 0x42000001:0x3ffb0001 0x42000002:0x3ffb0002 0x42000003:0x3ffb0003\n' +
+          'Stack memory:\n' +
+          '3fc80000: 0x00000000 0x00000000\n\n',
+      ),
+    );
+    capturer.flush();
+    expect(detected).toHaveLength(1);
+    expect(updated).toHaveLength(1);
+    // Display snapshot was replaced by the richer candidate which has no programCounter
+    expect(updated[0].lightweight.programCounter).toBeUndefined();
+
+    // Crash 3: Same signature prefix (Backtrace: 0x42000001:0x3ffb0001...) but reports conflicting MEPC 0x42009999
+    capturer.push(
+      enc(
+        "Core 0 panic'ed (Load access fault)\n" +
+          'Core 0 register dump:\n' +
+          'MCAUSE  : 0x00000005\n' +
+          'MEPC    : 0x42009999\n' +
+          'RA      : 0x42000001\n' +
+          'Backtrace: 0x42000001:0x3ffb0001\n\n',
+      ),
+    );
+    capturer.flush();
+
+    // Retained PC evidence (0x42000001) must prevent Crash 3 (0x42009999) from merging!
+    expect(detected).toHaveLength(2);
+    expect(detected[1].id).not.toBe(detected[0].id);
+    expect(detected[1].lightweight.programCounter).toBe(0x42009999);
+  });
+});
+
+describe('decodeCoredumpFile – thread attribution and error resilience', () => {
+  it('skips thread on thread-select failure and does not attribute previous thread frames', async () => {
+    vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockImplementation(async (cmd: string) => {
+      if (cmd === '-thread-info') {
+        return '^done,threads=[{id="1",target-id="process 100"},{id="2",target-id="process 200"}],current-thread-id="1"\n';
+      }
+      if (cmd === '-thread-select 1') {
+        return '^done\n';
+      }
+      if (cmd === '-thread-select 2') {
+        return '^error,msg="Thread ID 2 not known."\n';
+      }
+      if (cmd === '-data-list-register-names') {
+        return '^done,register-names=["pc","sp"]\n';
+      }
+      if (cmd === '-data-list-register-values x') {
+        return '^done,register-values=[{number="0",value="0x40001000"}]\n';
+      }
+      if (cmd === '-stack-list-frames') {
+        return '^done,stack=[frame={level="0",addr="0x40001000",func="app_main",file="main.c",line="10"}]\n';
+      }
+      if (cmd.startsWith('-stack-list-arguments')) {
+        return '^done,stack-args=[frame={level="0",args=[{name="arg1",value="42"}]}]\n';
+      }
+      return '^done\n';
+    });
+    vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
+
+    try {
+      const results = await decodeCoredumpFile(
+        { elfPath: '/dummy.elf', toolPath: 'fake-gdb' } as DecodeParams,
+        '/dummy-coredump.elf',
+        {},
+        false,
+      );
+
+      // Thread 2 failed -thread-select so only Thread 1 should be returned
+      expect(results).toHaveLength(1);
+      expect(results[0].threadId).toBe('1');
+      expect(results[0].TCB).toBe(100);
+      const frame0 = results[0].result.stacktraceLines[0] as ParsedGDBLine;
+      expect(frame0.method).toBe('app_main');
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it('recovers thread stack frames when stack-list-arguments command fails or GDB terminates', async () => {
+    vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockImplementation(async (cmd: string) => {
+      if (cmd === '-thread-info') {
+        return '^done,threads=[{id="1",target-id="process 100"}],current-thread-id="1"\n';
+      }
+      if (cmd === '-thread-select 1') {
+        return '^done\n';
+      }
+      if (cmd === '-data-list-register-names') {
+        return '^done,register-names=["pc"]\n';
+      }
+      if (cmd === '-data-list-register-values x') {
+        return '^done,register-values=[{number="0",value="0x40001000"}]\n';
+      }
+      if (cmd === '-stack-list-frames') {
+        return '^done,stack=[frame={level="0",addr="0x40001000",func="recovered_func",file="crash.c",line="25"}]\n';
+      }
+      if (cmd.startsWith('-stack-list-arguments')) {
+        throw new Error('GDB exited unexpectedly (code=1, signal=null)');
+      }
+      return '^done\n';
+    });
+    vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
+
+    try {
+      const results = await decodeCoredumpFile(
+        { elfPath: '/dummy.elf', toolPath: 'fake-gdb' } as DecodeParams,
+        '/dummy-coredump.elf',
+        {},
+        false,
+      );
+
+      // Stack frames were recovered even though stack-list-arguments failed with exception
+      expect(results).toHaveLength(1);
+      expect(results[0].threadId).toBe('1');
+      expect(results[0].result.stacktraceLines).toHaveLength(1);
+      const frame0 = results[0].result.stacktraceLines[0] as ParsedGDBLine;
+      expect(frame0.method).toBe('recovered_func');
+      expect(frame0.lineNumber).toBe('25');
+      expect(frame0.args).toEqual([]);
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it('extracts thread entries with non-standard target-id strings', async () => {
+    vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockImplementation(async (cmd: string) => {
+      if (cmd === '-thread-info') {
+        return '^done,threads=[{id="1",target-id="Thread 0x3ffb0000",name="main"},{id="2",target-id="Remote target",name="worker"}],current-thread-id="1"\n';
+      }
+      if (cmd.startsWith('-thread-select')) {
+        return '^done\n';
+      }
+      if (cmd === '-data-list-register-names') {
+        return '^done,register-names=["pc"]\n';
+      }
+      if (cmd === '-data-list-register-values x') {
+        return '^done,register-values=[{number="0",value="0x40001000"}]\n';
+      }
+      if (cmd === '-stack-list-frames') {
+        return '^done,stack=[frame={level="0",addr="0x40001000",func="task_fn"}]\n';
+      }
+      if (cmd.startsWith('-stack-list-arguments')) {
+        return '^done,stack-args=[]\n';
+      }
+      return '^done\n';
+    });
+    vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
+
+    try {
+      const results = await decodeCoredumpFile(
+        { elfPath: '/dummy.elf', toolPath: 'fake-gdb' } as DecodeParams,
+        '/dummy-coredump.elf',
+        {},
+        false,
+      );
+
+      // Both threads were extracted and decoded despite non-standard target-id
+      expect(results).toHaveLength(2);
+      expect(results.map((r) => r.threadId)).toEqual(['1', '2']);
+    } finally {
+      sendSpy.mockRestore();
     }
   });
 });

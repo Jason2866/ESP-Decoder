@@ -102,7 +102,10 @@ export class GdbStubServer {
     } catch (err) {
       signal?.removeEventListener('abort', onSetupAbort);
       if (dir) {
-        await rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+        await rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch((err) => {
+          this.debug('Failed to remove temp dir:', err);
+          console.warn('Failed to remove temp dir:', err);
+        });
       }
       this.abortHandler = undefined;
       this.abortSignal = undefined;
@@ -144,7 +147,10 @@ export class GdbStubServer {
     this.abortHandler = undefined;
     if (dir) {
       // Best-effort cleanup; the stub process exits on stdin EOF anyway.
-      this.cleanupPromise = rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+      this.cleanupPromise = rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch((err) => {
+        this.debug('Failed to remove temp dir:', err);
+        console.warn('Failed to remove temp dir:', err);
+      });
       await this.cleanupPromise;
     }
   }

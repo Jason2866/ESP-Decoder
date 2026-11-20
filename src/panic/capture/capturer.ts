@@ -52,6 +52,7 @@ interface EventAggregate {
   firstSeenAt: number;
   lastSeenAt: number;
   ra?: number;
+  pc?: number;
 }
 
 export interface CapturerOptions {
@@ -138,6 +139,9 @@ export class Capturer {
   /** First observed return address per event, kept as dedup evidence even
    * when no display snapshot reports it. */
   private readonly raEvidence = new Map<string, number>();
+  /** First observed fault program counter per event, kept as dedup evidence even
+   * when no display snapshot reports it. */
+  private readonly pcEvidence = new Map<string, number>();
   /** Longest backtrace trace among an event's FINALIZED occurrences —
    * dedup evidence kept separate from the display snapshot so a shorter
    * duplicate winning the display score cannot hide later frames. */
@@ -244,11 +248,15 @@ export class Capturer {
           if (agg.ra === undefined) {
             agg.ra = snap.lightweight.regs?.RA;
           }
+          if (agg.pc === undefined) {
+            agg.pc = snap.lightweight.programCounter;
+          }
         } else {
           this.eventAggregate.set(eventId, {
             firstSeenAt: snap.firstSeenAt,
             lastSeenAt: snap.lastSeenAt,
             ra: snap.lightweight.regs?.RA,
+            pc: snap.lightweight.programCounter,
           });
         }
         const fb = this.eventFallback.get(eventId);
@@ -462,7 +470,7 @@ export class Capturer {
       // different crash.
       if (
         backtracesCompatible(this.btEvidenceFor(exact), candidate.lightweight.backtraceAddrs) &&
-        !faultPcsConflict(exact.lightweight, candidate.lightweight) &&
+        !faultPcsConflict(this.matchLightweight(exact), candidate.lightweight) &&
         returnAddressesCompatible(this.matchLightweight(exact), candidate.lightweight)
       ) {
         this.mergeIntoExisting(exact, candidate, shouldPreferCandidate(exact, candidate), block.id);
@@ -471,13 +479,13 @@ export class Capturer {
     }
 
     const byContainment = this.findRecentContainmentMatch(candidate);
-    if (byContainment && returnAddressesCompatible(byContainment.lightweight, candidate.lightweight)) {
+    if (byContainment && returnAddressesCompatible(this.matchLightweight(byContainment), candidate.lightweight)) {
       this.mergeIntoExisting(byContainment, candidate, shouldPreferCandidate(byContainment, candidate), block.id);
       return;
     }
 
     const byFingerprint = this.findRecentFingerprintMatch(candidate);
-    if (byFingerprint && returnAddressesCompatible(byFingerprint.lightweight, candidate.lightweight)) {
+    if (byFingerprint && returnAddressesCompatible(this.matchLightweight(byFingerprint), candidate.lightweight)) {
       this.mergeIntoExisting(byFingerprint, candidate, shouldPreferCandidate(byFingerprint, candidate), block.id);
       return;
     }
@@ -493,6 +501,13 @@ export class Capturer {
       count: 1,
       lightweight,
     };
+
+    if (lightweight.programCounter !== undefined) {
+      this.pcEvidence.set(next.id, lightweight.programCounter);
+    }
+    if (lightweight.regs?.RA !== undefined) {
+      this.raEvidence.set(next.id, lightweight.regs.RA);
+    }
 
     this.events.push(next);
     this.eventsById.set(next.id, next);
@@ -545,6 +560,7 @@ export class Capturer {
     // still be growing and its truncated trace must not split the merge.
     const fallback = this.eventFallback.get(existing.id);
     const evidencePc =
+      this.pcEvidence.get(existing.id) ??
       fallback?.snap.lightweight.programCounter ??
       existing.lightweight.programCounter;
     if (
@@ -591,6 +607,7 @@ export class Capturer {
     existing.firstSeenAt = Math.min(existing.firstSeenAt, candidate.firstSeenAt);
     existing.lastSeenAt = Math.max(existing.lastSeenAt, candidate.lastSeenAt);
     this.retainRa(existing, candidate.lightweight.regs?.RA);
+    this.retainPc(existing, candidate.lightweight.programCounter);
 
     // The displayed snapshot belongs to the occurrence (block) that
     // supplied it. A revision of that same block always replaces it — the
@@ -640,6 +657,11 @@ export class Capturer {
       this.raEvidence.delete(event.id);
     } else {
       this.raEvidence.set(event.id, agg.ra);
+    }
+    if (agg.pc === undefined) {
+      this.pcEvidence.delete(event.id);
+    } else {
+      this.pcEvidence.set(event.id, agg.pc);
     }
 
     if (this.displayBlockIndex.get(event.id) !== departedBlockId) {
@@ -698,7 +720,7 @@ export class Capturer {
           this.btEvidenceFor(existing),
           candidate.lightweight.backtraceAddrs,
         ) &&
-        !faultPcsConflict(existing.lightweight, candidate.lightweight) &&
+        !faultPcsConflict(this.matchLightweight(existing), candidate.lightweight) &&
         returnAddressesCompatible(this.matchLightweight(existing), candidate.lightweight)
       ) {
         return existing;
@@ -727,7 +749,7 @@ export class Capturer {
           this.btEvidenceFor(existing),
           candidate.lightweight.backtraceAddrs,
         ) &&
-        !faultPcsConflict(existing.lightweight, candidate.lightweight) &&
+        !faultPcsConflict(this.matchLightweight(existing), candidate.lightweight) &&
         returnAddressesCompatible(this.matchLightweight(existing), candidate.lightweight)
       ) {
         return existing;
@@ -756,11 +778,12 @@ export class Capturer {
     this.blockEventIndex.set(blockId, existing.id);
     this.countedBlockIndex.set(blockId, existing.id);
     existing.lastSeenAt = Math.max(existing.lastSeenAt, candidate.lastSeenAt);
-    // Retain RA evidence BEFORE any display replacement below — once the
-    // outgoing snapshot is overwritten its RA is only reachable through
-    // raEvidence, and the published regs must carry only the selected
+    // Retain RA and PC evidence BEFORE any display replacement below — once the
+    // outgoing snapshot is overwritten its evidence is only reachable through
+    // raEvidence/pcEvidence, and the published regs must carry only the selected
     // candidate's registers.
     this.retainRa(existing, candidate.lightweight.regs?.RA);
+    this.retainPc(existing, candidate.lightweight.programCounter);
 
     if (preferCandidate) {
       existing.lines = [...candidate.lines];
@@ -777,18 +800,31 @@ export class Capturer {
   }
 
   /**
-   * Lightweight view used ONLY for dedup matching: fills RA from retained
+   * Lightweight view used ONLY for dedup matching: fills RA and PC from retained
    * evidence when the display snapshot never reported it. The first
-   * observed RA stays dedup evidence regardless of which snapshot
+   * observed RA/PC stays dedup evidence regardless of which snapshot
    * preferCandidate selected — it is never written into a display snapshot
    * that did not report it.
    */
   private matchLightweight(event: CapturerEvent): CapturerLightweight {
     const ra = this.raEvidence.get(event.id);
-    if (ra === undefined || event.lightweight.regs?.RA !== undefined) {
-      return event.lightweight;
+    const pc = this.pcEvidence.get(event.id);
+    let lw = event.lightweight;
+    if (pc !== undefined && lw.programCounter === undefined) {
+      lw = { ...lw, programCounter: pc };
     }
-    return { ...event.lightweight, regs: { ...event.lightweight.regs, RA: ra } };
+    if (ra !== undefined && lw.regs?.RA === undefined) {
+      lw = { ...lw, regs: { ...lw.regs, RA: ra } };
+    }
+    return lw;
+  }
+
+  /** Keep the earliest observed PC as dedup evidence for the event. */
+  private retainPc(existing: CapturerEvent, candidatePc: number | undefined): void {
+    const pc = existing.lightweight.programCounter ?? this.pcEvidence.get(existing.id) ?? candidatePc;
+    if (pc !== undefined) {
+      this.pcEvidence.set(existing.id, pc);
+    }
   }
 
   /** Keep the earliest observed RA as dedup evidence for the event. */
@@ -824,6 +860,7 @@ export class Capturer {
       }
       this.eventsById.delete(removed.id);
       this.raEvidence.delete(removed.id);
+      this.pcEvidence.delete(removed.id);
       this.btEvidence.delete(removed.id);
       this.displayBlockIndex.delete(removed.id);
       this.eventOwnerBlock.delete(removed.id);

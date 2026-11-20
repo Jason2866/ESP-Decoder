@@ -52,7 +52,7 @@ async function tryRawElfFallback(
         return await decodeCoredumpFile(params, extractedElfPath, options, false);
       } finally {
         await fs
-          .rm(tmpDirPath, { recursive: true, force: true })
+          .rm(tmpDirPath, { recursive: true, force: true, maxRetries: 3 })
           .catch((err) => console.warn('Failed to clean up temp dir:', err));
       }
     }
@@ -222,6 +222,7 @@ export async function decodeCoredumpFile(
     options,
   );
   const results: ThreadDecodeResult[] = [];
+  let lastError: unknown;
 
   try {
     // Use -thread-info for a more reliable MI listing of threads
@@ -273,9 +274,14 @@ export async function decodeCoredumpFile(
         }
       }
       for (const objStr of objs) {
-        const m = /id="([^"]+)"\s*,\s*target-id="process\s+(\d+)"/.exec(objStr);
-        if (m) {
-          threadEntries.push([m[1], m[2]]);
+        const idMatch = /id="([^"]+)"/.exec(objStr);
+        if (idMatch) {
+          const tid = idMatch[1];
+          const tcbMatch =
+            /target-id="process\s+(\d+)"/.exec(objStr) ??
+            /target-id="[^\"]*?(\d+)/.exec(objStr);
+          const tcb = tcbMatch ? tcbMatch[1] : '0';
+          threadEntries.push([tid, tcb]);
         }
       }
     }
@@ -286,128 +292,148 @@ export async function decodeCoredumpFile(
     log('threads parsed', { threadIds, threadTcbs });
 
     for (const tid of threadIds) {
-      log('select thread', tid);
-      await client.sendCommand(`-thread-select ${tid}`);
+      try {
+        log('select thread', tid);
+        const selectOut = await client.sendCommand(`-thread-select ${tid}`);
+        const selectError = miErrorRecord(selectOut);
+        if (selectError) {
+          log('thread-select failed; skipping thread', tid, selectError);
+          continue;
+        }
 
-      const regNamesRaw = await client.sendCommand('-data-list-register-names');
-      const regNameMatch = regNamesRaw.match(/register-names=\[(.*?)\]/);
-      const regNames = regNameMatch
-        ? regNameMatch[1]
-            .split(',')
-            .map((s) => s.trim().replace(/^"|"$/g, ''))
-            .map((name, i) => [i.toString(), name] as [string, string])
-            .filter(([, name]) => !!name)
-        : [];
-      const regNameMap = Object.fromEntries(regNames);
+        const regNamesRaw = await client.sendCommand('-data-list-register-names');
+        const regNameMatch = regNamesRaw.match(/register-names=\[(.*?)\]/);
+        const regNames = regNameMatch
+          ? regNameMatch[1]
+              .split(',')
+              .map((s) => s.trim().replace(/^"|"$/g, ''))
+              .map((name, i) => [i.toString(), name] as [string, string])
+              .filter(([, name]) => !!name)
+          : [];
+        const regNameMap = Object.fromEntries(regNames);
 
-      const regsOut = await client.sendCommand('-data-list-register-values x');
-      const parsedRegs = parseRegisters(regsOut);
+        const regsOut = await client.sendCommand('-data-list-register-values x');
+        const parsedRegs = parseRegisters(regsOut);
 
-      const regsAsNamed = Object.fromEntries(
-        Object.entries(parsedRegs)
-          .map(([num, val]) => [regNameMap[num], Number(val)])
-          .filter(([name]) => !!name),
-      );
-      log('regs', tid, Object.keys(regsAsNamed));
+        const regsAsNamed = Object.fromEntries(
+          Object.entries(parsedRegs)
+            .map(([num, val]) => [regNameMap[num], Number(val)])
+            .filter(([name]) => !!name),
+        );
+        log('regs', tid, Object.keys(regsAsNamed));
 
-      const programCounter = regsAsNamed['pc'] ?? regsAsNamed['mepc'];
-      const programCounterHex =
-        programCounter !== undefined ? toHexString(programCounter) : '??';
+        const programCounter = regsAsNamed['pc'] ?? regsAsNamed['mepc'];
+        const programCounterHex =
+          programCounter !== undefined ? toHexString(programCounter) : '??';
 
-      const btOut = await client.sendCommand('-stack-list-frames');
-      const btError = miErrorRecord(btOut);
-      // A stack-frame failure is recorded for this thread but must not
-      // abort decoding of the remaining threads.
-      if (btError) {
-        log('stack-list-frames failed; continuing without frames', btError);
-      }
-      log('stack frames raw length', btOut.length);
+        const btOut = await client.sendCommand('-stack-list-frames');
+        const btError = miErrorRecord(btOut);
+        // A stack-frame failure is recorded for this thread but must not
+        // abort decoding of the remaining threads.
+        if (btError) {
+          log('stack-list-frames failed; continuing without frames', btError);
+        }
+        log('stack frames raw length', btOut.length);
 
-      const argsOut = await client.sendCommand(
-        '-stack-list-arguments --simple-values 0 100',
-      );
-      // Arguments are optional: an MI error keeps the frames, just without args.
-      const argsError = miErrorRecord(argsOut);
-      if (argsError) {
-        log('stack-list-arguments failed; continuing without args', argsError);
-      }
-      log('stack args raw length', argsOut.length);
-      // Parse frame arguments safely, splitting on top-level frame boundaries
-      const argsListMatch = argsError ? null : argsOut.match(/stack-args=\[([\s\S]*)\]/);
-      const frameArgs: { level?: string; args: FrameArg[] }[] = [];
-      if (argsListMatch) {
-        const content = argsListMatch[1];
-        const parts = splitFrameArgEntries(content);
-        for (const frameStr of parts) {
-          const rawMatch = frameStr.match(/frame=\{([\s\S]*)\}/);
-          const raw = rawMatch ? rawMatch[1] : '';
-          const obj: { level?: string; args: FrameArg[] } = { args: [] };
-          const levelMatch = raw.match(/level="(\d+)"/);
-          if (levelMatch) {
-            obj.level = levelMatch[1];
+        let argsOut = '';
+        let argsError: string | undefined;
+        try {
+          argsOut = await client.sendCommand(
+            '-stack-list-arguments --simple-values 0 100',
+          );
+          // Arguments are optional: an MI error keeps the frames, just without args.
+          argsError = miErrorRecord(argsOut);
+          if (argsError) {
+            log('stack-list-arguments failed; continuing without args', argsError);
           }
-          const argsMatchInner = raw.match(/args=\[([\s\S]*)\]/);
-          if (argsMatchInner && argsMatchInner[1].trim()) {
-            const argsContent = argsMatchInner[1];
-            for (const tupleMatch of argsContent.matchAll(MI_TUPLE_RE)) {
-              const fields: Record<string, string> = {};
-              for (const field of splitMiFields(tupleMatch[1])) {
-                const kv = parseMiField(field);
-                if (kv) {
-                  fields[kv[0]] = kv[1];
+        } catch (err) {
+          log('stack-list-arguments failed; continuing without args', err);
+        }
+        log('stack args raw length', argsOut.length);
+        // Parse frame arguments safely, splitting on top-level frame boundaries
+        const argsListMatch = argsError ? null : argsOut.match(/stack-args=\[([\s\S]*)\]/);
+        const frameArgs: { level?: string; args: FrameArg[] }[] = [];
+        if (argsListMatch) {
+          const content = argsListMatch[1];
+          const parts = splitFrameArgEntries(content);
+          for (const frameStr of parts) {
+            const rawMatch = frameStr.match(/frame=\{([\s\S]*)\}/);
+            const raw = rawMatch ? rawMatch[1] : '';
+            const obj: { level?: string; args: FrameArg[] } = { args: [] };
+            const levelMatch = raw.match(/level="(\d+)"/);
+            if (levelMatch) {
+              obj.level = levelMatch[1];
+            }
+            const argsMatchInner = raw.match(/args=\[([\s\S]*)\]/);
+            if (argsMatchInner && argsMatchInner[1].trim()) {
+              const argsContent = argsMatchInner[1];
+              for (const tupleMatch of argsContent.matchAll(MI_TUPLE_RE)) {
+                const fields: Record<string, string> = {};
+                for (const field of splitMiFields(tupleMatch[1])) {
+                  const kv = parseMiField(field);
+                  if (kv) {
+                    fields[kv[0]] = kv[1];
+                  }
+                }
+                if (fields.name !== undefined) {
+                  obj.args.push({ name: fields.name, type: fields.type, value: fields.value });
                 }
               }
-              if (fields.name !== undefined) {
-                obj.args.push({ name: fields.name, type: fields.type, value: fields.value });
-              }
             }
+            frameArgs.push(obj);
           }
-          frameArgs.push(obj);
         }
-      }
 
-      const btParsed = btError ? [] : parseBacktrace(btOut);
-      const stacktraceLines = btParsed.map((frame, index) => {
-        const args = frameArgs[index]?.args || [];
-        // Prefer GDB's resolved fullname (comp_dir + file) over the bare file.
-        const rawFile = frame.fullname || frame.file;
-        const sourceFile = rawFile && rawFile !== '??' ? rawFile : undefined;
-        if (frame.func) {
+        const btParsed = btError ? [] : parseBacktrace(btOut);
+        const stacktraceLines = btParsed.map((frame, index) => {
+          const args = frameArgs[index]?.args || [];
+          // Prefer GDB's resolved fullname (comp_dir + file) over the bare file.
+          const rawFile = frame.fullname || frame.file;
+          const sourceFile = rawFile && rawFile !== '??' ? rawFile : undefined;
+          if (frame.func) {
+            return {
+              regAddr: frame.addr,
+              lineNumber: frame.line ?? '??',
+              method: frame.func,
+              file: sourceFile ?? '??',
+              args,
+            };
+          }
           return {
             regAddr: frame.addr,
             lineNumber: frame.line ?? '??',
-            method: frame.func,
-            file: sourceFile ?? '??',
-            args,
           };
-        }
-        return {
-          regAddr: frame.addr,
-          lineNumber: frame.line ?? '??',
-        };
-      });
-      log('stacktrace lines', tid, stacktraceLines.length);
+        });
+        log('stacktrace lines', tid, stacktraceLines.length);
 
-      const threadResult: DecodeResult = {
-        faultInfo: {
-          programCounter: {
-            addr: programCounterHex,
-            location: stacktraceLines[0] ?? {
-              regAddr: programCounterHex,
-              lineNumber: '??',
+        const threadResult: DecodeResult = {
+          faultInfo: {
+            programCounter: {
+              addr: programCounterHex,
+              location: stacktraceLines[0] ?? {
+                regAddr: programCounterHex,
+                lineNumber: '??',
+              },
             },
           },
-        },
-        regs: regsAsNamed,
-        stacktraceLines,
-      };
+          regs: regsAsNamed,
+          stacktraceLines,
+        };
 
-      results.push({
-        threadId: tid,
-        TCB: threadTcbs[tid] ?? 0,
-        result: threadResult,
-        current: tid === currentThreadId,
-      });
+        results.push({
+          threadId: tid,
+          TCB: threadTcbs[tid] ?? 0,
+          result: threadResult,
+          current: tid === currentThreadId,
+        });
+      } catch (err) {
+        if (options.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+          throw err;
+        }
+        lastError = err;
+        log('thread decode failed or terminated early', tid, err);
+        break;
+      }
     }
   } finally {
     await client.close();
@@ -419,6 +445,10 @@ export async function decodeCoredumpFile(
     if (fallback) {
       return fallback;
     }
+  }
+
+  if (!results.length && lastError) {
+    throw lastError;
   }
 
   return results;
