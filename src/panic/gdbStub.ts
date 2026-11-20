@@ -118,12 +118,8 @@ export class GdbStubServer {
   private buildRemoteSpec(scriptPath: string, infoPath: string): string {
     if (process.platform === 'win32') {
       // MinGW GDB runs `|cmd` via CreateProcess on the first token — it does
-      // NOT invoke cmd.exe or a shell, so a .cmd wrapper or `VAR=1` prefix
-      // cannot work. Set ELECTRON_RUN_AS_NODE in the inherited environment
-      // so the stub process (VS Code's Electron binary) runs as plain
-      // Node.js — this avoids routing paths through cmd.exe where characters
-      // like & in temp-dir paths would be treated as command separators.
-      process.env.ELECTRON_RUN_AS_NODE = '1';
+      // NOT invoke cmd.exe or a shell, so the GDB child environment must carry
+      // ELECTRON_RUN_AS_NODE for the stub (VS Code's Electron binary).
       const q = (p: string) => `"${p.replace(/"/g, '')}"`;
       return `|${q(process.execPath)} ${q(scriptPath)} ${q(infoPath)}`;
     }

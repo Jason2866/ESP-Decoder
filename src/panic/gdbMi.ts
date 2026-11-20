@@ -61,6 +61,7 @@ function waitForChildExit(child: cp.ChildProcess, timeoutMs: number): Promise<bo
 export interface GdbMiOptions {
   signal?: AbortSignal;
   debug?: (...args: unknown[]) => void;
+  env?: NodeJS.ProcessEnv;
   /** Test hook: replace the child_process.spawn used to start GDB. */
   spawnProcess?: typeof cp.spawn;
 }
@@ -89,6 +90,7 @@ export class GdbMiClient {
     this.cp = (options.spawnProcess ?? cp.spawn)(gdbPath, args, {
       stdio: 'pipe',
       signal: options.signal,
+      ...(options.env ? { env: options.env } : {}),
     });
     this.id = ++clientSeq;
     this.log = createLogger(this.id, options.debug);

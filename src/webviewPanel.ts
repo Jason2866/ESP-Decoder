@@ -2174,6 +2174,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     let connected = false;
     let autoscroll = true;
     let crashCount = 0;
+    const clearedCrashIds = new Set();
     // Guards against scheduling multiple requestAnimationFrame callbacks for scrolling.
     let scrollRAFPending = false;
     // Prevents programmatic scrollTop assignments from being misread as user
@@ -2531,6 +2532,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       currentLine = null;
       currentLineRaw = '';
       dedupResetLine();
+      crashList.querySelectorAll('.crash-event').forEach((el) => {
+        const id = el.id.replace(/^crash-/, '');
+        if (id) { clearedCrashIds.add(id); }
+      });
       crashList.innerHTML = '';
       crashCount = 0;
       crashCountBadge.style.display = 'none';
@@ -3305,6 +3310,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     }
 
     function addCrashEvent(event) {
+      clearedCrashIds.delete(String(event.id));
       if (noCrashes.parentElement === crashList) {
         noCrashes.style.display = 'none';
       }
@@ -3354,7 +3360,11 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     function updateCrashEvent(event) {
       const el = document.getElementById('crash-' + event.id);
       if (!el) {
-        // Event element missing (e.g. cleared buffer) — add it like a new event.
+        if (clearedCrashIds.has(String(event.id))) {
+          return;
+        }
+        // An update can arrive before its detection message; show it if it was
+        // not explicitly removed by Clear.
         addCrashEvent(event);
         return;
       }
@@ -3566,7 +3576,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       // continues the same path — a space followed by a separator starts a
       // new rooted path, so preceding diagnostic text is never absorbed
       // into the captured file (e.g. '/old.log see C:\\real\\f.cpp:12').
-      var re = /((?:(?:[A-Za-z]:)?[\\\\/]|\\.{1,2}[\\\\/])(?:[\\w.\\-\\/\\\\]| +(?=[\\w.\\-]))+\\.\\w+):(\\d+)/g;
+      var re = /((?:(?:[A-Za-z]:)?[\\\\/]|\\.{1,2}[\\\\/])(?:[\\w.\\-\\/\\\\]| +(?!\\.{1,2}[\\\\/])(?=[\\w.\\-]))+\\.\\w+):(\\d+)/g;
       var m;
       while ((m = re.exec(text)) !== null) {
         result += escapeHtml(text.slice(lastIndex, m.index));

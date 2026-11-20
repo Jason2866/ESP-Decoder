@@ -295,7 +295,7 @@ function isCompleteBlock(lines: string[]): boolean {
       // marker does not.
       /^Backtrace:\s*0x[0-9a-fA-F]+\s*:\s*0x[0-9a-fA-F]+/i.test(line) ||
       /^Rebooting\.\.\./i.test(line) ||
-      /ELF file SHA256:/i.test(line) ||
+      /^ELF file SHA256:/i.test(line) ||
       line.startsWith('<<<stack<<<')
     ) {
       return true;
@@ -361,7 +361,7 @@ function isContinuationLine(line: string): boolean {
     /^Core\s+\d+\s+register dump:/i.test(trimmed) ||
     // ESP-IDF prints the firmware ELF SHA256 between the panic data and
     // 'Rebooting...' — keep a provisionally emitted block open for it.
-    /ELF file SHA256:/i.test(trimmed) ||
+    /^ELF file SHA256:/i.test(trimmed) ||
     trimmed.includes('>>>stack>>>')
   );
 }

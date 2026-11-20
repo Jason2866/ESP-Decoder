@@ -72,6 +72,12 @@ class GDBSession {
       // prompt must still fail the session.
       stderr.on('data', (chunk: string) => {
         this.diagnostics = (this.diagnostics + chunk).slice(-16384);
+        if (!this.didExecuteFirstCommand && this.diagnostics.includes(noSuchFileOrDirectory)) {
+          this.terminate(
+            new Error(`The ELF file does not exist or is not readable: ${this.elfPath}`),
+          );
+          return;
+        }
         if (
           !this.didExecuteFirstCommand &&
           (this.diagnostics.includes(notExecutableFormat) ||
@@ -166,32 +172,32 @@ class GDBSession {
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
+      let startupCheck: NodeJS.Immediate | undefined;
+      const missingToolError = () =>
+        Object.assign(new Error(`GDB tool not found at ${this.toolPath}`), { code: 'ENOENT' });
+      const startupError = (err: Error): Error =>
+        (err as NodeJS.ErrnoException).code === 'ENOENT' ? missingToolError() : err;
       // Translate spawn errors (e.g. ENOENT) into the friendly startup error;
       // terminate() may reject through this path before onError runs.
       this.startReject = (err: Error) => {
-        const errno = err as NodeJS.ErrnoException;
-        reject(
-          errno.code === 'ENOENT'
-            ? new Error(`GDB tool not found at ${this.toolPath}`)
-            : err,
-        );
+        reject(startupError(err));
       };
       const cleanup = () => {
         this.startReject = null;
         this.startCleanup = null;
+        if (startupCheck) {
+          clearImmediate(startupCheck);
+          startupCheck = undefined;
+        }
         this.gdb.off('error', onError);
-        this.gdb.stdout!.off('data', onData);
-        this.gdb.stderr!.off('data', onData);
+        this.gdb.stdout?.off('data', onData);
+        this.gdb.stderr?.off('data', onData);
       };
       this.startCleanup = cleanup;
 
       const onError = (error: Error & { code?: string }) => {
-        let userError: Error = error;
-        if (error.code === 'ENOENT') {
-          userError = new Error(`GDB tool not found at ${this.toolPath}`);
-        }
         cleanup();
-        reject(userError);
+        reject(startupError(error));
       };
 
       const onData = () => {
@@ -227,22 +233,36 @@ class GDBSession {
         }
 
         const idx = this.promptBoundaryIndex();
-        if (idx !== -1) {
-          this.buffer = this.buffer.slice(idx + prompt.length);
-          cleanup();
-          resolve();
+        if (idx !== -1 && !startupCheck) {
+          // stdout and stderr are independent pipes. Give already-emitted
+          // stderr diagnostics a turn to arrive before accepting the prompt.
+          startupCheck = setImmediate(() => {
+            startupCheck = undefined;
+            if (this.error) {
+              cleanup();
+              reject(this.error);
+              return;
+            }
+            const promptIndex = this.promptBoundaryIndex();
+            if (promptIndex !== -1) {
+              this.buffer = this.buffer.slice(promptIndex + prompt.length);
+              cleanup();
+              resolve();
+            }
+          });
         }
       };
       // If the process already terminated, startReject was consumed by
       // terminate(); reject immediately instead of waiting for data.
       if (this.error) {
+        const startupErr = startupError(this.error);
         cleanup();
-        reject(this.error);
+        reject(startupErr);
         return;
       }
       this.gdb.on('error', onError);
-      this.gdb.stdout!.on('data', onData);
-      this.gdb.stderr!.on('data', onData);
+      this.gdb.stdout?.on('data', onData);
+      this.gdb.stderr?.on('data', onData);
       // Process any data already buffered by the constructor's onData
       onData();
     });
@@ -357,6 +377,9 @@ export async function addr2line(
         const lineOutput = await session.exec(`info line *${hex}`);
         parsedLines = parseLines(lineOutput, debug);
         location = parsedLines.find(isParsedGDBLine);
+        if (location) {
+          location = { ...location, regAddr: hex };
+        }
       }
       results.set(addr, {
         addr,

@@ -1,5 +1,9 @@
 import type { PanicInfoWithBacktrace, PanicInfoWithStackData } from './types';
 
+type XtensaPanicInfo = Omit<PanicInfoWithBacktrace, 'backtraceAddrs'> & {
+  backtraceAddrs: number[];
+};
+
 /**
  * Panic output parsers, modeled on esp-idf-panic-decoder's
  * parse_idf_riscv_panic_output (registers + stack dump) plus the Xtensa
@@ -368,7 +372,7 @@ export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrac
  * ESP8266 panic output: "Exception (N):" header, epcN=/excvaddr= register
  * assignments, and a >>>stack>>> hex dump of candidate return addresses.
  */
-export function parseESP8266PanicOutput(input: string): PanicInfoWithBacktrace {
+export function parseESP8266PanicOutput(input: string): XtensaPanicInfo {
   const lines = input.split(/\r?\n|\r/);
   const regs: Record<string, number> = {};
   const coreId = 0;
@@ -418,7 +422,7 @@ export function parseESP8266PanicOutput(input: string): PanicInfoWithBacktrace {
  * (...)" header, "NAME : 0x..." register lines, and a "Backtrace:" line of
  * 0xPC:0xSP pairs.
  */
-export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
+export function parseESP32PanicOutput(input: string): XtensaPanicInfo {
   const lines = input.split(/\r?\n|\r/);
   const coreIdMatch =
     input.match(/Guru Meditation Error:\s*Core\s+(\d+)/i) ??
@@ -447,6 +451,7 @@ export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
 
   // Lines before the first dump header belong to the panicking core.
   let current = section(panicCoreId ?? 0);
+  let dumpClosed = false;
 
   const regRegex = /([A-Z]+[0-9]*)\s*:\s*(0x[0-9a-fA-F]+)/g;
   for (const line of lines) {
@@ -454,13 +459,16 @@ export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
     const dumpMatch = line.match(/^\s*Core\s+(\d+)\s+register dump:/);
     if (dumpMatch) {
       current = section(parseInt(dumpMatch[1], 10));
+      dumpClosed = false;
     }
 
-    for (const match of line.matchAll(regRegex)) {
-      const [, regName, hexValue] = match;
-      const value = parseInt(hexValue, 16);
-      if (!Number.isNaN(value)) {
-        current.regs[regName] = value;
+    if (!dumpClosed && !/^\s*Backtrace:/i.test(line)) {
+      for (const match of line.matchAll(regRegex)) {
+        const [, regName, hexValue] = match;
+        const value = parseInt(hexValue, 16);
+        if (!Number.isNaN(value)) {
+          current.regs[regName] = value;
+        }
       }
     }
 
@@ -473,6 +481,7 @@ export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
           current.backtraceAddrs.push(addr);
         }
       }
+      dumpClosed = true;
     }
   }
 
@@ -503,7 +512,7 @@ export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
 }
 
 /** Try ESP32 format first, fall back to ESP8266 when it yields nothing. */
-export function parseXtensaPanicOutput(input: string): PanicInfoWithBacktrace {
+export function parseXtensaPanicOutput(input: string): XtensaPanicInfo {
   const parsed = parseESP32PanicOutput(input);
   if (
     Object.keys(parsed.regs).length === 0 &&

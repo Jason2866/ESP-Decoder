@@ -561,10 +561,7 @@ export class Capturer {
     // event's FINALIZED occurrence evidence — the provisional display may
     // still be growing and its truncated trace must not split the merge.
     const fallback = this.eventFallback.get(existing.id);
-    const evidencePc =
-      this.pcEvidence.get(existing.id) ??
-      fallback?.snap.lightweight.programCounter ??
-      existing.lightweight.programCounter;
+    const evidencePc = this.eventAggregate.get(existing.id)?.pc;
     if (
       evidencePc !== undefined &&
       candidate.lightweight.programCounter !== undefined &&
@@ -1159,15 +1156,10 @@ function endsWithCompleteBacktracePair(text: string): boolean {
   if (!match) {
     return true;
   }
-  const tokens = match[1].trim().split(/\s+/).filter(Boolean);
-  let last = tokens[tokens.length - 1];
-  // ESP-IDF marks a truncated/corrupted backtrace tail with a final
-  // '|<-CORRUPTED' or '|<-CONTINUES' token — accept it only when it
-  // follows a complete PC:SP pair.
-  if (last === '|<-CORRUPTED' || last === '|<-CONTINUES') {
-    last = tokens[tokens.length - 2];
-  }
-  return last !== undefined && /^0x[0-9a-fA-F]+:0x[0-9a-fA-F]+$/.test(last);
+  const tail = match[1]
+    .trim()
+    .replace(/\s+\|<-(?:CORRUPTED|CONTINUES)\s*$/i, '');
+  return /(?:^|\s)0x[0-9a-fA-F]+\s*:\s*0x[0-9a-fA-F]+$/.test(tail);
 }
 
 function isCompletePendingCrashLine(text: string): boolean {

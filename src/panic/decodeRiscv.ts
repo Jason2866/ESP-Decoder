@@ -178,7 +178,12 @@ export async function fetchStacktraceWithMi(
     server = gdbServer;
     log('gdb stub ready', { remoteSpec });
 
-    client = new GdbMiClient(toolPath, ['--interpreter=mi2', '-n', elfPath], options);
+    client = new GdbMiClient(toolPath, ['--interpreter=mi2', '-n', elfPath], {
+      ...options,
+      ...(process.platform === 'win32'
+        ? { env: { ...process.env, ...options.env, ELECTRON_RUN_AS_NODE: '1' } }
+        : {}),
+    });
     await client.drainHandshake();
     const targetResult = await client.sendCommand(`-target-select remote ${remoteSpec}`);
     if (miErrorPattern.test(targetResult)) {

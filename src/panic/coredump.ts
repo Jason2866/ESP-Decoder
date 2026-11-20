@@ -285,6 +285,13 @@ export async function decodeCoredumpFile(
         }
       }
     }
+    if (threadEntries.length === 0) {
+      const message = 'GDB core load returned no thread entries';
+      options.onWarning?.(message);
+      if (!options.onWarning) {
+        throw new Error(message);
+      }
+    }
     const threadIds = threadEntries.map(([id]) => id);
     const threadTcbs = Object.fromEntries(
       threadEntries.map(([id, tcb]) => [id, Number(tcb)]),

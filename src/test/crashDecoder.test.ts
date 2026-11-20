@@ -1253,6 +1253,7 @@ describe('parseESP32PanicOutput – dual-core dumps', () => {
       'EXCVADDR: 0x00000000  EXCCAUSE: 0x00000000',
       '',
       'Backtrace: 0x40000001:0x3ffb0001 0x40000009:0x3ffb0009',
+      'PC      : 0x40009999  PS      : 0x00060030',
       '',
       'Core  1 register dump:',
       'PC      : 0x40000002  PS      : 0x00060030  A0      : 0x3ffb0002  A1      : 0x3ffb0003',
@@ -1271,6 +1272,7 @@ describe('parseESP32PanicOutput – dual-core dumps', () => {
     expect(parsed.programCounter).toBe(0x40000002);
     // Only core 1's backtrace PCs.
     expect(parsed.backtraceAddrs).toEqual([0x40000002, 0x40000003]);
+    expect(typeof parsed.backtraceAddrs[0]).toBe('number');
   });
 
   it('retains an indented Backtrace line during panic-core selection', () => {
@@ -1406,6 +1408,65 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     expect(second?.file).toBe('/src/main-40000004.c');
     expect(second?.lineNumber).toBe('5');
   }, 30_000);
+
+  it('keeps the requested address when info line resolves to a range start', async () => {
+    const infoGdbPath = path.join(tmpDir, 'info-gdb.cjs');
+    fs.writeFileSync(
+      infoGdbPath,
+      `#!/usr/bin/env node
+const readline = require('readline');
+process.stdout.write('Fake GNU gdb\\n(gdb) ');
+readline.createInterface({ input: process.stdin }).on('line', (line) => {
+  if (line.startsWith('list ')) {
+    process.stdout.write('No source available\\n(gdb) ');
+  } else if (line.startsWith('info line ')) {
+    process.stdout.write('Line 42 of \\\"/src/range.c\\\" starts at address 0x40000000\\n(gdb) ');
+  } else {
+    process.stdout.write('OK\\n(gdb) ');
+  }
+});
+`,
+      { mode: 0o755 },
+    );
+
+    const requested = 0x40000123;
+    const [result] = await addr2line(
+      { elfPath: '/nonexistent/firmware.elf', toolPath: infoGdbPath },
+      [requested],
+    );
+    expect(result?.location).toMatchObject({
+      regAddr: '0x40000123',
+      file: '/src/range.c',
+      lineNumber: '42',
+    });
+  });
+
+  it('retains ENOENT on the friendly missing GDB error', async () => {
+    const missingGdbPath = path.join(tmpDir, 'missing-gdb');
+    await expect(
+      addr2line({ elfPath: '/nonexistent/firmware.elf', toolPath: missingGdbPath }, [0x40000000]),
+    ).rejects.toMatchObject({
+      message: `GDB tool not found at ${missingGdbPath}`,
+      code: 'ENOENT',
+    });
+  });
+
+  it('rejects a missing ELF diagnostic delivered alongside the startup prompt', async () => {
+    const badElfGdbPath = path.join(tmpDir, 'bad-elf-gdb.cjs');
+    fs.writeFileSync(
+      badElfGdbPath,
+      `#!/usr/bin/env node
+process.stderr.write('No such file or directory\\n');
+process.stdout.write('Fake GNU gdb\\n(gdb) ');
+process.stdin.resume();
+`,
+      { mode: 0o755 },
+    );
+
+    await expect(
+      addr2line({ elfPath: '/missing/firmware.elf', toolPath: badElfGdbPath }, [0x40000000]),
+    ).rejects.toThrow('The ELF file does not exist or is not readable: /missing/firmware.elf');
+  });
 });
 
 describe('CrashCapturer – pending tail stays buffered', () => {
@@ -1554,13 +1615,13 @@ describe('Capturer – block revisions', () => {
           'MEPC    : 0x42004abc  MCAUSE  : 0x00000002\n' +
           'Stack memory:\n' +
           '3fc8f2d0: 0x00000000 0x00000000 0x00000000 0x00000000\n' +
-          'Backtrace: 0x42004abc:0x3fc8f2d0 0x42000001:0x3fc8f2e0',
+          'Backtrace: 0x42004abc : 0x3fc8f2d0 0x42000001:0x3fc8f2e0',
         'utf8',
       ),
     );
     await sleep(120);
     expect(detected).toHaveLength(1);
-    expect(detected[0].rawText).toContain('Backtrace: 0x42004abc:0x3fc8f2d0');
+    expect(detected[0].rawText).toContain('Backtrace: 0x42004abc : 0x3fc8f2d0');
     expect(detected[0].lightweight.regs?.MEPC).toBe(0x42004abc);
 
     // The terminator completes the SAME logical line — a revision, not a
@@ -1573,18 +1634,17 @@ describe('Capturer – block revisions', () => {
     capturer.dispose();
   });
 
-  it('replaces a truncated preview value when the pending line completes', async () => {
+  it('does not replace Xtensa registers with lines after Backtrace', async () => {
     const capturer = new Capturer({ quietPeriodMs: 50 });
     const detected: CapturerEvent[] = [];
     capturer.on('eventDetected', (e) => detected.push(e));
 
-    // The dump is complete except the final register line, which arrives
-    // unterminated AND truncated mid-value: the preview publishes
-    // RA = 0x4200 while the real value will be 0x42001234. Xtensa format
-    // is used so the register line after 'Backtrace:' is still parsed.
+    // The dump's saved RA precedes Backtrace. A later unterminated register
+    // line must not replace it because Backtrace closes this core's dump.
     capturer.push(
       Buffer.from(
         'assert failed: same_reason\n' +
+          'RA      : 0x11111111\n' +
           'Backtrace: 0x400d1000:0x3ffb1000\n' +
           'RA      : 0x4200',
         'utf8',
@@ -1592,12 +1652,10 @@ describe('Capturer – block revisions', () => {
     );
     await sleep(120);
     expect(detected).toHaveLength(1);
-    expect(detected[0].lightweight.regs?.RA).toBe(0x4200);
+    expect(detected[0].lightweight.regs?.RA).toBe(0x11111111);
 
-    // The rest of the value plus the terminator completes the SAME line —
-    // same block id, so it must revise the preview in place. A naive RA
-    // compatibility check would see 0x4200 vs 0x42001234 as a conflict and
-    // emit a second event for one crash.
+    // Completing that later line must keep the original crash register and
+    // remain a revision of the same block.
     capturer.push(Buffer.from('1234\nRebooting...\n', 'utf8'));
     await sleep(120);
     capturer.flush();
@@ -1605,7 +1663,7 @@ describe('Capturer – block revisions', () => {
 
     expect(detected).toHaveLength(1);
     expect(capturer.getEvents()).toHaveLength(1);
-    expect(capturer.getEvents()[0].lightweight.regs?.RA).toBe(0x42001234);
+    expect(capturer.getEvents()[0].lightweight.regs?.RA).toBe(0x11111111);
     capturer.dispose();
   });
 
@@ -1710,8 +1768,9 @@ describe('Capturer – block revisions', () => {
     capturer.push(
       Buffer.from(
         'assert failed: shared_reason\n' +
-          'Backtrace: 0x400d1000:0x3ffb1000 0x400d2000:0x3ffb2000\n' +
-          'RA      : 0x11111111\n',
+          'Core 0 register dump:\n' +
+          'PC      : 0x400d1000  RA      : 0x11111111\n' +
+          'Backtrace: 0x400d1000:0x3ffb1000 0x400d2000:0x3ffb2000\n',
         'utf8',
       ),
     );
@@ -1724,6 +1783,8 @@ describe('Capturer – block revisions', () => {
     capturer.push(
       Buffer.from(
         'assert failed: shared_reason\n' +
+          'Core 0 register dump:\n' +
+          'PC      : 0x400d1000\n' +
           'Backtrace: 0x400d1000:0x3ffb1000 0x400d2000:0x3ffb2000 0x400d3000:0x3ffb3000\n',
         'utf8',
       ),
@@ -1733,10 +1794,12 @@ describe('Capturer – block revisions', () => {
     expect(capturer.getEvents()[0].count).toBe(2);
     expect(capturer.getEvents()[0].rawText).toContain('0x400d3000');
 
-    // B revises with a conflicting RA — the provisional merge was wrong.
-    // B splits out AND event A must revert to its own capture: lines,
-    // registers, backtrace, RA evidence, and count all roll back.
-    capturer.push(Buffer.from('RA      : 0x99999999\n', 'utf8'));
+    // B revises with a conflicting PC in a new core dump section — the
+    // provisional merge was wrong. B splits out and event A must revert to
+    // its own capture: lines, registers, backtrace, and count all roll back.
+    capturer.push(
+      Buffer.from('Core 0 register dump:\nPC      : 0x400d9999\n', 'utf8'),
+    );
     await sleep(120);
     capturer.push(Buffer.from('Rebooting...\n', 'utf8'));
     capturer.flush();
@@ -1751,7 +1814,7 @@ describe('Capturer – block revisions', () => {
     expect(a.lightweight.regs?.RA).toBe(0x11111111);
     expect(a.lightweight.backtraceAddrs).toEqual([0x400d1000, 0x400d2000]);
     expect(b.count).toBe(1);
-    expect(b.lightweight.regs?.RA).toBe(0x99999999);
+    expect(b.lightweight.programCounter).toBe(0x400d9999);
     expect(b.lightweight.backtraceAddrs).toContain(0x400d3000);
     capturer.dispose();
   });
@@ -1803,8 +1866,8 @@ describe('Capturer – block revisions', () => {
     expect(event.lightweight.regs?.RA).toBe(0x11111111);
     capturer.dispose();
   });
-});
 
+});
 describe('GdbMiClient – close()', () => {
   const isWindows = process.platform === 'win32';
   let tmpDir: string;
@@ -2095,6 +2158,18 @@ describe('gdbStubMain – partial stack reads', () => {
 // ---------------------------------------------------------------------------
 
 describe('CrashFramer – provisional quiet flush', () => {
+  it('only treats a leading ELF checksum marker as complete', () => {
+    const embedded = new CrashFramer(500);
+    embedded.pushLine('assert failed: checksum text', 0);
+    embedded.pushLine('assertion mentions ELF file SHA256: deadbeef', 10);
+    expect(embedded.flush(1000, true)).toEqual([]);
+
+    const standalone = new CrashFramer(500);
+    standalone.pushLine('assert failed: checksum record', 0);
+    standalone.pushLine(' elf FILE SHA256: deadbeef', 10);
+    expect(standalone.flush(1000, true)).toHaveLength(1);
+  });
+
   it('keeps the block open for continuation rows after a quiet emit', () => {
     const framer = new CrashFramer(500);
     framer.pushLine('assert failed: boom', 0);
@@ -2706,7 +2781,8 @@ describe('GdbStubServer – Windows remote spec', () => {
     const sendSpy = vi
       .spyOn(GdbMiClient.prototype, 'sendCommand')
       .mockResolvedValue('^done\n');
-    vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const handshakeSpy = vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const closeSpy = vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
     try {
       const panicInfo: PanicInfoWithStackData = {
         coreId: 0,
@@ -2716,9 +2792,8 @@ describe('GdbStubServer – Windows remote spec', () => {
         stackData: Buffer.alloc(0),
       };
       // fetchStacktraceWithMi builds its own stub + MI client; the mocked
-      // platform makes buildRemoteSpec set ELECTRON_RUN_AS_NODE in
-      // process.env and emit a direct-exec spec (no cmd.exe wrapper),
-      // so paths with & are passed literally.
+      // platform makes buildRemoteSpec emit a direct-exec spec (no cmd.exe
+      // wrapper), so paths with & are passed literally.
       const stdout = Object.assign(new EventEmitter(), {
         setEncoding: () => {},
       });
@@ -2739,11 +2814,16 @@ describe('GdbStubServer – Windows remote spec', () => {
         stdin,
         kill: () => true,
       }) as unknown as cp.ChildProcess;
+      let childEnv: NodeJS.ProcessEnv | undefined;
+      const spawnProcess = ((_command: string, _args: string[], spawnOptions: { env?: NodeJS.ProcessEnv }) => {
+        childEnv = spawnOptions.env;
+        return child;
+      }) as unknown as typeof cp.spawn;
       const params = { elfPath: '/nonexistent.elf', toolPath: 'fake-gdb' } as DecodeParams;
       await fetchStacktraceWithMi(
         params,
         panicInfo,
-        { spawnProcess: (() => child) as unknown as typeof cp.spawn },
+        { spawnProcess },
         () => {},
       );
 
@@ -2757,16 +2837,14 @@ describe('GdbStubServer – Windows remote spec', () => {
       expect(spec).not.toContain(' /d /c ');
       // The spec's embedded quotes must reach GDB unescaped.
       expect(spec.startsWith('|"')).toBe(true);
-      // ELECTRON_RUN_AS_NODE must have been set in the environment.
-      expect(process.env.ELECTRON_RUN_AS_NODE).toBe('1');
+      // The flag belongs to the GDB child environment, not the host process.
+      expect(childEnv?.ELECTRON_RUN_AS_NODE).toBe('1');
+      expect(process.env.ELECTRON_RUN_AS_NODE).toBe(prevElectronNode);
     } finally {
       sendSpy.mockRestore();
+      handshakeSpy.mockRestore();
+      closeSpy.mockRestore();
       platformSpy.mockRestore();
-      if (prevElectronNode === undefined) {
-        delete process.env.ELECTRON_RUN_AS_NODE;
-      } else {
-        process.env.ELECTRON_RUN_AS_NODE = prevElectronNode;
-      }
     }
   });
 });
@@ -2835,8 +2913,29 @@ describe('Capturer – retained PC evidence prevents conflict merges', () => {
 });
 
 describe('decodeCoredumpFile – thread attribution and error resilience', () => {
+  it('reports a successful handshake with no decoded threads', async () => {
+    const handshakeSpy = vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockResolvedValue('^done,threads=[]\n');
+    const closeSpy = vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
+    const warnings: string[] = [];
+    try {
+      const results = await decodeCoredumpFile(
+        { elfPath: '/dummy.elf', toolPath: 'fake-gdb' } as DecodeParams,
+        '/dummy-coredump.elf',
+        { onWarning: (warning) => warnings.push(warning) },
+        false,
+      );
+      expect(results).toEqual([]);
+      expect(warnings).toContain('GDB core load returned no thread entries');
+    } finally {
+      sendSpy.mockRestore();
+      handshakeSpy.mockRestore();
+      closeSpy.mockRestore();
+    }
+  });
+
   it('skips thread on thread-select failure and does not attribute previous thread frames', async () => {
-    vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const handshakeSpy = vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
     const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockImplementation(async (cmd: string) => {
       if (cmd === '-thread-info') {
         return '^done,threads=[{id="1",target-id="process 100"},{id="2",target-id="process 200"}],current-thread-id="1"\n';
@@ -2861,7 +2960,7 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
       }
       return '^done\n';
     });
-    vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
+    const closeSpy = vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
 
     try {
       const results = await decodeCoredumpFile(
@@ -2879,11 +2978,13 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
       expect(frame0.method).toBe('app_main');
     } finally {
       sendSpy.mockRestore();
+      handshakeSpy.mockRestore();
+      closeSpy.mockRestore();
     }
   });
 
   it('recovers thread stack frames when stack-list-arguments command fails or GDB terminates', async () => {
-    vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const handshakeSpy = vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
     const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockImplementation(async (cmd: string) => {
       if (cmd === '-thread-info') {
         return '^done,threads=[{id="1",target-id="process 100"}],current-thread-id="1"\n';
@@ -2905,7 +3006,7 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
       }
       return '^done\n';
     });
-    vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
+    const closeSpy = vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
 
     try {
       const results = await decodeCoredumpFile(
@@ -2925,11 +3026,13 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
       expect(frame0.args).toEqual([]);
     } finally {
       sendSpy.mockRestore();
+      handshakeSpy.mockRestore();
+      closeSpy.mockRestore();
     }
   });
 
   it('extracts thread entries with non-standard target-id strings', async () => {
-    vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const handshakeSpy = vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
     const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockImplementation(async (cmd: string) => {
       if (cmd === '-thread-info') {
         return '^done,threads=[{id="1",target-id="Thread 0x3ffb0000",name="main"},{id="2",target-id="Remote target",name="worker"}],current-thread-id="1"\n';
@@ -2951,7 +3054,7 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
       }
       return '^done\n';
     });
-    vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
+    const closeSpy = vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
 
     try {
       const results = await decodeCoredumpFile(
@@ -2966,11 +3069,13 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
       expect(results.map((r) => r.threadId)).toEqual(['1', '2']);
     } finally {
       sendSpy.mockRestore();
+      handshakeSpy.mockRestore();
+      closeSpy.mockRestore();
     }
   });
 
   it('reports thread skip, frame failure, and early termination via onWarning and result warning', async () => {
-    vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const handshakeSpy = vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
     const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockImplementation(async (cmd: string) => {
       if (cmd === '-thread-info') {
         return '^done,threads=[{id="1",target-id="process 100"},{id="2",target-id="process 200"},{id="3",target-id="process 300"}],current-thread-id="1"\n';
@@ -2998,7 +3103,7 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
       }
       return '^done\n';
     });
-    vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
+    const closeSpy = vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
 
     const warnings: string[] = [];
     try {
@@ -3018,6 +3123,8 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
       expect(warnings.some((w) => w.includes('decode failed or terminated early'))).toBe(true);
     } finally {
       sendSpy.mockRestore();
+      handshakeSpy.mockRestore();
+      closeSpy.mockRestore();
     }
   });
 });

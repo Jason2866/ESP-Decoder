@@ -7,6 +7,7 @@ import { findPioEnvironments, getPioBuildDir, selectElfFile, getMonitorBaudRate 
 import { findEspIdfBuilds } from './espIdfIntegration';
 import { EspDecoderMcpHttpServer, McpServerDeps } from './mcpServer';
 import { runUpload } from './mcpUpload';
+import { chipArch, KNOWN_CHIPS } from './chipTargets';
 
 /** Shape of the public API exported by the pioarduino IDE extension. */
 interface PioarduinoApi {
@@ -410,10 +411,23 @@ async function tryAutoDetectElf(): Promise<void> {
         // family — an explicit arch override must not be paired with an
         // incompatible discovered GDB (decodeCrash would not search for
         // another tool when a path is already supplied).
+        const normalizeArch = (arch: string): string => {
+          const normalized = arch.trim().toLowerCase();
+          const chipAlias = normalized.replace(/[-_]/g, '');
+          if (/^xtensa(?:$|[-_])/.test(normalized)) {
+            return 'xtensa';
+          }
+          if (/^riscv(?:32)?(?:$|[-_])/.test(normalized)) {
+            return 'riscv';
+          }
+          // Keep the original value for the effective target and chip-specific
+          // discovery; only compare canonical architecture families here.
+          return KNOWN_CHIPS.includes(chipAlias) ? chipArch(chipAlias) : normalized;
+        };
         const archConflict =
           explicitArch !== undefined &&
           newest.targetArch !== undefined &&
-          explicitArch !== newest.targetArch;
+          normalizeArch(explicitArch) !== normalizeArch(newest.targetArch);
         sessionConfig = {
           ...sessionConfig,
           elfPath: newest.elfPath,
