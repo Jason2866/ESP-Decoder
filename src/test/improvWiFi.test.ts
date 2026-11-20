@@ -404,7 +404,8 @@ describe('withImprovSession', () => {
     const otherOperation = withImprovSession(transport, 1000, (engine) => engine.requestInfo());
     await installed;
     await dialogCancellation.cancel();
-    interceptor?.(frame(ImprovType.RPCResult, rpcResult(ImprovRPCCommand.RequestDeviceInformation, 'fw', 'v', 'chip', 'name')));
+    const activeInterceptor = interceptor as ((d: Buffer) => void) | null;
+    activeInterceptor?.(frame(ImprovType.RPCResult, rpcResult(ImprovRPCCommand.RequestDeviceInformation, 'fw', 'v', 'chip', 'name')));
 
     await expect(otherOperation).resolves.toMatchObject({ firmware: 'fw' });
   });
@@ -463,7 +464,7 @@ describe('withImprovSession', () => {
     let connectionChanged!: (connected: boolean) => void;
     const transport = {
       isConnected: true,
-      connectionIdentity: Symbol('test connection'),
+      connectionIdentity: Symbol('test connection') as symbol | undefined,
       onConnectionChange: vi.fn((listener: (connected: boolean) => void) => {
         connectionChanged = listener;
         return { dispose: vi.fn() };

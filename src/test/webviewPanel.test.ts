@@ -234,7 +234,8 @@ describe('EspDecoderWebviewPanel – PR #42 file opening', () => {
     it('resolves relative path against workspace folder when file exists', async () => {
       const workspacePath = '/workspace';
       const relativePath = 'src/main.cpp';
-      const fullPath = '/workspace/src/main.cpp';
+      // path.join emits platform-native separators (\\ on Windows).
+      const fullPath = path.join(workspacePath, relativePath);
 
       // Mock workspace folders
       Object.defineProperty(vscode.workspace, 'workspaceFolders', {
