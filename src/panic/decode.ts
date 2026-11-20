@@ -6,15 +6,12 @@ import {
   isAddrLine,
   isGDBLine,
   isParsedGDBLine,
-  getAddr,
   type AddrLine,
   type AddrLocation,
   type CoredumpDecodeResult,
   type DecodeOptions,
   type DecodeParams,
   type DecodeResult,
-  type GDBLine,
-  type ParsedGDBLine,
 } from './types';
 
 /**
@@ -44,7 +41,7 @@ export async function decodePanicText(
     throw new Error(`Unsupported decode target: ${params.targetArch}`);
   }
   const result = await decoder(params, input, options);
-  const fixedResult = fixDecodeResult(result, false);
+  const fixedResult = fixDecodeResult(result);
   if (options.signal?.aborted) {
     throw new AbortError();
   }
@@ -63,20 +60,16 @@ export async function decodeCoredump(
   }
   return result.map((threadDecodeResult) => ({
     ...threadDecodeResult,
-    // GDB coredump frames come from a real unwind — they carry no stack
-    // pointers, so the stack-pointer filter must not drop them.
-    result: fixDecodeResult(threadDecodeResult.result, false),
+    result: fixDecodeResult(threadDecodeResult.result),
+    warning: threadDecodeResult.warning,
   }));
 }
 
 // --- result post-processing ------------------------------------------------
 
-function fixDecodeResult(result: DecodeResult, filterStackPointers = true): DecodeResult {
+function fixDecodeResult(result: DecodeResult): DecodeResult {
   const fixedPathsResult = fixWindowsPaths(result);
-  let filteredResult = filterFreeRTOSStackLines(fixedPathsResult);
-  if (filterStackPointers) {
-    filteredResult = filterStackPointerLines(filteredResult);
-  }
+  const filteredResult = filterFreeRTOSStackLines(fixedPathsResult);
   return fixFaultInfo(filteredResult);
 }
 
@@ -141,33 +134,6 @@ function filterFreeRTOSStackLines(result: DecodeResult): DecodeResult {
       return true;
     }),
   };
-}
-
-function filterStackPointerLines(result: DecodeResult): DecodeResult {
-  return {
-    ...result,
-    stacktraceLines: result.stacktraceLines.filter(
-      (line, index, lines) =>
-        !(lines[index - 1] && isStackPointerLine(line, lines[index - 1])),
-    ),
-  };
-}
-
-function isStackPointerLine(line: GDBLine | ParsedGDBLine, prevLine: GDBLine | ParsedGDBLine): boolean {
-  if (!isParsedGDBLine(prevLine)) {
-    return false;
-  }
-
-  const prevAddr = getAddr(prevLine.regAddr);
-  const addr = getAddr(line.regAddr);
-  if (addr === undefined || prevAddr === undefined) {
-    return false;
-  }
-
-  const isAddr3x = addr >>> 28 === 0x3;
-  const isPrevAddr4x = prevAddr >>> 28 === 0x4;
-
-  return line.lineNumber === '??' && isAddr3x && isPrevAddr4x;
 }
 
 function fixFaultInfo(result: DecodeResult): DecodeResult {

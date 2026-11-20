@@ -141,6 +141,7 @@ export interface ThreadDecodedCrash {
   threadName?: string;
   isCurrent?: boolean;
   decoded: DecodedCrash;
+  warning?: string;
 }
 
 /**
@@ -686,7 +687,10 @@ async function decodeCoredumpElfInternal(
     const abortController = new AbortController();
     const decodeTimeout = setTimeout(() => abortController.abort(), DECODE_TIMEOUT_MS);
     decodeTimeout.unref?.();
-    const decodeOptions: DecodeOptions = { signal: abortController.signal };
+    const decodeOptions: DecodeOptions = {
+      signal: abortController.signal,
+      onWarning: (msg) => write(`[ESP Decoder] Warning: ${msg}`),
+    };
 
     // Pass the coredump file path to the coredump decoder
     const result = await decodeCoredump(params, coredumpPath, decodeOptions)
@@ -713,6 +717,7 @@ async function decodeCoredumpElfInternal(
           threadName: threadResult.threadName,
           isCurrent: threadResult.current ?? false,
           decoded,
+          warning: threadResult.warning,
         };
       });
 

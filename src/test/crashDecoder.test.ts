@@ -2960,4 +2960,56 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
       sendSpy.mockRestore();
     }
   });
+
+  it('reports thread skip, frame failure, and early termination via onWarning and result warning', async () => {
+    vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockImplementation(async (cmd: string) => {
+      if (cmd === '-thread-info') {
+        return '^done,threads=[{id="1",target-id="process 100"},{id="2",target-id="process 200"},{id="3",target-id="process 300"}],current-thread-id="1"\n';
+      }
+      if (cmd === '-thread-select 1') {
+        return '^error,msg="Thread 1 unavailable"\n';
+      }
+      if (cmd === '-thread-select 2') {
+        return '^done\n';
+      }
+      if (cmd === '-data-list-register-names') {
+        return '^done,register-names=["pc"]\n';
+      }
+      if (cmd === '-data-list-register-values x') {
+        return '^done,register-values=[{number="0",value="0x40001000"}]\n';
+      }
+      if (cmd === '-stack-list-frames') {
+        return '^error,msg="Frame unwind error"\n';
+      }
+      if (cmd.startsWith('-stack-list-arguments')) {
+        return '^done,stack-args=[]\n';
+      }
+      if (cmd === '-thread-select 3') {
+        throw new Error('GDB crashed');
+      }
+      return '^done\n';
+    });
+    vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
+
+    const warnings: string[] = [];
+    try {
+      const results = await decodeCoredumpFile(
+        { elfPath: '/dummy.elf', toolPath: 'fake-gdb' } as DecodeParams,
+        '/dummy-coredump.elf',
+        { onWarning: (w) => warnings.push(w) },
+        false,
+      );
+
+      // Thread 1 was skipped, Thread 2 succeeded with warning, Thread 3 failed and broke loop
+      expect(results).toHaveLength(1);
+      expect(results[0].threadId).toBe('2');
+      expect(results[0].warning).toContain('Frame unwind error');
+      expect(warnings.some((w) => w.includes('thread selection failed'))).toBe(true);
+      expect(warnings.some((w) => w.includes('stack-list-frames failed'))).toBe(true);
+      expect(warnings.some((w) => w.includes('decode failed or terminated early'))).toBe(true);
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
 });

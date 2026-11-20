@@ -297,7 +297,9 @@ export async function decodeCoredumpFile(
         const selectOut = await client.sendCommand(`-thread-select ${tid}`);
         const selectError = miErrorRecord(selectOut);
         if (selectError) {
+          const msg = `Thread ${tid}: thread selection failed (${selectError})`;
           log('thread-select failed; skipping thread', tid, selectError);
+          options.onWarning?.(msg);
           continue;
         }
 
@@ -331,7 +333,9 @@ export async function decodeCoredumpFile(
         // A stack-frame failure is recorded for this thread but must not
         // abort decoding of the remaining threads.
         if (btError) {
+          const msg = `Thread ${tid}: stack-list-frames failed (${btError})`;
           log('stack-list-frames failed; continuing without frames', btError);
+          options.onWarning?.(msg);
         }
         log('stack frames raw length', btOut.length);
 
@@ -344,10 +348,14 @@ export async function decodeCoredumpFile(
           // Arguments are optional: an MI error keeps the frames, just without args.
           argsError = miErrorRecord(argsOut);
           if (argsError) {
+            const msg = `Thread ${tid}: stack-list-arguments failed (${argsError})`;
             log('stack-list-arguments failed; continuing without args', argsError);
+            options.onWarning?.(msg);
           }
         } catch (err) {
+          const msg = `Thread ${tid}: stack-list-arguments failed (${err instanceof Error ? err.message : String(err)})`;
           log('stack-list-arguments failed; continuing without args', err);
+          options.onWarning?.(msg);
         }
         log('stack args raw length', argsOut.length);
         // Parse frame arguments safely, splitting on top-level frame boundaries
@@ -425,13 +433,21 @@ export async function decodeCoredumpFile(
           TCB: threadTcbs[tid] ?? 0,
           result: threadResult,
           current: tid === currentThreadId,
+          warning: btError ? `stack-list-frames failed (${btError})` : undefined,
         });
       } catch (err) {
         if (options.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
           throw err;
         }
         lastError = err;
+        const msg = `Thread ${tid}: decode failed or terminated early (${err instanceof Error ? err.message : String(err)})`;
         log('thread decode failed or terminated early', tid, err);
+        options.onWarning?.(msg);
+        const currentIndex = threadIds.indexOf(tid);
+        if (currentIndex >= 0 && currentIndex < threadIds.length - 1) {
+          const remaining = threadIds.slice(currentIndex + 1);
+          options.onWarning?.(`Remaining threads skipped due to earlier failure: ${remaining.join(', ')}`);
+        }
         break;
       }
     }

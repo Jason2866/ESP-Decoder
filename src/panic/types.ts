@@ -78,6 +78,7 @@ export type Debug = (...args: unknown[]) => void;
 export interface DecodeOptions {
   signal?: AbortSignal;
   debug?: Debug;
+  onWarning?: (warning: string) => void;
 }
 
 export interface PanicInfo {
@@ -105,6 +106,7 @@ export interface ThreadDecodeResult {
   threadName?: string;
   result: DecodeResult;
   current?: boolean;
+  warning?: string;
 }
 
 export type CoredumpDecodeResult = ThreadDecodeResult[];
