@@ -143,15 +143,16 @@ class Stub {
     const stackAddrMax = stackAddrMin + stackData.length;
     const inStack = (addr) => stackAddrMin <= addr && addr < stackAddrMax;
 
-    // A range that partially overlaps the captured stack would report the
-    // uncaptured tail as zero bytes — GDB would read phantom zeros for a
-    // saved register or argument. Reject it instead; reads fully outside
-    // the capture keep the zero-fill model, fully inside return real bytes.
+    // When we have captured stack data, only reads fully inside the
+    // captured range can be served accurately.  Partial overlaps would
+    // mix real bytes with phantom zeros, and reads wholly outside would
+    // report zeros that GDB interprets as valid memory (e.g. pointers
+    // appearing to reference empty strings).  Return a memory-read error
+    // so GDB treats the region as unavailable.
     if (stackData.length > 0) {
       const rangeEnd = startAddr + size;
-      const overlaps = startAddr < stackAddrMax && rangeEnd > stackAddrMin;
       const fullyInside = startAddr >= stackAddrMin && rangeEnd <= stackAddrMax;
-      if (overlaps && !fullyInside) {
+      if (!fullyInside) {
         this.respond('E01');
         return;
       }

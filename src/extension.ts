@@ -405,11 +405,20 @@ async function tryAutoDetectElf(): Promise<void> {
         // wins; otherwise the newest build's detected arch replaces any
         // previous auto-detected value — including clearing it when the
         // ELF is unreadable and no target was detected.
+        const effectiveArch = explicitArch ?? newest.targetArch;
+        // Only use the discovered tool when it matches the effective
+        // family — an explicit arch override must not be paired with an
+        // incompatible discovered GDB (decodeCrash would not search for
+        // another tool when a path is already supplied).
+        const archConflict =
+          explicitArch !== undefined &&
+          newest.targetArch !== undefined &&
+          explicitArch !== newest.targetArch;
         sessionConfig = {
           ...sessionConfig,
           elfPath: newest.elfPath,
-          toolPath: sessionConfig.toolPath || newest.toolPath,
-          targetArch: explicitArch ?? newest.targetArch,
+          toolPath: sessionConfig.toolPath || (archConflict ? undefined : newest.toolPath),
+          targetArch: effectiveArch,
           romElfPath: newest.romElfPath,
         };
         if (viewProvider) {

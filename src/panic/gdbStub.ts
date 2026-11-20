@@ -119,12 +119,13 @@ export class GdbStubServer {
     if (process.platform === 'win32') {
       // MinGW GDB runs `|cmd` via CreateProcess on the first token — it does
       // NOT invoke cmd.exe or a shell, so a .cmd wrapper or `VAR=1` prefix
-      // cannot work. Launch cmd.exe directly (it is a real executable) and
-      // let it set ELECTRON_RUN_AS_NODE (the VS Code binary is Electron)
-      // before starting the Node-compatible stub binary.
-      const comspec = process.env.ComSpec || 'cmd.exe';
+      // cannot work. Set ELECTRON_RUN_AS_NODE in the inherited environment
+      // so the stub process (VS Code's Electron binary) runs as plain
+      // Node.js — this avoids routing paths through cmd.exe where characters
+      // like & in temp-dir paths would be treated as command separators.
+      process.env.ELECTRON_RUN_AS_NODE = '1';
       const q = (p: string) => `"${p.replace(/"/g, '')}"`;
-      return `|${q(comspec)} /d /c set "ELECTRON_RUN_AS_NODE=1" && ${q(process.execPath)} ${q(scriptPath)} ${q(infoPath)}`;
+      return `|${q(process.execPath)} ${q(scriptPath)} ${q(infoPath)}`;
     }
     return `|ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} ${shellQuote(scriptPath)} ${shellQuote(infoPath)}`;
   }

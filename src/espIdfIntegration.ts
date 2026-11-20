@@ -283,18 +283,24 @@ export async function findEspIdfBuilds(workspaceFolder: string): Promise<EspIdfB
   const gdbForArch = (arch: ChipArch | undefined): string | undefined => {
     const key = arch ?? 'unknown';
     if (!toolPathByArch.has(key)) {
+      // Only pass the sdkconfig chip hint when its family agrees with the
+      // requested arch — a stale sdkconfig must not direct the lookup to
+      // the wrong GDB family.  When arch is unknown the hint is harmless.
+      const chipHint = !arch || idfTargetFamily(idfTarget) === arch ? idfTarget : undefined;
       // Unknown arch: try Xtensa first (legacy default), then RISC-V — a
       // RISC-V-only ESP-IDF tool install must not be missed.
-      let found = findGdbFromIdfTools(arch ?? 'xtensa', idfTarget);
+      let found = findGdbFromIdfTools(arch ?? 'xtensa', chipHint);
       if (!found && arch === undefined) {
-        found = findGdbFromIdfTools('riscv', idfTarget);
+        found = findGdbFromIdfTools('riscv', chipHint);
       }
       toolPathByArch.set(key, found);
     }
     return toolPathByArch.get(key);
   };
   return elfCandidates.map((elfPath, index) => {
-    const targetArch = configuredFamily ?? detectElfArch(elfPath);
+    // The ELF header is authoritative: probe each file first. Fall back to
+    // sdkconfig only when the probe fails (e.g. empty placeholder file).
+    const targetArch = detectElfArch(elfPath) ?? configuredFamily;
     return {
       name: index === 0 ? 'ESP-IDF (build)' : `ESP-IDF (build:${path.basename(elfPath, '.elf')})`,
       elfPath,

@@ -541,19 +541,21 @@ export class Capturer {
       lightweight: CapturerLightweight;
     },
   ): boolean {
-    // RA evidence comes from the event's FINALIZED occurrences
-    // (raEvidence), not whichever snapshot currently owns the display —
-    // a provisional display RA must not veto or force a split.
-    const finalizedRa = this.raEvidence.get(existing.id);
-    const raEvidence =
-      finalizedRa === undefined
-        ? existing.lightweight
-        : {
-            ...existing.lightweight,
-            regs: { ...existing.lightweight.regs, RA: finalizedRa },
-          };
-    if (!returnAddressesCompatible(raEvidence, candidate.lightweight)) {
-      return false;
+    // RA evidence comes from FINALIZED occurrences (the aggregate), not
+    // raEvidence which may contain a provisional preview from the same
+    // revisable block — using that preview would split when the pending
+    // row completes with a longer value (e.g. 0x4200 → 0x42001234).
+    // Missing RA in the aggregate (no finalized occurrence has RA) is
+    // treated as non-conflicting.
+    const aggRa = this.eventAggregate.get(existing.id)?.ra;
+    if (aggRa !== undefined) {
+      const raEvidence = {
+        ...existing.lightweight,
+        regs: { ...existing.lightweight.regs, RA: aggRa },
+      };
+      if (!returnAddressesCompatible(raEvidence, candidate.lightweight)) {
+        return false;
+      }
     }
     // The backtrace/kind check compares the revised frames against the
     // event's FINALIZED occurrence evidence — the provisional display may

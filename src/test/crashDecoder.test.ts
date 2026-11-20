@@ -2080,13 +2080,13 @@ describe('gdbStubMain – partial stack reads', () => {
     expect(packetData(stub.out)).toBe('E01');
   });
 
-  it('returns real bytes inside the capture and zeros outside it', () => {
+  it('returns real bytes inside the capture and E01 for wholly outside reads', () => {
     const stub = mkStub();
     stub.respondMem(0x1000, 4);
     expect(packetData(stub.out)).toBe('11223344');
     stub.out = '';
     stub.respondMem(0x2000, 4);
-    expect(packetData(stub.out)).toBe('00000000');
+    expect(packetData(stub.out)).toBe('E01');
   });
 });
 
@@ -2698,10 +2698,13 @@ import { fetchStacktraceWithMi } from '../panic/decodeRiscv.js';
 import type { DecodeParams, PanicInfoWithStackData } from '../panic/types.js';
 
 describe('GdbStubServer – Windows remote spec', () => {
-  it('passes the cmd.exe spec to target-select unchanged', async () => {
+  it('passes the direct exec spec to target-select unchanged', async () => {
     const platformSpy = vi
       .spyOn(process, 'platform', 'get')
       .mockReturnValue('win32');
+    const envSpy = vi.spyOn(process, 'env', 'get').mockReturnValue({
+      ...process.env,
+    });
     const sendSpy = vi
       .spyOn(GdbMiClient.prototype, 'sendCommand')
       .mockResolvedValue('^done\n');
@@ -2715,9 +2718,9 @@ describe('GdbStubServer – Windows remote spec', () => {
         stackData: Buffer.alloc(0),
       };
       // fetchStacktraceWithMi builds its own stub + MI client; the mocked
-      // platform makes buildRemoteSpec emit the Windows cmd.exe spec, and
-      // the sendCommand spy captures the exact argument GDB receives. The
-      // spawn seam supplies a fake child so '/bin/cat' is never launched.
+      // platform makes buildRemoteSpec set ELECTRON_RUN_AS_NODE in
+      // process.env and emit a direct-exec spec (no cmd.exe wrapper),
+      // so paths with & are passed literally.
       const stdout = Object.assign(new EventEmitter(), {
         setEncoding: () => {},
       });
@@ -2751,14 +2754,18 @@ describe('GdbStubServer – Windows remote spec', () => {
         .find((c) => c.startsWith('-target-select remote '));
       expect(targetCmd).toBeDefined();
       const spec = targetCmd!.slice('-target-select remote '.length);
-      expect(spec).toContain('cmd.exe');
-      expect(spec).toContain('/d /c');
-      expect(spec).toContain('"ELECTRON_RUN_AS_NODE=1"');
+      // The spec must NOT route through cmd.exe — paths with & are safe.
+      expect(spec).not.toContain('cmd.exe');
+      expect(spec).not.toContain(' /d /c ');
       // The spec's embedded quotes must reach GDB unescaped.
       expect(spec.startsWith('|"')).toBe(true);
+      // ELECTRON_RUN_AS_NODE must have been set in the environment.
+      expect(process.env.ELECTRON_RUN_AS_NODE).toBe('1');
     } finally {
       sendSpy.mockRestore();
       platformSpy.mockRestore();
+      envSpy.mockRestore();
+      delete process.env.ELECTRON_RUN_AS_NODE;
     }
   });
 });
