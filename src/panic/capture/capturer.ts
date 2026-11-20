@@ -544,6 +544,16 @@ export class Capturer {
     // event's FINALIZED occurrence evidence — the provisional display may
     // still be growing and its truncated trace must not split the merge.
     const fallback = this.eventFallback.get(existing.id);
+    const evidencePc =
+      fallback?.snap.lightweight.programCounter ??
+      existing.lightweight.programCounter;
+    if (
+      evidencePc !== undefined &&
+      candidate.lightweight.programCounter !== undefined &&
+      evidencePc !== candidate.lightweight.programCounter
+    ) {
+      return false;
+    }
     const evidenceKind = fallback?.snap.kind ?? existing.kind;
     // Conflicting KNOWN architectures are different crashes — roll the
     // cross-block match back. A flip to or from 'unknown' is not evidence

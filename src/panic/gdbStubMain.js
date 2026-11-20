@@ -112,9 +112,9 @@ class Stub {
     for (const regName of RISCV_REGS_ILP32) {
       const value = regs[regName];
       if (value === undefined && regName !== 'X0') {
-        // 'x' marks a register the capture did not provide; a captured
-        // zero (and X0, hardwired to zero) still encodes as 0.
-        response += 'x';
+        // Eight 'x' characters mark an unavailable 32-bit register; a captured
+        // zero (and X0, hardwired to zero) still encodes as 8 zero hex chars.
+        response += 'xxxxxxxx';
         continue;
       }
       const regBytes = Buffer.alloc(4);

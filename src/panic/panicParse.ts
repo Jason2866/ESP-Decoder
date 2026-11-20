@@ -106,7 +106,9 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
   let faultCode: number | undefined;
   let faultAddr: number | undefined;
   let programCounter = 0;
-  const panicCoreMatch = input.match(/Core\s+(\d+)\s+panic/i);
+  const panicCoreMatch =
+    input.match(/Core\s+(\d+)\s+panic/i) ??
+    input.match(/abort\(\)\s+was\s+called\b.*?on\s+core\s+(\d+)/i);
   const panicCoreId = panicCoreMatch ? parseInt(panicCoreMatch[1], 10) : undefined;
 
   for (const line of lines) {
@@ -418,7 +420,9 @@ export function parseESP8266PanicOutput(input: string): PanicInfoWithBacktrace {
  */
 export function parseESP32PanicOutput(input: string): PanicInfoWithBacktrace {
   const lines = input.split(/\r?\n|\r/);
-  const coreIdMatch = input.match(/Guru Meditation Error:\s*Core\s+(\d+)/i);
+  const coreIdMatch =
+    input.match(/Guru Meditation Error:\s*Core\s+(\d+)/i) ??
+    input.match(/abort\(\)\s+was\s+called\b.*?on\s+core\s+(\d+)/i);
   const panicCoreId = coreIdMatch ? parseInt(coreIdMatch[1], 10) : undefined;
 
   interface CoreSection {

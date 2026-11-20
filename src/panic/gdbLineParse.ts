@@ -182,26 +182,15 @@ export function parseLine(line: string, _debug?: Debug): GDBLine | ParsedGDBLine
       }
       if (i === 8) {
         const [, regAddr] = match;
-        // Extract the complete symbol inside the outer '<...>', honoring
-        // nested template brackets, then strip the trailing '+0x..'/'+N'
-        // offset before returning it as the method.
+        // Extract the complete symbol inside the outer '<...>', using the
+        // final closing angle bracket as outer delimiter, then strip the
+        // trailing '+0x..'/'+N' offset before returning it as the method.
         const openIdx = line.indexOf('<', match.index);
-        let symbol = '';
-        if (openIdx >= 0) {
-          let depth = 0;
-          for (let j = openIdx; j < line.length; j++) {
-            const ch = line[j];
-            if (ch === '<') {
-              depth++;
-            } else if (ch === '>') {
-              depth--;
-              if (depth === 0) {
-                symbol = line.slice(openIdx + 1, j);
-                break;
-              }
-            }
-          }
-        }
+        const closeIdx = line.lastIndexOf('>');
+        const symbol =
+          openIdx >= 0 && closeIdx > openIdx
+            ? line.slice(openIdx + 1, closeIdx)
+            : '';
         const method = symbol.replace(/\+0x[0-9a-f]+$/i, '').replace(/\+\d+$/, '');
         return normalizeParsedLine({ regAddr, method, file: '??', lineNumber: '??' });
       }
@@ -246,12 +235,16 @@ function normalizeParsedLine(entry: ParsedGDBLine): GDBLine | ParsedGDBLine {
   const hasValidMethod = parsedMethod.name && parsedMethod.name !== '' && parsedMethod.name !== '??';
 
   if (!hasValidLine && hasValidMethod) {
-    return {
+    const result: ParsedGDBLine = {
       regAddr,
       method: parsedMethod.name,
       file: '??',
       lineNumber: '??',
     };
+    if (parsedMethod.args && parsedMethod.args.length > 0) {
+      Object.assign(result, { args: parsedMethod.args });
+    }
+    return result;
   }
 
   return { regAddr, lineNumber: lineNumber || '??' };

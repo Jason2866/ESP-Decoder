@@ -290,9 +290,10 @@ function isCompleteBlock(lines: string[]): boolean {
     !trimmed.some((line) => line.startsWith('<<<stack<<<'));
   for (const line of trimmed) {
     if (
-      // Only a line-initial 'Backtrace:' record marks a complete dump —
-      // an assertion message merely mentioning the marker does not.
-      /^Backtrace:/i.test(line) ||
+      // Only a line-initial 'Backtrace:' record with at least one PC:SP pair
+      // marks a complete dump — an assertion message merely mentioning the
+      // marker does not.
+      /^Backtrace:\s*0x[0-9a-fA-F]+\s*:\s*0x[0-9a-fA-F]+/i.test(line) ||
       /^Rebooting\.\.\./i.test(line) ||
       /ELF file SHA256:/i.test(line) ||
       line.startsWith('<<<stack<<<')
@@ -320,7 +321,8 @@ function isFinalizableBlock(lines: string[]): boolean {
       return (
         trimmed.includes('>>>stack>>>') ||
         /^Stack memory:/i.test(trimmed) ||
-        isStackDataRow(trimmed)
+        isStackDataRow(trimmed) ||
+        /^[A-Z][A-Z0-9/]*\s*:\s*0x[0-9a-fA-F]+/.test(trimmed)
       );
     })
   );

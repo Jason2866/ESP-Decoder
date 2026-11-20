@@ -319,6 +319,18 @@ const MIN_UNWIND_STACK_BYTES = 64;
 const CODE_ADDR_MIN = 0x40000000;
 const CODE_ADDR_MAX = 0x50000000;
 
+function isToolAccessError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  const code = (err as Error & { code?: string }).code;
+  if (code === 'ENOENT' || code === 'EACCES' || code === 'EPERM') {
+    return true;
+  }
+  const message = err.message.toLowerCase();
+  return message.includes('spawn') && (message.includes('enoent') || message.includes('failed'));
+}
+
 /**
  * Whether the captured stack bytes contain a recoverable RISC-V frame
  * chain: at least two saved-return-address candidates (code-space words)
@@ -420,8 +432,9 @@ export async function decodeRiscv(
       ? addr2line(params, addr2lineAddrs, childOptions).catch((err: unknown) => {
           // An ordinary symbol-lookup failure must not discard valid MI
           // frames — the caller falls back to raw fault addresses.
-          // Cancellation stays terminal.
-          if (childOptions.signal?.aborted) {
+          // Cancellation stays terminal. Spawn/access errors must bubble
+          // up to decodeCrash so the toolsMissing warning is shown.
+          if (childOptions.signal?.aborted || isToolAccessError(err)) {
             throw err;
           }
           log('addr2line resolution failed; using raw addresses', err);

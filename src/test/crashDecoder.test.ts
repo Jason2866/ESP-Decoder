@@ -890,6 +890,22 @@ done
     expect(addresses).toContain('0x40000003');
     expect(addresses).not.toContain('0x40000001');
     expect(addresses).not.toContain('0x40000009');
+    expect(decoded.stacktrace).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          address: '0x40000002',
+          function: 'func_0x40000002',
+          file: '/home/user/project/main.cpp',
+          line: '42',
+        }),
+        expect.objectContaining({
+          address: '0x40000003',
+          function: 'func_0x40000003',
+          file: '/home/user/project/main.cpp',
+          line: '42',
+        }),
+      ]),
+    );
   });
 
   it('reports the panicking core\'s registers and fault fields', async () => {
@@ -2615,6 +2631,62 @@ describe('parseLine – argument values containing equals signs', () => {
       { name: 'blob', value: 'a=b=c' },
     ]);
   });
+
+  it('parses symbols containing operator< and templates', () => {
+    const parsed = parseLine(
+      'No line number information available for address 0x400d1234 <foo::operator<(int)+0x10>',
+    ) as ParsedGDBLine;
+    expect(parsed.method).toBe('foo::operator<');
+    expect(parsed.regAddr).toBe('0x400d1234');
+  });
+
+  it('preserves args when line/file info is missing', () => {
+    const parsed = parseLine(
+      '0x400d5678 in worker(count=1, blob=test)',
+    ) as ParsedGDBLine;
+    expect(parsed.method).toBe('worker');
+    expect(parsed.args).toEqual([
+      { name: 'count', value: '1' },
+      { name: 'blob', value: 'test' },
+    ]);
+  });
+});
+
+describe('abort core extraction', () => {
+  it('extracts core from abort() header for Xtensa', () => {
+    const text = 'abort() was called at PC 0x40081234 on core 1\nCore 1 register dump:\nPC: 0x40081234';
+    const parsed = parseESP32PanicOutput(text);
+    expect(parsed.coreId).toBe(1);
+  });
+
+  it('extracts core from abort() header for RISC-V', () => {
+    const text = 'abort() was called at PC 0x42001234 on core 1\nCore 1 register dump:\nMEPC: 0x42001234';
+    const parsed = parseRiscvPanicDetailed(text);
+    expect(parsed.panicCoreId).toBe(1);
+  });
+});
+
+describe('gdbStubMain – missing register encoding', () => {
+  const nodeRequire = createRequire(import.meta.url);
+  const { Stub } = nodeRequire('../panic/gdbStubMain.js') as {
+    Stub: new (info: {
+      stackBaseAddr: number;
+      stackData: Buffer;
+      regs: Record<string, number>;
+    }) => { out: string; respondRegs(): void };
+  };
+
+  it('encodes missing registers with eight x characters', () => {
+    const stub = new Stub({
+      stackBaseAddr: 0,
+      stackData: Buffer.alloc(0),
+      regs: { RA: 0x42001234 },
+    });
+    stub.respondRegs();
+    const packet = stub.out.replace(/^\$/, '').replace(/#[0-9a-f]{2}$/, '');
+    expect(packet.startsWith('00000000')).toBe(true);
+    expect(packet).toContain('xxxxxxxx');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2679,6 +2751,7 @@ describe('GdbStubServer – Windows remote spec', () => {
       expect(targetCmd).toBeDefined();
       const spec = targetCmd!.slice('-target-select remote '.length);
       expect(spec).toContain('cmd.exe');
+      expect(spec).toContain('/d /c');
       expect(spec).toContain('"ELECTRON_RUN_AS_NODE=1"');
       // The spec's embedded quotes must reach GDB unescaped.
       expect(spec.startsWith('|"')).toBe(true);

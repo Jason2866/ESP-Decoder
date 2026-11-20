@@ -102,7 +102,7 @@ export class GdbStubServer {
     } catch (err) {
       signal?.removeEventListener('abort', onSetupAbort);
       if (dir) {
-        await rm(dir, { recursive: true, force: true }).catch(() => {});
+        await rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       }
       this.abortHandler = undefined;
       this.abortSignal = undefined;
@@ -121,7 +121,7 @@ export class GdbStubServer {
       // before starting the Node-compatible stub binary.
       const comspec = process.env.ComSpec || 'cmd.exe';
       const q = (p: string) => `"${p.replace(/"/g, '')}"`;
-      return `|${q(comspec)} /c set "ELECTRON_RUN_AS_NODE=1" && ${q(process.execPath)} ${q(scriptPath)} ${q(infoPath)}`;
+      return `|${q(comspec)} /d /c set "ELECTRON_RUN_AS_NODE=1" && ${q(process.execPath)} ${q(scriptPath)} ${q(infoPath)}`;
     }
     return `|ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} ${shellQuote(scriptPath)} ${shellQuote(infoPath)}`;
   }
@@ -144,7 +144,7 @@ export class GdbStubServer {
     this.abortHandler = undefined;
     if (dir) {
       // Best-effort cleanup; the stub process exits on stdin EOF anyway.
-      this.cleanupPromise = rm(dir, { recursive: true, force: true }).catch(() => {});
+      this.cleanupPromise = rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       await this.cleanupPromise;
     }
   }

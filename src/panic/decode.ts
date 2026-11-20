@@ -44,7 +44,7 @@ export async function decodePanicText(
     throw new Error(`Unsupported decode target: ${params.targetArch}`);
   }
   const result = await decoder(params, input, options);
-  const fixedResult = fixDecodeResult(result);
+  const fixedResult = fixDecodeResult(result, false);
   if (options.signal?.aborted) {
     throw new AbortError();
   }
@@ -58,6 +58,9 @@ export async function decodeCoredump(
   options: DecodeOptions = {},
 ): Promise<CoredumpDecodeResult> {
   const result = await decodeCoredumpFile(params, inputPath, options);
+  if (options.signal?.aborted) {
+    throw new AbortError();
+  }
   return result.map((threadDecodeResult) => ({
     ...threadDecodeResult,
     // GDB coredump frames come from a real unwind — they carry no stack
