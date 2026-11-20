@@ -2699,12 +2699,10 @@ import type { DecodeParams, PanicInfoWithStackData } from '../panic/types.js';
 
 describe('GdbStubServer – Windows remote spec', () => {
   it('passes the direct exec spec to target-select unchanged', async () => {
+    const prevElectronNode = process.env.ELECTRON_RUN_AS_NODE;
     const platformSpy = vi
       .spyOn(process, 'platform', 'get')
       .mockReturnValue('win32');
-    const envSpy = vi.spyOn(process, 'env', 'get').mockReturnValue({
-      ...process.env,
-    });
     const sendSpy = vi
       .spyOn(GdbMiClient.prototype, 'sendCommand')
       .mockResolvedValue('^done\n');
@@ -2764,8 +2762,11 @@ describe('GdbStubServer – Windows remote spec', () => {
     } finally {
       sendSpy.mockRestore();
       platformSpy.mockRestore();
-      envSpy.mockRestore();
-      delete process.env.ELECTRON_RUN_AS_NODE;
+      if (prevElectronNode === undefined) {
+        delete process.env.ELECTRON_RUN_AS_NODE;
+      } else {
+        process.env.ELECTRON_RUN_AS_NODE = prevElectronNode;
+      }
     }
   });
 });
