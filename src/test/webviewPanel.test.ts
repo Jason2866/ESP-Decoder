@@ -96,6 +96,7 @@ vi.mock('vscode', () => {
 
 import { EspDecoderWebviewPanel } from '../webviewPanel.js';
 import { SerialPortManager } from '../serialPortManager.js';
+import * as crashDecoder from '../crashDecoder.js';
 
 // Mock SerialPortManager
 vi.mock('../serialPortManager.js', () => {
@@ -198,6 +199,40 @@ describe('EspDecoderWebviewPanel – PR #42 file opening', () => {
     expect(internal.crashDecodeRevisions.size).toBe(0);
     expect(sidebarPost).toHaveBeenCalledWith({ type: 'clear' });
     expect(editorPost).toHaveBeenCalledWith({ type: 'clear' });
+  });
+
+  it('restarts an auto-decode when settings change before it completes', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    const event: crashDecoder.CrashEvent = {
+      id: 'crash-settings-race',
+      kind: 'xtensa',
+      lines: ['panic'],
+      rawText: 'panic',
+      timestamp: 1,
+    };
+    internal.crashEvents = [event];
+    internal.updateConfig({ elfPath: '/fw/elf-a.elf' });
+
+    const pending = new Map<string, (value: { stacktrace: []; rawOutput: string }) => void>();
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockImplementation(
+      (_event, elfPath) => new Promise((resolve) => pending.set(elfPath, resolve)),
+    );
+    try {
+      const firstAttempt = internal.decodeCrashEvent(event);
+      await vi.waitFor(() => expect(pending.has('/fw/elf-a.elf')).toBe(true));
+      internal.updateConfig({ elfPath: '/fw/elf-b.elf' });
+      pending.get('/fw/elf-a.elf')!({ stacktrace: [], rawOutput: 'old result' });
+      await firstAttempt;
+      await vi.waitFor(() => expect(pending.has('/fw/elf-b.elf')).toBe(true));
+
+      pending.get('/fw/elf-b.elf')!({ stacktrace: [], rawOutput: 'current result' });
+      await vi.waitFor(() => expect(event.decoded?.rawOutput).toBe('current result'));
+      expect(event.decodedContext?.elfPath).toBe('/fw/elf-b.elf');
+      expect(decodeSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      decodeSpy.mockRestore();
+    }
   });
 
   it('rejects provisioning when the serial connection changed after discovery', async () => {

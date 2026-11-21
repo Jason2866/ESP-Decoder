@@ -452,9 +452,13 @@ export class Capturer {
           shouldPreferCandidate(finalizedMatch, candidate),
           block.id,
         );
+        this.trimEvents(finalizedMatch.id);
         return;
       }
       this.applyRevision(revision, candidate, block.id);
+      if (!block.pendingPreview) {
+        this.trimEvents(revision.id);
+      }
       return;
     }
     if (revision && block.pendingPreview) {
@@ -466,6 +470,9 @@ export class Capturer {
     }
     if (revision && (ownsRevision || this.revisionCompatible(revision, candidate))) {
       this.applyRevision(revision, candidate, block.id);
+      if (!block.pendingPreview) {
+        this.trimEvents(revision.id);
+      }
       return;
     }
     if (revision) {
@@ -501,6 +508,7 @@ export class Capturer {
         returnAddressesCompatible(this.matchLightweight(exact), candidate.lightweight)
       ) {
         this.mergeIntoExisting(exact, candidate, shouldPreferCandidate(exact, candidate), block.id);
+        this.trimEvents(exact.id);
         return;
       }
     }
@@ -508,12 +516,14 @@ export class Capturer {
     const byContainment = block.pendingPreview ? undefined : this.findRecentContainmentMatch(candidate);
     if (byContainment && returnAddressesCompatible(this.matchLightweight(byContainment), candidate.lightweight)) {
       this.mergeIntoExisting(byContainment, candidate, shouldPreferCandidate(byContainment, candidate), block.id);
+      this.trimEvents(byContainment.id);
       return;
     }
 
     const byFingerprint = block.pendingPreview ? undefined : this.findRecentFingerprintMatch(candidate);
     if (byFingerprint && returnAddressesCompatible(this.matchLightweight(byFingerprint), candidate.lightweight)) {
       this.mergeIntoExisting(byFingerprint, candidate, shouldPreferCandidate(byFingerprint, candidate), block.id);
+      this.trimEvents(byFingerprint.id);
       return;
     }
 
@@ -542,7 +552,9 @@ export class Capturer {
     this.blockEventIndex.set(block.id, next.id);
     this.eventOwnerBlock.set(next.id, block.id);
     this.displayBlockIndex.set(next.id, block.id);
-    this.trimEvents();
+    if (!block.pendingPreview) {
+      this.trimEvents(next.id);
+    }
     this.emit('eventDetected', next);
   }
 
@@ -944,9 +956,15 @@ export class Capturer {
     return atMs - event.lastSeenAt <= this.options.dedupWindowMs;
   }
 
-  private trimEvents(): void {
+  private trimEvents(preserveId?: string): void {
     while (this.events.length > this.options.maxEvents) {
-      const removed = this.events.shift();
+      const removeIndex = this.events[0]?.id === preserveId
+        ? this.events.findIndex((event) => event.id !== preserveId)
+        : 0;
+      if (removeIndex < 0) {
+        break;
+      }
+      const [removed] = this.events.splice(removeIndex, 1);
       if (!removed) {
         break;
       }

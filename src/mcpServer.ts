@@ -51,9 +51,9 @@ function jsonResult(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
 }
 
-function crashSummary(event: CrashEvent): string {
+function crashSummary(event: CrashEvent, useDecoded = true): string {
   return (
-    event.decoded?.faultInfo?.faultMessage ??
+    (useDecoded ? event.decoded?.faultInfo?.faultMessage : undefined) ??
     event.lines.find((l) => l.trim().length > 0)?.trim() ??
     '(no text)'
   );
@@ -242,16 +242,31 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
         'List crash events detected in the serial stream (panics, Guru Meditation Errors, asserts). Use decode_crash to get the resolved backtrace.',
       annotations: { readOnlyHint: true },
     },
-    async () =>
-      jsonResult({
-        crashes: data.getCrashEvents().map((e) => ({
-          id: e.id,
-          kind: e.kind,
-          timestamp: e.timestamp,
-          decoded: e.decoded !== undefined,
-          summary: crashSummary(e),
-        })),
-      })
+    async () => {
+      const config = data.getSessionConfig();
+      return jsonResult({
+        crashes: data.getCrashEvents().map((e) => {
+          const context = config.elfPath
+            ? createCrashDecodeContext(
+                e.rawText,
+                e.kind,
+                config.elfPath,
+                config.toolPath,
+                config.targetArch,
+                config.romElfPath,
+              )
+            : undefined;
+          const decoded = context !== undefined && hasCachedCrashDecode(e, context);
+          return {
+            id: e.id,
+            kind: e.kind,
+            timestamp: e.timestamp,
+            decoded,
+            summary: crashSummary(e, decoded),
+          };
+        }),
+      });
+    }
   );
 
   server.registerTool(
@@ -358,7 +373,7 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
           } else if (currentContext && sameCrashDecodeContext(context, currentContext)) {
             throw err;
           } else {
-            lastError = err;
+            lastError = new Error('Crash capture or session configuration changed during decode — retry decode_crash');
           }
         }
       }

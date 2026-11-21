@@ -1274,14 +1274,15 @@ describe('RISC-V heuristic candidate extraction', () => {
       'Core 1 register dump:',
       'MEPC: 0x42100001',
       'Stack memory:',
-      '3fc90000: 0x42100002 0x00000000',
-      'Backtrace: 0x42100003:0x3fc90000',
+      '3fc90000: 0x42100002 0x42100002 0x00000000',
+      'Backtrace: 0x42100003:0x3fc90000 0x42100003:0x3fc90000 0x42100004:0x3fc90000',
       'diagnostic address 0x4badcafe',
     ].join('\n');
 
     expect(extractRiscvHeuristicCandidates(text)).toEqual([
       '0x42100002',
       '0x42100003',
+      '0x42100004',
     ]);
   });
 });
@@ -1352,6 +1353,13 @@ describe('parseESP32PanicOutput – dual-core dumps', () => {
   it('rejects a backtrace pair with an overlong stack-pointer token', () => {
     const parsed = parseESP32PanicOutput(
       'Backtrace: 0x40000001:0x3ffb00001234 0x40000002:0x3ffb0002',
+    );
+    expect(parsed.backtraceAddrs).toEqual([0x40000002]);
+  });
+
+  it('does not reinterpret an address inside a malformed token, then accepts the next pair', () => {
+    const parsed = parseESP32PanicOutput(
+      'Backtrace: invalid0x40000001:0x3ffb0001 0x40000002:0x3ffb0002',
     );
     expect(parsed.backtraceAddrs).toEqual([0x40000002]);
   });
@@ -1660,7 +1668,7 @@ describe('Capturer – block revisions', () => {
   });
 
   it('waits for a pending register row to commit before consolidating the provisional event', async () => {
-    const capturer = new Capturer({ quietPeriodMs: 50, dedupWindowMs: 60_000 });
+    const capturer = new Capturer({ quietPeriodMs: 50, dedupWindowMs: 60_000, maxEvents: 1 });
     const removed: CapturerEvent[] = [];
     capturer.on('eventDetected', () => {});
     capturer.on('eventRemoved', (event) => removed.push(event));
@@ -1679,17 +1687,19 @@ describe('Capturer – block revisions', () => {
     capturer.push(Buffer.from(
       "Core 0 panic'ed (Store access fault).\n" +
         'Core 0 register dump:\n' +
-        'Backtrace: 0x42000001:0x3fc80000\n',
+        'Backtrace: 0x42000001:0x3fc80000',
       'utf8',
     ));
     await new Promise((resolve) => setTimeout(resolve, 100));
+    // A provisional event may temporarily exceed the finalized-history cap;
+    // it must not evict the finalized event it may reconcile into.
     expect(capturer.getEvents()).toHaveLength(2);
     const provisionalId = capturer.getEvents().find((event) => event.id !== finalizedId)?.id;
     expect(provisionalId).toBeDefined();
 
     // The pending MEPC/MCAUSE row updates the preview and architecture, but
     // does not retire its ID or increment the finalized occurrence count.
-    capturer.push(Buffer.from('MEPC : 0x42000001 MCAUSE : 0x00000007', 'utf8'));
+    capturer.push(Buffer.from('\nMEPC : 0x42000001 MCAUSE : 0x00000007', 'utf8'));
     await new Promise((resolve) => setTimeout(resolve, 100));
     const pendingEvents = capturer.getEvents();
     expect(pendingEvents).toHaveLength(2);

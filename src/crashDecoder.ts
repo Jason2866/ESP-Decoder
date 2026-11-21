@@ -135,6 +135,7 @@ export function hasCachedCrashDecode(
   context: CrashDecodeContext,
 ): boolean {
   return event.decoded !== undefined &&
+    !event.decoded.toolsMissing &&
     event.decodedContext !== undefined &&
     event.rawText === context.captureText &&
     event.kind === context.captureKind &&
@@ -1490,7 +1491,9 @@ export function extractRiscvHeuristicCandidates(crashText: string): string[] {
   const backtraceAddresses = extractPrintedBacktraceAddrs(crashText, selectedCore)
     .filter(isCodeAddress)
     .map((address) => `0x${address.toString(16).padStart(8, '0')}`);
-  return [...stackAddresses, ...backtraceAddresses];
+  // Keep the first occurrence of each PC so repeated stack words do not use
+  // up the bounded address-resolution batch before distinct backtrace PCs.
+  return [...new Set([...stackAddresses, ...backtraceAddresses])];
 }
 
 /**

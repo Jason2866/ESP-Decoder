@@ -191,6 +191,18 @@ function miErrorRecord(output: string): string | undefined {
   return output.match(/(?:^|\n)\^error[^\n]*/)?.[0].trim();
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  if (signal.reason instanceof Error) {
+    throw signal.reason;
+  }
+  const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'The operation was aborted');
+  error.name = 'AbortError';
+  throw error;
+}
+
 function parseBacktrace(raw: string): Record<string, string>[] {
   const entries: Record<string, string>[] = [];
   const frameRe = /frame=\{((?:\\.|[^{}"\\]|"(?:\\.|[^"\\])*")*)\}/g;
@@ -302,8 +314,10 @@ export async function decodeCoredumpFile(
         // closed. Keep the original no-thread error if repair cannot recover.
         repairAttempted = true;
         try {
-          const raw = await fs.readFile(inputPath);
+          const raw = await fs.readFile(inputPath, { signal: options.signal });
+          throwIfAborted(options.signal);
           repairResult = await tryRawElfFallback(params, raw, options);
+          throwIfAborted(options.signal);
         } catch (err) {
           if (options.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
             throw err;
@@ -495,8 +509,10 @@ export async function decodeCoredumpFile(
 
   if (!results.length && tryRepair && !repairAttempted) {
     try {
-      const raw = await fs.readFile(inputPath);
+      const raw = await fs.readFile(inputPath, { signal: options.signal });
+      throwIfAborted(options.signal);
       const fallback = await tryRawElfFallback(params, raw, options);
+      throwIfAborted(options.signal);
       if (fallback?.length) {
         return fallback;
       }

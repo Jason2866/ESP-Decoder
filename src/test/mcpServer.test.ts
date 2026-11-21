@@ -435,6 +435,32 @@ describe('MCP tools', () => {
     ]);
   });
 
+  it('list_crashes ignores a cached decode from another ELF', async () => {
+    const crash: CrashEvent = {
+      id: 'crash-stale-list-cache',
+      kind: 'xtensa',
+      lines: ['raw panic summary'],
+      rawText: 'raw panic summary',
+      timestamp: 123,
+      decodedContext: {
+        captureText: 'raw panic summary',
+        captureKind: 'xtensa',
+        elfPath: '/fw/elf-a.elf',
+      },
+      decoded: {
+        faultInfo: { faultMessage: 'stale decoded summary' },
+        stacktrace: [],
+        rawOutput: '',
+      },
+    };
+    const client = await connectClient(makeDeps({
+      data: makeDataSource([], [crash], '/fw/elf-b.elf'),
+    }));
+
+    const { crashes } = await callTool(client, 'list_crashes');
+    expect(crashes[0]).toMatchObject({ decoded: false, summary: 'raw panic summary' });
+  });
+
   it('decode_crash errors on unknown id and on missing ELF', async () => {
     const undecoded: CrashEvent = {
       id: 'crash-2',
@@ -474,6 +500,60 @@ describe('MCP tools', () => {
       expect(decodeSpy).toHaveBeenCalledOnce();
       expect(decodeSpy.mock.calls[0][1]).toBe('/fw/elf-b.elf');
       expect(decoded.frames).toEqual(decodedForB.stacktrace);
+    } finally {
+      decodeSpy.mockRestore();
+    }
+  });
+
+  it('retries a matching cached decode marked toolsMissing', async () => {
+    const crash: CrashEvent = {
+      id: 'crash-tools-missing-cache',
+      kind: 'xtensa',
+      lines: ['panic'],
+      rawText: 'panic',
+      timestamp: 1,
+      decodedContext: { captureText: 'panic', captureKind: 'xtensa', elfPath: '/fw/firmware.elf' },
+      decoded: { stacktrace: [], rawOutput: 'raw panic', toolsMissing: true },
+    };
+    const decoded = { stacktrace: [{ address: '0x40000001', function: 'resolved' }], rawOutput: '' };
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockResolvedValue(decoded);
+    const client = await connectClient(makeDeps({
+      data: makeDataSource([], [crash], '/fw/firmware.elf'),
+    }));
+
+    try {
+      const result = await callTool(client, 'decode_crash', { crash_id: crash.id });
+      expect(decodeSpy).toHaveBeenCalledOnce();
+      expect(result.frames).toEqual(decoded.stacktrace);
+    } finally {
+      decodeSpy.mockRestore();
+    }
+  });
+
+  it('reports the context-change error when both failed decode attempts become stale', async () => {
+    const crash: CrashEvent = {
+      id: 'crash-stale-failures',
+      kind: 'xtensa',
+      lines: ['panic'],
+      rawText: 'panic',
+      timestamp: 1,
+    };
+    let elfPath = '/fw/elf-a.elf';
+    const data: MonitorDataSource = {
+      ...makeDataSource([], [crash], elfPath),
+      getSessionConfig: () => ({ elfPath }),
+    };
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockImplementation(async () => {
+      elfPath = elfPath === '/fw/elf-a.elf' ? '/fw/elf-b.elf' : '/fw/elf-c.elf';
+      throw new Error('original decode failure');
+    });
+    const client = await connectClient(makeDeps({ data }));
+
+    try {
+      await expect(callTool(client, 'decode_crash', { crash_id: crash.id })).rejects.toThrow(
+        /configuration changed during decode/,
+      );
+      expect(decodeSpy).toHaveBeenCalledTimes(2);
     } finally {
       decodeSpy.mockRestore();
     }
