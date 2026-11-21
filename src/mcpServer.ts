@@ -4,7 +4,14 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { SerialPortManager } from './serialPortManager';
-import { decodeCrash, CrashEvent } from './crashDecoder';
+import {
+  cacheCrashDecode,
+  createCrashDecodeContext,
+  decodeCrash,
+  hasCachedCrashDecode,
+  sameCrashDecodeContext,
+  CrashEvent,
+} from './crashDecoder';
 import { findPioEnvironments } from './pioIntegration';
 import { findEspIdfBuilds } from './espIdfIntegration';
 import { withImprovSession } from './improvWiFi';
@@ -257,67 +264,112 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
       },
     },
     async ({ crash_id }) => {
-      const event = data.getCrashEvents().find((e) => e.id === crash_id);
+      const missingCrash = () =>
+        new Error(`No crash with id '${crash_id}' — call list_crashes for valid ids`);
+      const currentCrash = () => data.getCrashEvents().find((e) => e.id === crash_id);
+      let event = currentCrash();
       if (!event) {
-        throw new Error(`No crash with id '${crash_id}' — call list_crashes for valid ids`);
+        throw missingCrash();
       }
-      let d = event.decoded;
-      if (!d) {
-        // Each attempt decodes a snapshot of the event. A crashUpdated
-        // merge can replace rawText, and the active ELF/toolchain/target can
-        // change while decodeCrash is running. Retry once against fresh
-        // snapshots; only cache a result if both snapshots still match.
-        let lastError: unknown;
-        for (let attempt = 0; attempt < 2 && !event.decoded; attempt++) {
-          const config = data.getSessionConfig();
-          if (!config.elfPath) {
-            throw new Error(
-              'No ELF file configured — build the project (so it can be auto-detected) or run "ESP Decoder: Select ELF File"'
-            );
+
+      let d: NonNullable<CrashEvent['decoded']> | undefined;
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 2 && !d; attempt++) {
+        event = currentCrash();
+        if (!event) {
+          throw missingCrash();
+        }
+        const config = data.getSessionConfig();
+        if (!config.elfPath) {
+          throw new Error(
+            'No ELF file configured — build the project (so it can be auto-detected) or run "ESP Decoder: Select ELF File"'
+          );
+        }
+        const context = createCrashDecodeContext(
+          event.rawText,
+          event.kind,
+          config.elfPath,
+          config.toolPath,
+          config.targetArch,
+          config.romElfPath,
+        );
+        if (hasCachedCrashDecode(event, context)) {
+          d = event.decoded;
+          break;
+        }
+
+        const snapshot = { ...event };
+        try {
+          const decoded = await decodeCrash(
+            snapshot,
+            context.elfPath,
+            context.toolPath,
+            context.targetArch,
+            deps.log,
+            context.romElfPath,
+          );
+
+          // A panel clear/removal or a capture revision may have happened
+          // while GDB was running. Always re-fetch before accepting the result.
+          event = currentCrash();
+          if (!event) {
+            throw missingCrash();
           }
-          const snapshot = { ...event };
-          try {
-            const decoded = await decodeCrash(
-              snapshot,
-              config.elfPath,
-              config.toolPath,
-              config.targetArch,
-              deps.log,
-              config.romElfPath
-            );
-            const currentConfig = data.getSessionConfig();
-            const configUnchanged =
-              currentConfig.elfPath === config.elfPath &&
-              currentConfig.toolPath === config.toolPath &&
-              currentConfig.targetArch === config.targetArch &&
-              currentConfig.romElfPath === config.romElfPath;
-            if (event.rawText === snapshot.rawText && configUnchanged) {
-              // Capture unchanged — cache only if still empty (another
-              // request may have stored a decode while we awaited).
-              event.decoded = event.decoded ?? decoded;
-            } else {
-              lastError = new Error('Crash capture or session configuration changed during decode — retry decode_crash');
-            }
-            // Stale result: loop retries with the updated capture/config.
-          } catch (err) {
-            const currentConfig = data.getSessionConfig();
-            const configUnchanged =
-              currentConfig.elfPath === config.elfPath &&
-              currentConfig.toolPath === config.toolPath &&
-              currentConfig.targetArch === config.targetArch &&
-              currentConfig.romElfPath === config.romElfPath;
-            if (event.rawText === snapshot.rawText && configUnchanged) {
-              throw err;
-            }
+          const currentConfig = data.getSessionConfig();
+          const currentContext = currentConfig.elfPath
+            ? createCrashDecodeContext(
+                event.rawText,
+                event.kind,
+                currentConfig.elfPath,
+                currentConfig.toolPath,
+                currentConfig.targetArch,
+                currentConfig.romElfPath,
+              )
+            : undefined;
+          if (currentContext && hasCachedCrashDecode(event, currentContext)) {
+            // A concurrent panel or MCP decode won with matching inputs.
+            d = event.decoded;
+          } else if (currentContext && sameCrashDecodeContext(context, currentContext)) {
+            cacheCrashDecode(event, decoded, context);
+            d = decoded;
+          } else {
+            lastError = new Error('Crash capture or session configuration changed during decode — retry decode_crash');
+          }
+        } catch (err) {
+          // Re-fetch before handling a decode error too. A removed event has
+          // the same public error whether its decode succeeded or failed.
+          event = currentCrash();
+          if (!event) {
+            throw missingCrash();
+          }
+          const currentConfig = data.getSessionConfig();
+          const currentContext = currentConfig.elfPath
+            ? createCrashDecodeContext(
+                event.rawText,
+                event.kind,
+                currentConfig.elfPath,
+                currentConfig.toolPath,
+                currentConfig.targetArch,
+                currentConfig.romElfPath,
+              )
+            : undefined;
+          if (currentContext && hasCachedCrashDecode(event, currentContext)) {
+            d = event.decoded;
+          } else if (currentContext && sameCrashDecodeContext(context, currentContext)) {
+            throw err;
+          } else {
             lastError = err;
           }
         }
-        d = event.decoded;
-        if (!d) {
-          throw lastError instanceof Error
-            ? lastError
-            : new Error('Crash capture kept changing during decode — retry decode_crash');
+      }
+      if (!d) {
+        event = currentCrash();
+        if (!event) {
+          throw missingCrash();
         }
+        throw lastError instanceof Error
+          ? lastError
+          : new Error('Crash capture kept changing during decode — retry decode_crash');
       }
       return jsonResult({
         faultInfo: d.faultInfo,

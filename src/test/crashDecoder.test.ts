@@ -49,7 +49,7 @@ vi.mock('vscode', () => {
 // ---------------------------------------------------------------------------
 // Import under test (after vscode mock is in place)
 // ---------------------------------------------------------------------------
-import { CrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
+import { CrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, extractRiscvHeuristicCandidates } from '../crashDecoder.js';
 import type { CrashEvent } from '../crashDecoder.js';
 import { getPioPackagesDir } from '../pioIntegration.js';
 import { countResolvedMiFrames, dedupeArgs } from '../panic/decodeRiscv.js';
@@ -1262,6 +1262,30 @@ describe('parseRiscvPanicDetailed – multi-core dumps', () => {
   });
 });
 
+describe('RISC-V heuristic candidate extraction', () => {
+  it('uses only selected-core stack words and printed backtrace PCs', () => {
+    const text = [
+      "Core 1 panic'ed (Store access fault).",
+      'Core 0 register dump:',
+      'MEPC: 0x42000001',
+      'Stack memory:',
+      '3fc80000: 0x42000002 0x00000000',
+      'Backtrace: 0x42000003:0x3fc80000',
+      'Core 1 register dump:',
+      'MEPC: 0x42100001',
+      'Stack memory:',
+      '3fc90000: 0x42100002 0x00000000',
+      'Backtrace: 0x42100003:0x3fc90000',
+      'diagnostic address 0x4badcafe',
+    ].join('\n');
+
+    expect(extractRiscvHeuristicCandidates(text)).toEqual([
+      '0x42100002',
+      '0x42100003',
+    ]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Dual-core Xtensa panic parsing
 // ---------------------------------------------------------------------------
@@ -1323,6 +1347,13 @@ describe('parseESP32PanicOutput – dual-core dumps', () => {
       'Backtrace: 0x40000001 : 0x3ffb0001 0x40000002: 0x3ffb0002',
     );
     expect(parsed.backtraceAddrs).toEqual([0x40000001, 0x40000002]);
+  });
+
+  it('rejects a backtrace pair with an overlong stack-pointer token', () => {
+    const parsed = parseESP32PanicOutput(
+      'Backtrace: 0x40000001:0x3ffb00001234 0x40000002:0x3ffb0002',
+    );
+    expect(parsed.backtraceAddrs).toEqual([0x40000002]);
   });
 });
 
@@ -1625,6 +1656,56 @@ describe('Capturer – block revisions', () => {
     expect(updates.length).toBeGreaterThanOrEqual(1);
     expect(updates.at(-1)?.kind).toBe('riscv');
     expect(updates.at(-1)?.count).toBe(1);
+    capturer.dispose();
+  });
+
+  it('waits for a pending register row to commit before consolidating the provisional event', async () => {
+    const capturer = new Capturer({ quietPeriodMs: 50, dedupWindowMs: 60_000 });
+    const removed: CapturerEvent[] = [];
+    capturer.on('eventDetected', () => {});
+    capturer.on('eventRemoved', (event) => removed.push(event));
+
+    const first =
+      "Core 0 panic'ed (Store access fault).\n" +
+      'Core 0 register dump:\n' +
+      'MEPC : 0x42000001\n' +
+      'Backtrace: 0x42000001:0x3fc80000\n';
+    capturer.push(Buffer.from(first, 'utf8'));
+    capturer.flush();
+    const finalizedId = capturer.getEvents()[0].id;
+
+    // The repeat initially looks like Xtensa because its RISC-V register row
+    // has not arrived yet, so it remains a provisional event of its own.
+    capturer.push(Buffer.from(
+      "Core 0 panic'ed (Store access fault).\n" +
+        'Core 0 register dump:\n' +
+        'Backtrace: 0x42000001:0x3fc80000\n',
+      'utf8',
+    ));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(capturer.getEvents()).toHaveLength(2);
+    const provisionalId = capturer.getEvents().find((event) => event.id !== finalizedId)?.id;
+    expect(provisionalId).toBeDefined();
+
+    // The pending MEPC/MCAUSE row updates the preview and architecture, but
+    // does not retire its ID or increment the finalized occurrence count.
+    capturer.push(Buffer.from('MEPC : 0x42000001 MCAUSE : 0x00000007', 'utf8'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const pendingEvents = capturer.getEvents();
+    expect(pendingEvents).toHaveLength(2);
+    expect(pendingEvents.find((event) => event.id === provisionalId)?.kind).toBe('riscv');
+    expect(pendingEvents.find((event) => event.id === finalizedId)?.count).toBe(1);
+    expect(removed.some((event) => event.id === provisionalId)).toBe(false);
+
+    // Once the row is committed, the matching finalized event absorbs the
+    // occurrence and the provisional card is retired.
+    capturer.push(Buffer.from('\n', 'utf8'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const events = capturer.getEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0].id).toBe(finalizedId);
+    expect(events[0].count).toBe(2);
+    expect(removed.some((event) => event.id === provisionalId)).toBe(true);
     capturer.dispose();
   });
 
@@ -2189,12 +2270,14 @@ describe('gdbStubMain – partial stack reads', () => {
 
 describe('CrashFramer – provisional quiet flush', () => {
   it('only recognizes a stack marker at the start of a trimmed line', () => {
-    const framer = new CrashFramer(500);
-    framer.pushLine('assert failed: text mentions >>>stack>>> here', 0);
-    expect(framer.flush(1000, true)).toHaveLength(0);
+    const assertionOnly = new CrashFramer(500);
+    assertionOnly.pushLine('assert failed: text mentions >>>stack>>> here', 0);
+    expect(assertionOnly.flush(1000)).toEqual([]);
 
-    framer.pushLine('  >>>stack>>>', 1100);
-    const partial = framer.flush(2000);
+    const standaloneMarker = new CrashFramer(500);
+    standaloneMarker.pushLine('assert failed: stack dump follows', 1100);
+    standaloneMarker.pushLine('  >>>stack>>>', 1110);
+    const partial = standaloneMarker.flush(2000);
     expect(partial).toHaveLength(1);
     expect(partial[0].lines).toContain('  >>>stack>>>');
   });
@@ -3128,6 +3211,33 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
         '/dummy-coredump.elf',
         {},
         false,
+      )).rejects.toThrow('Thread 1: thread selection failed');
+    } finally {
+      sendSpy.mockRestore();
+      handshakeSpy.mockRestore();
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('preserves the thread-selection error when raw ELF repair fails', async () => {
+    const handshakeSpy = vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockImplementation(async (cmd: string) => {
+      if (cmd === '-thread-info') {
+        return '^done,threads=[{id="1",target-id="process 100"}]\n';
+      }
+      if (cmd === '-thread-select 1') {
+        return '^error,msg="Thread ID 1 not known."\n';
+      }
+      return '^done\n';
+    });
+    const closeSpy = vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
+
+    try {
+      await expect(decodeCoredumpFile(
+        { elfPath: '/dummy.elf', toolPath: 'fake-gdb' } as DecodeParams,
+        '/missing-coredump-for-repair.elf',
+        {},
+        true,
       )).rejects.toThrow('Thread 1: thread selection failed');
     } finally {
       sendSpy.mockRestore();

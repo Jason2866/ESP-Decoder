@@ -11,6 +11,8 @@ export interface FramedCrashBlock {
   startedAt: number;
   lastAt: number;
   reasonLine?: string;
+  /** True when a buffered, unterminated line was appended for preview only. */
+  pendingPreview?: boolean;
 }
 
 const crashPatterns = [

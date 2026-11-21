@@ -94,6 +94,60 @@ export interface CrashEvent {
   rawText: string;
   timestamp: number;
   decoded?: DecodedCrash;
+  decodedContext?: CrashDecodeContext;
+}
+
+/** Inputs that produced a cached decoded result. */
+export interface CrashDecodeContext {
+  captureText: string;
+  captureKind: CrashEvent['kind'];
+  elfPath: string;
+  toolPath?: string;
+  targetArch?: string;
+  romElfPath?: string;
+}
+
+export function createCrashDecodeContext(
+  captureText: string,
+  captureKind: CrashEvent['kind'],
+  elfPath: string,
+  toolPath?: string,
+  targetArch?: string,
+  romElfPath?: string,
+): CrashDecodeContext {
+  return { captureText, captureKind, elfPath, toolPath, targetArch, romElfPath };
+}
+
+export function sameCrashDecodeContext(
+  left: CrashDecodeContext,
+  right: CrashDecodeContext,
+): boolean {
+  return left.captureText === right.captureText &&
+    left.captureKind === right.captureKind &&
+    left.elfPath === right.elfPath &&
+    left.toolPath === right.toolPath &&
+    left.targetArch === right.targetArch &&
+    left.romElfPath === right.romElfPath;
+}
+
+export function hasCachedCrashDecode(
+  event: CrashEvent,
+  context: CrashDecodeContext,
+): boolean {
+  return event.decoded !== undefined &&
+    event.decodedContext !== undefined &&
+    event.rawText === context.captureText &&
+    event.kind === context.captureKind &&
+    sameCrashDecodeContext(event.decodedContext, context);
+}
+
+export function cacheCrashDecode(
+  event: CrashEvent,
+  decoded: DecodedCrash,
+  context: CrashDecodeContext,
+): void {
+  event.decoded = decoded;
+  event.decodedContext = { ...context };
 }
 
 /**
@@ -1025,21 +1079,6 @@ function extractRiscvCoreSection(crashText: string): string {
 }
 
 /**
- * Extract all candidate code addresses from crash text.
- * Finds all 8-hex-digit values starting with '4' (ESP code space 0x40000000–0x4FFFFFFF).
- * Preserves duplicates and order of appearance.
- */
-function extractAllCandidateAddresses(crashText: string): string[] {
-  const addresses: string[] = [];
-  const re = /4[0-9a-fA-F]{7}\b/g;
-  let match;
-  while ((match = re.exec(crashText)) !== null) {
-    addresses.push(`0x${match[0].toLowerCase()}`);
-  }
-  return addresses;
-}
-
-/**
  * Derive the addr2line binary path from a GDB binary path.
  *
  * Strategy (mirrors pioarduino/filter_exception_decoder.py's setup_paths approach):
@@ -1386,9 +1425,7 @@ async function enhanceWithHeuristicStackFrames(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const write = (msg: string) => log?.appendLine(msg);
 
-  // Extract candidate code addresses only from the selected core's section —
-  // a multi-core dump must not resolve another core's addresses as frames.
-  const candidateAddrs = extractAllCandidateAddresses(extractRiscvCoreSection(crashText));
+  const candidateAddrs = extractRiscvHeuristicCandidates(crashText);
 
   if (candidateAddrs.length === 0) {
     return;
@@ -1434,6 +1471,26 @@ async function enhanceWithHeuristicStackFrames(
       decoded.stacktrace = [...decoded.stacktrace, ...extra];
     }
   }
+}
+
+/**
+ * Extract heuristic PCs only from the selected core's parsed stack words and
+ * printed Backtrace pairs. Register values and other diagnostics are not
+ * candidate frames.
+ */
+export function extractRiscvHeuristicCandidates(crashText: string): string[] {
+  const parsed = parseRiscvPanicDetailed(crashText);
+  const selectedCore = parsed.panicCoreId ?? parsed.regDumps[0]?.coreId ?? 0;
+  const isCodeAddress = (value: number) => value >= 0x40000000 && value < 0x50000000;
+  const stackAddresses = parsed.stackDump
+    .filter((dump) => dump.coreId === selectedCore)
+    .flatMap((dump) => dump.data)
+    .filter(isCodeAddress)
+    .map((address) => `0x${address.toString(16).padStart(8, '0')}`);
+  const backtraceAddresses = extractPrintedBacktraceAddrs(crashText, selectedCore)
+    .filter(isCodeAddress)
+    .map((address) => `0x${address.toString(16).padStart(8, '0')}`);
+  return [...stackAddresses, ...backtraceAddresses];
 }
 
 /**

@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
-import { CrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
+import { cacheCrashDecode, createCrashDecodeContext, CrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
 import { ImprovSessionCancellation, withImprovSession } from './improvWiFi';
 
 export interface SessionConfig {
@@ -175,6 +175,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         existing.rawText = event.rawText;
         existing.timestamp = event.timestamp;
         delete existing.decoded;
+        delete existing.decodedContext;
         this.log.appendLine(`[ESP Decoder] Crash updated: id=${event.id}, lines=${event.lines.length}`);
         this.postMessage({
           type: 'crashUpdated',
@@ -207,20 +208,28 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   private async decodeCrashEvent(event: CrashEvent): Promise<void> {
     const rev = this.nextCrashDecodeRevision(event.id);
     if (this.config.elfPath) {
+      const context = createCrashDecodeContext(
+        event.rawText,
+        event.kind,
+        this.config.elfPath,
+        this.config.toolPath,
+        this.config.targetArch,
+        this.config.romElfPath,
+      );
       try {
         const decoded = await decodeCrash(
-          event,
-          this.config.elfPath,
-          this.config.toolPath,
-          this.config.targetArch,
+          { ...event, rawText: context.captureText },
+          context.elfPath,
+          context.toolPath,
+          context.targetArch,
           this.log,
-          this.config.romElfPath,
+          context.romElfPath,
           this.addr2linePool
         );
         if (!this.isCurrentCrashDecode(event.id, rev)) {
           return;
         }
-        event.decoded = decoded;
+        cacheCrashDecode(event, decoded, context);
         this.postMessage({
           type: 'crashDecoded',
           eventId: event.id,
@@ -817,20 +826,28 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         const event = this.crashEvents.find((e) => e.id === message.eventId);
         if (event && this.config.elfPath) {
           const rev = this.nextCrashDecodeRevision(event.id);
+          const context = createCrashDecodeContext(
+            event.rawText,
+            event.kind,
+            this.config.elfPath,
+            this.config.toolPath,
+            this.config.targetArch,
+            this.config.romElfPath,
+          );
           try {
             const decoded = await decodeCrash(
-              event,
-              this.config.elfPath,
-              this.config.toolPath,
-              this.config.targetArch,
+              { ...event, rawText: context.captureText },
+              context.elfPath,
+              context.toolPath,
+              context.targetArch,
               this.log,
-              this.config.romElfPath,
+              context.romElfPath,
               this.addr2linePool
             );
             if (!this.isCurrentCrashDecode(event.id, rev)) {
               break;
             }
-            event.decoded = decoded;
+            cacheCrashDecode(event, decoded, context);
             this.postMessage({
               type: 'crashDecoded',
               eventId: event.id,

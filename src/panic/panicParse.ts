@@ -492,7 +492,7 @@ export function parseESP32PanicOutput(input: string): XtensaPanicInfo {
     if (/^\s*Backtrace:/.test(line)) {
       // Entries are "0xPC:0xSP" pairs — only the PC is a code address;
       // stack pointers must not be resolved as frames.
-      for (const match of line.matchAll(/(0x[0-9a-fA-F]{8})\s*:\s*0x[0-9a-fA-F]{8}/g)) {
+      for (const match of line.matchAll(/(0x[0-9a-fA-F]{8})\s*:\s*0x[0-9a-fA-F]{8}(?=\s|$)/g)) {
         const addr = parseInt(match[1], 16);
         if (!Number.isNaN(addr)) {
           current.backtraceAddrs.push(addr);

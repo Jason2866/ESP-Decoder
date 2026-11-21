@@ -494,10 +494,20 @@ export async function decodeCoredumpFile(
   }
 
   if (!results.length && tryRepair && !repairAttempted) {
-    const raw = await fs.readFile(inputPath);
-    const fallback = await tryRawElfFallback(params, raw, options);
-    if (fallback?.length) {
-      return fallback;
+    try {
+      const raw = await fs.readFile(inputPath);
+      const fallback = await tryRawElfFallback(params, raw, options);
+      if (fallback?.length) {
+        return fallback;
+      }
+    } catch (err) {
+      if (options.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        throw err;
+      }
+      log('coredump repair failed after thread decode errors', err);
+      if (!lastError) {
+        throw err;
+      }
     }
   }
 

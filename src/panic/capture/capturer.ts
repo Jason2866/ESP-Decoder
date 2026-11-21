@@ -293,8 +293,11 @@ export class Capturer {
 
     if (blocks.length > 0) {
       const last = blocks[blocks.length - 1];
-      if (preview && !last.lines.includes(preview)) {
-        last.lines.push(preview);
+      if (preview) {
+        if (!last.lines.includes(preview)) {
+          last.lines.push(preview);
+        }
+        last.pendingPreview = true;
       }
       this.lastPreviewKey = preview ? `${last.id}:${preview}` : '';
       return;
@@ -344,6 +347,7 @@ export class Capturer {
       startedAt: active.startedAt,
       lastAt: active.lastAt,
       reasonLine: active.reasonLine,
+      pendingPreview: true,
     });
   }
 
@@ -430,26 +434,14 @@ export class Capturer {
     // legitimately fail (register lines arriving late change detectKind).
     const revisionId = this.blockEventIndex.get(block.id);
     const revision = revisionId === undefined ? undefined : this.eventsById.get(revisionId);
-    // A revision of the event's own block is normally the same occurrence,
-    // but when its identifying data changes, check whether a finalized event
-    // now matches the complete capture. Pending-line previews can be
-    // truncated, so keep the original ID unless a finalized match is found.
+    // A revision of the event's own block is normally the same occurrence.
+    // Recheck finalized matches only after the new rows are committed;
+    // pending-line previews can still change their identifying data.
     const ownsRevision =
       revision !== undefined && this.eventOwnerBlock.get(revision.id) === block.id;
     if (revision && ownsRevision) {
-      const current = revision.lightweight;
-      const incoming = candidate.lightweight;
-      const identifyingDataChanged =
-        revision.kind !== candidate.kind ||
-        current.reasonLine !== incoming.reasonLine ||
-        current.programCounter !== incoming.programCounter ||
-        current.faultCode !== incoming.faultCode ||
-        current.faultAddr !== incoming.faultAddr ||
-        current.regs.RA !== incoming.regs.RA ||
-        current.backtraceAddrs.length !== incoming.backtraceAddrs.length ||
-        current.backtraceAddrs.some((addr, index) => addr !== incoming.backtraceAddrs[index]);
       const finalizedMatch =
-        identifyingDataChanged && !this.eventAggregate.has(revision.id)
+        !block.pendingPreview && !this.eventAggregate.has(revision.id)
           ? this.findRecentFinalizedMatch(revision.id, candidate)
           : undefined;
       if (finalizedMatch) {
@@ -462,6 +454,13 @@ export class Capturer {
         );
         return;
       }
+      this.applyRevision(revision, candidate, block.id);
+      return;
+    }
+    if (revision && block.pendingPreview) {
+      // The row is still buffered, so it may refresh this event's preview
+      // but cannot yet move its occurrence to a finalized match or alter the
+      // finalized event's count. Recheck after the line is committed.
       this.applyRevision(revision, candidate, block.id);
       return;
     }
@@ -491,7 +490,7 @@ export class Capturer {
       this.emit('eventUpdated', revision);
     }
 
-    const exact = this.findRecentBySignature(candidate);
+    const exact = block.pendingPreview ? undefined : this.findRecentBySignature(candidate);
     if (exact) {
       // Signature only covers the first few backtrace frames; a matching
       // signature with a conflicting backtrace or return address is a
@@ -506,13 +505,13 @@ export class Capturer {
       }
     }
 
-    const byContainment = this.findRecentContainmentMatch(candidate);
+    const byContainment = block.pendingPreview ? undefined : this.findRecentContainmentMatch(candidate);
     if (byContainment && returnAddressesCompatible(this.matchLightweight(byContainment), candidate.lightweight)) {
       this.mergeIntoExisting(byContainment, candidate, shouldPreferCandidate(byContainment, candidate), block.id);
       return;
     }
 
-    const byFingerprint = this.findRecentFingerprintMatch(candidate);
+    const byFingerprint = block.pendingPreview ? undefined : this.findRecentFingerprintMatch(candidate);
     if (byFingerprint && returnAddressesCompatible(this.matchLightweight(byFingerprint), candidate.lightweight)) {
       this.mergeIntoExisting(byFingerprint, candidate, shouldPreferCandidate(byFingerprint, candidate), block.id);
       return;

@@ -69,6 +69,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { EspDecoderWebviewPanel } from '../webviewPanel.js';
 import { SerialPortManager } from '../serialPortManager.js';
 import { buildMcpServer, McpServerDeps, MonitorDataSource } from '../mcpServer.js';
+import * as crashDecoder from '../crashDecoder.js';
 import type { CrashEvent } from '../crashDecoder.js';
 import type { UploadResult } from '../mcpUpload.js';
 
@@ -402,6 +403,11 @@ describe('MCP tools', () => {
       lines: ['Guru Meditation Error: Core 0 panic'],
       rawText: 'Guru Meditation Error: Core 0 panic',
       timestamp: 123,
+      decodedContext: {
+        captureText: 'Guru Meditation Error: Core 0 panic',
+        captureKind: 'xtensa',
+        elfPath: '/fw/firmware.elf',
+      },
       decoded: {
         faultInfo: { coreId: 0, faultMessage: 'LoadProhibited' },
         stacktrace: [
@@ -410,7 +416,7 @@ describe('MCP tools', () => {
         rawOutput: '',
       },
     };
-    const client = await connectClient(makeDeps({ data: makeDataSource([], [crash]) }));
+    const client = await connectClient(makeDeps({ data: makeDataSource([], [crash], '/fw/firmware.elf') }));
 
     const { crashes } = await callTool(client, 'list_crashes');
     expect(crashes).toEqual([
@@ -445,6 +451,60 @@ describe('MCP tools', () => {
     await expect(callTool(client, 'decode_crash', { crash_id: 'crash-2' })).rejects.toThrow(
       /No ELF file configured/
     );
+  });
+
+  it('does not reuse a cached decode produced for a different ELF', async () => {
+    const crash: CrashEvent = {
+      id: 'crash-stale-cache',
+      kind: 'xtensa',
+      lines: ['panic'],
+      rawText: 'panic',
+      timestamp: 1,
+      decodedContext: { captureText: 'panic', captureKind: 'xtensa', elfPath: '/fw/elf-a.elf' },
+      decoded: { stacktrace: [{ address: '0x40000001', function: 'elf_a' }], rawOutput: '' },
+    };
+    const decodedForB = { stacktrace: [{ address: '0x40000002', function: 'elf_b' }], rawOutput: '' };
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockResolvedValue(decodedForB);
+    const client = await connectClient(makeDeps({
+      data: makeDataSource([], [crash], '/fw/elf-b.elf'),
+    }));
+
+    try {
+      const decoded = await callTool(client, 'decode_crash', { crash_id: crash.id });
+      expect(decodeSpy).toHaveBeenCalledOnce();
+      expect(decodeSpy.mock.calls[0][1]).toBe('/fw/elf-b.elf');
+      expect(decoded.frames).toEqual(decodedForB.stacktrace);
+    } finally {
+      decodeSpy.mockRestore();
+    }
+  });
+
+  it('rechecks crash existence after a decode attempt', async () => {
+    const crash: CrashEvent = {
+      id: 'crash-removed-during-decode',
+      kind: 'xtensa',
+      lines: ['panic'],
+      rawText: 'panic',
+      timestamp: 1,
+    };
+    let present = true;
+    const data: MonitorDataSource = {
+      ...makeDataSource([], [crash], '/fw/firmware.elf'),
+      getCrashEvents: () => present ? [crash] : [],
+    };
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockImplementation(async () => {
+      present = false;
+      return { stacktrace: [], rawOutput: '' };
+    });
+    const client = await connectClient(makeDeps({ data }));
+
+    try {
+      await expect(callTool(client, 'decode_crash', { crash_id: crash.id })).rejects.toThrow(
+        `No crash with id '${crash.id}'`,
+      );
+    } finally {
+      decodeSpy.mockRestore();
+    }
   });
 
   it('upload_firmware forwards the environment and returns the result', async () => {
