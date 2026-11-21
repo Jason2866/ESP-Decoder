@@ -118,11 +118,11 @@ function stripEntrySuffix(name: string): string {
   return name.replace(/@entry$/, '');
 }
 
-function dedupeArgs(args: FrameArg[] | undefined): FrameArg[] {
+export function dedupeArgs(args: FrameArg[] | undefined): FrameArg[] {
   if (!args || !args.length) {
     return [];
   }
-  const byName = new Map<string, { arg: FrameArg; fromEntry: boolean }>();
+  const byName = new Map<string, { current?: FrameArg; entry?: FrameArg }>();
   const order: string[] = [];
 
   for (const arg of args) {
@@ -131,33 +131,62 @@ function dedupeArgs(args: FrameArg[] | undefined): FrameArg[] {
     }
     const baseName = stripEntrySuffix(arg.name);
     const fromEntry = arg.name.endsWith('@entry');
-    const existing = byName.get(baseName);
-    if (!existing) {
-      byName.set(baseName, { arg: { ...arg, name: baseName }, fromEntry });
+    let values = byName.get(baseName);
+    if (!values) {
+      values = {};
+      byName.set(baseName, values);
       order.push(baseName);
-      continue;
     }
-
-    if (existing.fromEntry && !fromEntry) {
-      byName.set(baseName, { arg: { ...arg, name: baseName }, fromEntry });
-      continue;
-    }
-
-    if (!existing.arg.type && arg.type) {
-      existing.arg.type = arg.type;
-    }
-    if (
-      (!existing.arg.value || existing.arg.value === '<optimized out>') &&
-      arg.value &&
-      arg.value !== '<optimized out>'
-    ) {
-      existing.arg.value = arg.value;
+    const slot = fromEntry ? 'entry' : 'current';
+    const previous = values[slot];
+    if (!previous || ((!previous.value || previous.value === '<optimized out>') && arg.value && arg.value !== '<optimized out>')) {
+      values[slot] = { ...arg, name: baseName };
+    } else {
+      if (!previous.type && arg.type) {
+        previous.type = arg.type;
+      }
+      if (!previous.value && arg.value) {
+        previous.value = arg.value;
+      }
     }
   }
 
-  return order
-    .map((name) => byName.get(name)?.arg)
-    .filter((a): a is FrameArg => a !== undefined);
+  return order.flatMap((name) => {
+    const values = byName.get(name);
+    if (!values) {
+      return [];
+    }
+    const current = values.current;
+    const entry = values.entry;
+    const selected = current?.value && current.value !== '<optimized out>'
+      ? current
+      : entry?.value && entry.value !== '<optimized out>'
+        ? entry
+        : current ?? entry;
+    if (!selected) {
+      return [];
+    }
+    const fallback = selected === entry ? current : entry;
+    const result: FrameArg = {
+      ...selected,
+      name: selected === entry ? `${name}@entry` : name,
+    };
+    if (!result.type && fallback?.type) {
+      result.type = fallback.type;
+    }
+    if ((!result.value || result.value === '<optimized out>') && fallback?.value && fallback.value !== '<optimized out>') {
+      result.value = fallback.value;
+    }
+    return [result];
+  });
+}
+
+export function countResolvedMiFrames(
+  frames: (GDBLine | ParsedGDBLine)[],
+): number {
+  return frames.filter(
+    (line) => isParsedGDBLine(line) && (line.method !== '??' || line.file !== '??'),
+  ).length;
 }
 
 export async function fetchStacktraceWithMi(
@@ -468,8 +497,9 @@ export async function decodeRiscv(
       .map((line) => line?.location)
       .filter(isGDBLine);
     log('addr2line done', { programCounter, faultAddr });
+    const resolvedMiFrameCount = countResolvedMiFrames(miLines);
     const stacktraceLines =
-      !usePrintedBacktrace && miLines.length >= printedBacktrace.length
+      !usePrintedBacktrace && resolvedMiFrameCount >= printedBacktrace.length
         ? miLines
         : printedLines;
     stacktraceLines.forEach((line, index) => {

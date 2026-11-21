@@ -891,7 +891,7 @@ export function createCapturer(options?: CapturerOptions): Capturer {
 // --- helpers ---------------------------------------------------------------
 
 function detectKind(lines: string[]): CapturerEventKind {
-  const riscvHints = [/\bMCAUSE\b/i, /\bMEPC\b/i, /\bMHARTID\b/i];
+  const riscvHints = [/\b(?:MCAUSE|MEPC|MHARTID)\s*[:=]\s*0x[0-9a-f]+\b/i];
   if (lines.some((line) => riscvHints.some((hint) => hint.test(line)))) {
     return 'riscv';
   }

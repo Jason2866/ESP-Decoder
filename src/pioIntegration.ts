@@ -442,22 +442,28 @@ export function findPioGdbToolPath(
   let genericNames: string[] = [];
   /** Prefix used to prefer chip-matching gdb binaries in the fallback scan. */
   let chipPrefix: string | undefined;
+  const isEsp8266 = chipName?.toLowerCase() === 'esp8266';
 
   if (arch === 'riscv') {
     pkgDirs = listPackageDirs(packagesDir, /riscv32/);
     genericNames = [`riscv32-esp-elf-gdb${ext}`];
   } else {
     pkgDirs = listPackageDirs(packagesDir, /^(tool|toolchain)-xtensa/);
-    const chipHint = chipName === 'esp8266' ? 'lx106' : chipName;
+    const chipHint = isEsp8266 ? 'lx106' : chipName;
     if (chipHint) {
       preferredNames.push(`xtensa-${chipHint}-elf-gdb${ext}`);
       chipPrefix = `xtensa-${chipHint}-`;
     }
-    genericNames = XTENSA_GDB_NAMES.map((n) => n + ext);
+    genericNames = XTENSA_GDB_NAMES
+      .filter((name) => isEsp8266 || name !== 'xtensa-lx106-elf-gdb')
+      .map((n) => n + ext);
   }
 
   // Chip-specific binaries take precedence across all matching packages.
   for (const name of preferredNames) {
+    if (!isEsp8266 && /^xtensa-lx106-elf-gdb(?:\.exe)?$/i.test(name)) {
+      continue;
+    }
     for (const pkgDir of pkgDirs) {
       const candidate = path.join(packagesDir, pkgDir, 'bin', name);
       if (fs.existsSync(candidate)) {
@@ -496,13 +502,16 @@ export function findPioGdbToolPath(
     return undefined;
   };
 
+  const allowedGdb = (entry: string): boolean =>
+    gdbPattern.test(entry) && (isEsp8266 || !/^xtensa-lx106-elf-gdb(?:\.exe)?$/i.test(entry));
+
   if (chipPrefix) {
-    const chipMatch = scan((entry) => entry.startsWith(chipPrefix) && gdbPattern.test(entry));
+    const chipMatch = scan((entry) => entry.startsWith(chipPrefix) && allowedGdb(entry));
     if (chipMatch) {
       return chipMatch;
     }
   }
-  return scan((entry) => gdbPattern.test(entry));
+  return scan(allowedGdb);
 }
 
 /**

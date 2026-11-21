@@ -356,7 +356,7 @@ function isContinuationLine(line: string): boolean {
   return (
     isStackDataRow(trimmed) ||
     /^[A-Z][A-Z0-9/]*\s*:\s*0x[0-9a-fA-F]+/.test(trimmed) ||
-    /Backtrace:/i.test(trimmed) ||
+    /^Backtrace:/i.test(trimmed) ||
     /^Stack memory:/i.test(trimmed) ||
     /^Core\s+\d+\s+register dump:/i.test(trimmed) ||
     // ESP-IDF prints the firmware ELF SHA256 between the panic data and

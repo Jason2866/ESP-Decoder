@@ -52,6 +52,7 @@ vi.mock('vscode', () => {
 import { CrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump } from '../crashDecoder.js';
 import type { CrashEvent } from '../crashDecoder.js';
 import { getPioPackagesDir } from '../pioIntegration.js';
+import { countResolvedMiFrames, dedupeArgs } from '../panic/decodeRiscv.js';
 import {
   registerSets,
   gdbRegsInfoRiscvIlp32,
@@ -65,6 +66,8 @@ import {
   GdbMiClient,
   CrashFramer,
   Capturer,
+  parseESP8266PanicOutput,
+  parseStackDataRow,
   parseRiscvPanicOutput,
   extractPrintedBacktraceAddrs,
   printedBacktraceApplies,
@@ -188,6 +191,26 @@ describe('CrashCapturer – ESP32-C6 assert failure', () => {
   it('captures MEPC value 0x4080c1aa', () => {
     const event = feedCrashText(capturer, CRASH_TEXT);
     expect(event?.rawText).toContain('0x4080c1aa');
+  });
+});
+
+describe('CrashCapturer – architecture hints', () => {
+  it('requires a value after a RISC-V register name and matches multiple fields on a row', () => {
+    const riscv = feedCrashText(new CrashCapturer(), [
+      'assert failed: MCAUSE register check',
+      'Core 0 register dump:',
+      'MEPC: 0x42000001  MCAUSE: 0x00000002  MHARTID: 0x00000000',
+      'Backtrace: 0x42000001:0x3fc80000',
+    ].join('\n'));
+    expect(riscv?.kind).toBe('riscv');
+
+    const xtensa = feedCrashText(new CrashCapturer(), [
+      'assert failed: MCAUSE register check',
+      "Guru Meditation Error: Core 0 panic'ed (LoadProhibited).",
+      'PC: 0x400d1234',
+      'Backtrace: 0x400d1234:0x3ffb0000',
+    ].join('\n'));
+    expect(xtensa?.kind).toBe('xtensa');
   });
 });
 
@@ -2506,6 +2529,9 @@ describe('decodeCrash – raw fallback core isolation', () => {
       'esp32s31',
     );
     expect(decoded.faultInfo?.coreId).toBe(1);
+    expect(decoded.faultInfo?.programCounter).toBeUndefined();
+    expect(decoded.faultInfo?.faultCode).toBeUndefined();
+    expect(decoded.faultInfo?.faultAddr).toBeUndefined();
     expect(decoded.regs).toBeUndefined();
     expect(decoded.stacktrace).toEqual([]);
     // The raw capture is preserved for display.
@@ -2542,6 +2568,7 @@ describe('decodeCrash – raw fallback core isolation', () => {
       'esp32',
     );
     expect(decoded.faultInfo?.coreId).toBe(1);
+    expect(decoded.faultInfo?.programCounter).toBeUndefined();
     expect(decoded.regs).toBeUndefined();
     expect(decoded.stacktrace).toEqual([]);
     expect(decoded.rawOutput).toContain('Core  0 register dump:');
@@ -2598,6 +2625,9 @@ describe('decodeCrash – raw fallback selected-core extraction', () => {
       expect(decoded.faultInfo?.coreId).toBe(1);
       expect(decoded.regs?.['MEPC']).toBe(0x42100001);
       expect(decoded.regs?.['MCAUSE']).toBe(0xb);
+      expect(decoded.faultInfo?.programCounter).toBe('0x42100001');
+      expect(decoded.faultInfo?.faultCode).toBe(0xb);
+      expect(decoded.faultInfo?.faultAddr).toBe('0x00000000');
       const addresses = decoded.stacktrace.map((f) => f.address.toLowerCase());
       expect(addresses).toEqual(['0x42100001', '0x42100009']);
       expect(addresses).not.toContain('0x42000001');
@@ -2656,6 +2686,61 @@ describe('parseXtensaPanicOutput – named-core header guard', () => {
     const parsed = parseXtensaPanicOutput(ESP8266_CRASH_TEXT);
     expect(parsed.programCounter).toBeDefined();
     expect(Object.keys(parsed.regs).length).toBeGreaterThan(0);
+  });
+});
+
+describe('parseESP32PanicOutput – abort header PC', () => {
+  it('uses the abort header PC when the selected core has no captured PC register', () => {
+    const parsed = parseESP32PanicOutput([
+      'abort() was called at PC 0x40081234 on core 1',
+      'Core 1 register dump:',
+      'EXCCAUSE: 0x0000001d',
+    ].join('\n'));
+    expect(parsed.programCounter).toBe(0x40081234);
+  });
+
+  it('keeps the captured PC register ahead of the abort header PC', () => {
+    const parsed = parseESP32PanicOutput([
+      'abort() was called at PC 0x40081234 on core 1',
+      'Core 1 register dump:',
+      'PC: 0x40085678',
+    ].join('\n'));
+    expect(parsed.programCounter).toBe(0x40085678);
+  });
+});
+
+describe('ESP8266 stack row parsing', () => {
+  it('accepts only complete eight-digit words with or without the prefix', () => {
+    expect(parseStackDataRow('3fc80000: 0x00004200 00004200')).toEqual({
+      baseAddr: 0x3fc80000,
+      data: [0x4200, 0x4200],
+    });
+    expect(parseStackDataRow('3fc80000: 0x4200')).toBeUndefined();
+  });
+
+  it('reads stack rows only inside the ESP8266 marked stack block', () => {
+    const parsed = parseESP8266PanicOutput([
+      '3fff10b0: 4021a5d4 00000033',
+      '>>>stack>>>',
+      '3fff10b0: 4021a5d4 00000033',
+      '<<<stack<<<',
+      '3fff10b8: 4021b000 00000044',
+    ].join('\n'));
+    expect(parsed.backtraceAddrs).toEqual([0x4021a5d4]);
+  });
+});
+
+describe('CrashFramer – Backtrace continuation rows', () => {
+  it('does not continue on a line that only mentions Backtrace later in the text', () => {
+    const framer = new CrashFramer(1000);
+    framer.pushLine('assert failed: first', 0);
+    framer.pushLine('Backtrace: 0x40000001:0x3ffb0001', 1);
+    expect(framer.flush(1000, true)).toHaveLength(1);
+
+    framer.pushLine('diagnostic mentions Backtrace: 0x40000002', 1001);
+    expect(framer.activeBlockId()).toBeUndefined();
+    framer.pushLine('assert failed: second', 1002);
+    expect(framer.peekActiveBlock()?.lines).toEqual(['assert failed: second']);
   });
 });
 
@@ -2728,6 +2813,31 @@ describe('parseLine – argument values containing equals signs', () => {
   });
 });
 
+describe('RISC-V MI frame and argument selection', () => {
+  it('prefers current values regardless of tuple order and labels entry fallbacks', () => {
+    const current = { name: 'value', value: 'current' };
+    const entry = { name: 'value@entry', value: 'entry' };
+    expect(dedupeArgs([entry, current])).toEqual([{ name: 'value', value: 'current' }]);
+    expect(dedupeArgs([current, entry])).toEqual([{ name: 'value', value: 'current' }]);
+    expect(dedupeArgs([{ name: 'value@entry', value: 'entry' }])).toEqual([
+      { name: 'value@entry', value: 'entry' },
+    ]);
+    expect(dedupeArgs([
+      { name: 'value', value: '<optimized out>' },
+      { name: 'value@entry', value: 'entry' },
+    ])).toEqual([{ name: 'value@entry', value: 'entry' }]);
+  });
+
+  it('counts only MI frames with a resolved method or file', () => {
+    expect(countResolvedMiFrames([
+      { regAddr: '0x42000001', lineNumber: '??' },
+      { regAddr: '0x42000002', lineNumber: '12', method: '??', file: '??' },
+      { regAddr: '0x42000003', lineNumber: '??', method: 'worker', file: '??' },
+      { regAddr: '0x42000004', lineNumber: '??', method: '??', file: 'main.c' },
+    ])).toBe(2);
+  });
+});
+
 describe('abort core extraction', () => {
   it('extracts core from abort() header for Xtensa', () => {
     const text = 'abort() was called at PC 0x40081234 on core 1\nCore 1 register dump:\nPC: 0x40081234';
@@ -2749,7 +2859,7 @@ describe('gdbStubMain – missing register encoding', () => {
       stackBaseAddr: number;
       stackData: Buffer;
       regs: Record<string, number>;
-    }) => { out: string; respondRegs(): void };
+    }) => { out: string; respondRegs(): void; handleCommand(buffer: string): void; flush(): void };
   };
 
   it('encodes missing registers with eight x characters', () => {
@@ -2762,6 +2872,20 @@ describe('gdbStubMain – missing register encoding', () => {
     const packet = stub.out.replace(/^\$/, '').replace(/#[0-9a-f]{2}$/, '');
     expect(packet.startsWith('00000000')).toBe(true);
     expect(packet).toContain('xxxxxxxx');
+  });
+
+  it('ends the thread list after returning the available thread', () => {
+    const stub = new Stub({
+      stackBaseAddr: 0,
+      stackData: Buffer.alloc(0),
+      regs: {},
+    });
+    stub.flush = () => {};
+    stub.handleCommand('$qfThreadInfo#00');
+    expect(stub.out).toContain('$m1#');
+    stub.out = '';
+    stub.handleCommand('$qsThreadInfo#00');
+    expect(stub.out).toContain('$l#');
   });
 });
 
@@ -2913,20 +3037,48 @@ describe('Capturer – retained PC evidence prevents conflict merges', () => {
 });
 
 describe('decodeCoredumpFile – thread attribution and error resilience', () => {
-  it('reports a successful handshake with no decoded threads', async () => {
+  it('preserves the no-thread error when a warning callback is supplied', async () => {
     const handshakeSpy = vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
     const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockResolvedValue('^done,threads=[]\n');
     const closeSpy = vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
     const warnings: string[] = [];
     try {
-      const results = await decodeCoredumpFile(
+      await expect(decodeCoredumpFile(
         { elfPath: '/dummy.elf', toolPath: 'fake-gdb' } as DecodeParams,
         '/dummy-coredump.elf',
         { onWarning: (warning) => warnings.push(warning) },
         false,
-      );
-      expect(results).toEqual([]);
+      )).rejects.toThrow('GDB core load returned no thread entries');
       expect(warnings).toContain('GDB core load returned no thread entries');
+    } finally {
+      sendSpy.mockRestore();
+      handshakeSpy.mockRestore();
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('attempts enabled coredump repair before closing GDB and preserves the no-thread error', async () => {
+    const calls: string[] = [];
+    const handshakeSpy = vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockImplementation(async (cmd: string) => {
+      calls.push(`send:${cmd}`);
+      return '^done,threads=[]\n';
+    });
+    const closeSpy = vi.spyOn(GdbMiClient.prototype, 'close').mockImplementation(async () => {
+      calls.push('close');
+    });
+
+    try {
+      await expect(decodeCoredumpFile(
+        { elfPath: '/dummy.elf', toolPath: 'fake-gdb' } as DecodeParams,
+        ELF_PATH,
+        {},
+        true,
+      )).rejects.toThrow('GDB core load returned no thread entries');
+      const threadInfoIndexes = calls.flatMap((call, index) => call === 'send:-thread-info' ? [index] : []);
+      const firstCloseIndex = calls.indexOf('close');
+      expect(threadInfoIndexes).toHaveLength(2);
+      expect(threadInfoIndexes[1]).toBeLessThan(firstCloseIndex);
     } finally {
       sendSpy.mockRestore();
       handshakeSpy.mockRestore();
@@ -2974,6 +3126,7 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
       expect(results).toHaveLength(1);
       expect(results[0].threadId).toBe('1');
       expect(results[0].TCB).toBe(100);
+      expect(results[0].threadName).toBeUndefined();
       const frame0 = results[0].result.stacktraceLines[0] as ParsedGDBLine;
       expect(frame0.method).toBe('app_main');
     } finally {
@@ -3067,6 +3220,7 @@ describe('decodeCoredumpFile – thread attribution and error resilience', () =>
       // Both threads were extracted and decoded despite non-standard target-id
       expect(results).toHaveLength(2);
       expect(results.map((r) => r.threadId)).toEqual(['1', '2']);
+      expect(results.map((r) => r.threadName)).toEqual(['main', 'worker']);
     } finally {
       sendSpy.mockRestore();
       handshakeSpy.mockRestore();

@@ -89,6 +89,8 @@ class Stub {
       this.respond('OK');
     } else if (command === 'qfThreadInfo') {
       this.respond('m1');
+    } else if (command === 'qsThreadInfo') {
+      this.respond('l');
     } else if (command === 'qC') {
       this.respond('QC1');
     } else if (command === 'g') {

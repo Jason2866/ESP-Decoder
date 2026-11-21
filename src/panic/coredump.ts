@@ -49,7 +49,8 @@ async function tryRawElfFallback(
       const extractedElfPath = path.join(tmpDirPath, 'extracted.elf');
       try {
         await fs.writeFile(extractedElfPath, elfBuffer);
-        return await decodeCoredumpFile(params, extractedElfPath, options, false);
+        const decoded = await decodeCoredumpFile(params, extractedElfPath, options, false);
+        return decoded.length > 0 ? decoded : undefined;
       } finally {
         await fs
           .rm(tmpDirPath, { recursive: true, force: true, maxRetries: 3 })
@@ -223,6 +224,8 @@ export async function decodeCoredumpFile(
   );
   const results: ThreadDecodeResult[] = [];
   let lastError: unknown;
+  let repairAttempted = false;
+  let repairResult: CoredumpDecodeResult | undefined;
 
   try {
     // Use -thread-info for a more reliable MI listing of threads
@@ -236,7 +239,7 @@ export async function decodeCoredumpFile(
 
     // Extract the contents of the top-level threads=[ ... ] block, handling nested brackets
     const threadsContent = extractMiListContent(threadsRaw, 'threads');
-    const threadEntries: [string, string][] = [];
+    const threadEntries: [string, string, string | undefined][] = [];
     if (threadsContent) {
       const objs: string[] = [];
       let depth = 0;
@@ -277,24 +280,44 @@ export async function decodeCoredumpFile(
         const idMatch = /id="([^"]+)"/.exec(objStr);
         if (idMatch) {
           const tid = idMatch[1];
+          const fields = Object.fromEntries(
+            splitMiFields(objStr.slice(1, -1))
+              .map(parseMiField)
+              .filter((field): field is [string, string] => field !== undefined),
+          );
           const tcbMatch =
-            /target-id="process\s+(\d+)"/.exec(objStr) ??
-            /target-id="[^\"]*?(\d+)/.exec(objStr);
+            fields['target-id']?.match(/^process\s+(\d+)/) ??
+            fields['target-id']?.match(/(\d+)/);
           const tcb = tcbMatch ? tcbMatch[1] : '0';
-          threadEntries.push([tid, tcb]);
+          threadEntries.push([tid, tcb, fields.name]);
         }
       }
     }
     if (threadEntries.length === 0) {
       const message = 'GDB core load returned no thread entries';
+      lastError = new Error(message);
       options.onWarning?.(message);
-      if (!options.onWarning) {
-        throw new Error(message);
+      if (tryRepair) {
+        // Repair and extraction get a chance before this GDB session is
+        // closed. Keep the original no-thread error if repair cannot recover.
+        repairAttempted = true;
+        try {
+          const raw = await fs.readFile(inputPath);
+          repairResult = await tryRawElfFallback(params, raw, options);
+        } catch (err) {
+          log('coredump repair failed after empty thread list', err);
+        }
+        if (repairResult?.length) {
+          return repairResult;
+        }
       }
     }
     const threadIds = threadEntries.map(([id]) => id);
     const threadTcbs = Object.fromEntries(
       threadEntries.map(([id, tcb]) => [id, Number(tcb)]),
+    );
+    const threadNames = Object.fromEntries(
+      threadEntries.map(([id, , name]) => [id, name]),
     );
     log('threads parsed', { threadIds, threadTcbs });
 
@@ -438,6 +461,7 @@ export async function decodeCoredumpFile(
         results.push({
           threadId: tid,
           TCB: threadTcbs[tid] ?? 0,
+          threadName: threadNames[tid],
           result: threadResult,
           current: tid === currentThreadId,
           warning: btError ? `stack-list-frames failed (${btError})` : undefined,
@@ -462,10 +486,10 @@ export async function decodeCoredumpFile(
     await client.close();
   }
 
-  if (!results.length && tryRepair) {
+  if (!results.length && tryRepair && !repairAttempted) {
     const raw = await fs.readFile(inputPath);
     const fallback = await tryRawElfFallback(params, raw, options);
-    if (fallback) {
+    if (fallback?.length) {
       return fallback;
     }
   }

@@ -1750,24 +1750,47 @@ function parseXtensaFaultInfo(text: string): DecodedCrash['faultInfo'] | undefin
 /**
  * Parse fault information from crash text (fallback when the decoder cannot decode).
  */
-function parseFaultInfo(text: string): DecodedCrash['faultInfo'] | undefined {
+function parseFaultInfo(
+  text: string,
+  selectedCoreId?: number,
+): DecodedCrash['faultInfo'] | undefined {
   const lines = text.split('\n');
-
-  for (const line of lines) {
-    const guruMatch = line.match(/Core\s+(\d+)\s+panic'ed\s+\(([^)]+)\)/i);
-    if (guruMatch) {
-      return {
-        coreId: parseInt(guruMatch[1], 10),
-        faultMessage: guruMatch[2],
-      };
+  const guruMatch = text.match(/Core\s+(\d+)\s+panic'ed\s+\(([^)]+)\)/i);
+  const abortMatch = text.match(/abort\(\)\s+was\s+called.*?\bon\s+core\s+(\d+)/i);
+  const headerCoreId = guruMatch
+    ? parseInt(guruMatch[1], 10)
+    : abortMatch
+      ? parseInt(abortMatch[1], 10)
+      : undefined;
+  const firstDumpMatch = text.match(/^\s*Core\s+(\d+)\s+register dump:/im);
+  const coreId = headerCoreId ?? selectedCoreId ?? (firstDumpMatch ? parseInt(firstDumpMatch[1], 10) : 0);
+  const hasDumpHeaders = /^\s*Core\s+\d+\s+register dump:/im.test(text);
+  let detailLines = lines;
+  if (hasDumpHeaders) {
+    detailLines = [];
+    let currentCore: number | undefined;
+    for (const line of lines) {
+      const dumpHeader = line.match(/^\s*Core\s+(\d+)\s+register dump:/i);
+      if (dumpHeader) {
+        currentCore = parseInt(dumpHeader[1], 10);
+      }
+      if (currentCore === coreId) {
+        detailLines.push(line);
+      }
     }
   }
 
   // Detect fault messages from various crash formats
-  let faultMessage: string | undefined;
+  let faultMessage: string | undefined = guruMatch?.[2];
+  if (!faultMessage && abortMatch) {
+    faultMessage = lines.find((line) => /abort\(\)\s+was\s+called/i.test(line))?.trim();
+  }
   let faultCode: number | undefined;
   let faultAddr: string | undefined;
   for (const line of lines) {
+    if (faultMessage) {
+      break;
+    }
     const assertMatch = line.match(/^(assert failed:.+)/i);
     if (assertMatch) {
       faultMessage = assertMatch[1];
@@ -1789,41 +1812,34 @@ function parseFaultInfo(text: string): DecodedCrash['faultInfo'] | undefined {
     }
   }
 
-  // Extract excvaddr / EXCVADDR as fault address
-  for (const line of lines) {
-    const excvMatch = line.match(/\bexcvaddr\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
-    if (excvMatch) {
-      faultAddr = excvMatch[1];
-      break;
+  let programCounter: string | undefined;
+  for (const line of detailLines) {
+    const faultAddrMatch = line.match(/\b(?:excvaddr|mtval)\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
+    if (faultAddrMatch) {
+      faultAddr = faultAddrMatch[1];
     }
-  }
-
-  // Extract core ID from "Core N register dump:" if present
-  let coreId = 0;
-  for (const line of lines) {
-    const coreMatch = line.match(/Core\s+(\d+)\s+register dump:/i);
-    if (coreMatch) {
-      coreId = parseInt(coreMatch[1], 10);
-      break;
+    const faultCodeMatch = line.match(/\b(?:exccause|mcause)\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
+    if (faultCodeMatch && faultCode === undefined) {
+      faultCode = parseInt(faultCodeMatch[1], 16);
     }
-  }
-
-  for (const line of lines) {
     const epcMatch = line.match(/EPC1?\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
-    if (epcMatch) {
-      return { coreId, programCounter: epcMatch[1], faultCode, faultAddr, faultMessage };
-    }
     const mepcMatch = line.match(/MEPC\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
-    if (mepcMatch) {
-      return { coreId, programCounter: mepcMatch[1], faultCode, faultAddr, faultMessage };
+    const pcMatch = line.match(/\bPC\s*[:=]\s*(0x[0-9a-fA-F]+)/i);
+    if (!programCounter && (epcMatch || mepcMatch || pcMatch)) {
+      programCounter = (epcMatch ?? mepcMatch ?? pcMatch)?.[1];
     }
   }
 
-  if (faultMessage) {
-    return { coreId, faultCode, faultAddr, faultMessage };
+  // An abort header's PC belongs to the core named on that header, so it is
+  // safe when that core's register dump is absent. Never use another dump's PC.
+  if (!programCounter && headerCoreId !== undefined && headerCoreId === coreId) {
+    const abortPcMatch = text.match(/abort\(\)\s+was\s+called.*?\bPC\s+(0x[0-9a-fA-F]+)/i);
+    programCounter = abortPcMatch?.[1];
   }
 
-  return undefined;
+  return faultMessage || programCounter || faultCode !== undefined || faultAddr
+    ? { coreId, programCounter, faultCode, faultAddr, faultMessage }
+    : undefined;
 }
 
 const RAW_REGISTER_PATTERN =
@@ -1921,7 +1937,6 @@ function parseXtensaSections(crashText: string) {
 }
 
 function createRawDecode(crashText: string): DecodedCrash {
-  const faultInfo = parseFaultInfo(crashText);
   const frames: StackFrame[] = [];
   let regs: Record<string, number> = {};
   // Core the structured data belongs to; undefined = unsectioned capture.
@@ -1990,6 +2005,8 @@ function createRawDecode(crashText: string): DecodedCrash {
       }
     }
   }
+
+  const faultInfo = parseFaultInfo(crashText, selectedCoreId);
 
   // If no backtrace frames found, extract addresses from stack dumps
   if (frames.length === 0 && !suppressStructured) {

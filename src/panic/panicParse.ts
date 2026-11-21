@@ -81,7 +81,7 @@ export function parseStackDataRow(
   line: string,
 ): { baseAddr: number; data: number[] } | undefined {
   const match = line.match(
-    /^\s*([0-9a-fA-F]+):\s*((?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})(?:\s+(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,}))*)\s*$/,
+    /^\s*([0-9a-fA-F]+):\s*((?:0x)?[0-9a-fA-F]{8}(?:\s+(?:0x)?[0-9a-fA-F]{8})*)\s*$/,
   );
   if (!match) {
     return undefined;
@@ -379,6 +379,7 @@ export function parseESP8266PanicOutput(input: string): XtensaPanicInfo {
   const backtraceAddrs: number[] = [];
   let faultCode: number | undefined;
   let faultAddr: number | undefined;
+  let inStack = false;
 
   const regLine = input.match(/Exception\s+\((\d+)\)/);
   if (regLine) {
@@ -386,6 +387,16 @@ export function parseESP8266PanicOutput(input: string): XtensaPanicInfo {
   }
 
   for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^>>>stack>>>/.test(trimmed)) {
+      inStack = true;
+      continue;
+    }
+    if (/^<<<stack<<</.test(trimmed)) {
+      inStack = false;
+      continue;
+    }
+
     for (const match of line.matchAll(/(epc\d+|excvaddr|depc)=(0x[0-9a-fA-F]{8})/g)) {
       const [, reg, hex] = match;
       regs[reg.toUpperCase()] = parseInt(hex, 16);
@@ -395,7 +406,9 @@ export function parseESP8266PanicOutput(input: string): XtensaPanicInfo {
     }
 
     // Example line: 3fff10b0:  4021a5d4 00000033 3fff20dc 40201ed3
-    const stackMatch = line.match(/^\s*[0-9a-f]{8}:\s+((?:[0-9a-f]{8}\s*)+)/i);
+    const stackMatch = inStack
+      ? line.match(/^\s*[0-9a-f]{8}:\s+((?:[0-9a-f]{8}\s*)+)/i)
+      : null;
     if (stackMatch) {
       const words = stackMatch[1].trim().split(/\s+/);
       for (const word of words) {
@@ -428,6 +441,8 @@ export function parseESP32PanicOutput(input: string): XtensaPanicInfo {
     input.match(/Guru Meditation Error:\s*Core\s+(\d+)/i) ??
     input.match(/abort\(\)\s+was\s+called\b.*?on\s+core\s+(\d+)/i);
   const panicCoreId = coreIdMatch ? parseInt(coreIdMatch[1], 10) : undefined;
+  const abortPcMatch = input.match(/abort\(\)\s+was\s+called\b.*?\bPC\s+(0x[0-9a-fA-F]+)/i);
+  const abortProgramCounter = abortPcMatch ? parseInt(abortPcMatch[1], 16) : undefined;
 
   interface CoreSection {
     regs: Record<string, number>;
@@ -507,7 +522,7 @@ export function parseESP32PanicOutput(input: string): XtensaPanicInfo {
     backtraceAddrs,
     faultCode: regs.EXCCAUSE,
     faultAddr: regs.EXCVADDR,
-    programCounter: regs.PC,
+    programCounter: regs.PC ?? abortProgramCounter,
   };
 }
 

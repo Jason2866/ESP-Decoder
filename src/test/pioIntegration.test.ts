@@ -39,7 +39,43 @@ vi.mock('pioarduino-node-helpers', () => ({
 }));
 
 import { core as pioCore } from 'pioarduino-node-helpers';
-import { findPioEnvironments, getPioBuildDir } from '../pioIntegration.js';
+import { findPioEnvironments, findPioGdbToolPath, getPioBuildDir } from '../pioIntegration.js';
+
+describe('findPioGdbToolPath – lx106 selection', () => {
+  let packagesDir: string;
+  const tempDirs: string[] = [];
+
+  beforeEach(() => {
+    packagesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-gdb-'));
+    tempDirs.push(packagesDir);
+  });
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('only selects lx106 GDB for an esp8266 lookup', () => {
+    const binDir = path.join(packagesDir, 'toolchain-xtensa', 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    const lx106 = path.join(binDir, 'xtensa-lx106-elf-gdb');
+    fs.writeFileSync(lx106, '');
+
+    expect(findPioGdbToolPath(packagesDir, 'xtensa')).toBeUndefined();
+    expect(findPioGdbToolPath(packagesDir, 'xtensa', 'esp32')).toBeUndefined();
+    expect(findPioGdbToolPath(packagesDir, 'xtensa', 'esp8266')).toBe(lx106);
+  });
+
+  it('keeps generic Xtensa discovery when the chip is unknown', () => {
+    const binDir = path.join(packagesDir, 'toolchain-xtensa', 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    const generic = path.join(binDir, 'xtensa-esp-elf-gdb');
+    fs.writeFileSync(generic, '');
+
+    expect(findPioGdbToolPath(packagesDir, 'xtensa')).toBe(generic);
+  });
+});
 
 describe('findPioEnvironments build directory resolution', () => {
   let workspace: string;
