@@ -120,7 +120,7 @@ export class GdbStubServer {
       // MinGW GDB runs `|cmd` via CreateProcess on the first token — it does
       // NOT invoke cmd.exe or a shell, so the GDB child environment must carry
       // ELECTRON_RUN_AS_NODE for the stub (VS Code's Electron binary).
-      const q = (p: string) => `"${p.replace(/"/g, '')}"`;
+      const q = (p: string) => `"${p.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
       return `|${q(process.execPath)} ${q(scriptPath)} ${q(infoPath)}`;
     }
     return `|ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} ${shellQuote(scriptPath)} ${shellQuote(infoPath)}`;

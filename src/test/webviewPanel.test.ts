@@ -9,7 +9,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { fileURLToPath } from 'url';
+import { runInNewContext } from 'node:vm';
 import { ImprovSessionCancellation } from '../improvWiFi';
 
 // Mock vscode before importing webviewPanel
@@ -169,6 +171,33 @@ describe('EspDecoderWebviewPanel – PR #42 file opening', () => {
     expect(internal.improvGenerations.get(11)).toBe(1);
     internal.cancelImprovForWebview(10);
     internal.cancelImprovForWebview(11);
+  });
+
+  it('clears buffered data without flushing crashes and notifies both monitor views', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    const sidebarPost = vi.fn();
+    const editorPost = vi.fn();
+    internal.view = { webview: { postMessage: sidebarPost } };
+    internal.panel = { webview: { postMessage: editorPost } };
+    internal.pendingSerialData = 'buffered serial';
+    internal.lineBuffer = 'partial line';
+    internal.serialLines = ['old line'];
+    internal.crashEvents = [{ id: 'old-crash' }];
+    internal.crashDecodeRevisions.set('old-crash', 1);
+    const flush = vi.spyOn(internal.crashCapturer, 'flush');
+    const reset = vi.spyOn(internal.crashCapturer, 'reset');
+
+    await internal.handleMessage({ type: 'clear' }, 1);
+
+    expect(flush).not.toHaveBeenCalled();
+    expect(reset).toHaveBeenCalled();
+    expect(internal.pendingSerialData).toBe('');
+    expect(internal.lineBuffer).toBe('');
+    expect(internal.crashEvents).toEqual([]);
+    expect(internal.crashDecodeRevisions.size).toBe(0);
+    expect(sidebarPost).toHaveBeenCalledWith({ type: 'clear' });
+    expect(editorPost).toHaveBeenCalledWith({ type: 'clear' });
   });
 
   it('rejects provisioning when the serial connection changed after discovery', async () => {
@@ -579,6 +608,46 @@ describe('SERIAL_LINK_RE regex matching', () => {
     const matches = getAllMatches(text);
     expect(matches).toHaveLength(1);
     expect(matches[0]).toMatchObject({ path: '/esp-idf/components/freertos/queue.c', line: '1234' });
+  });
+});
+
+describe('webview crash source links', () => {
+  it('keeps parentheses in the full data-file path and stops before another rooted path', () => {
+    const extensionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-webview-'));
+    fs.mkdirSync(path.join(extensionRoot, 'dist'));
+    fs.writeFileSync(path.join(extensionRoot, 'dist', 'ansiParser.js'), '');
+    const testPanel = new EspDecoderWebviewPanel(
+      vscode.Uri.file(extensionRoot),
+      new SerialPortManager(),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = testPanel as any;
+    const fontSpy = vi.spyOn(internal, 'getTerminalFontSize').mockReturnValue(13);
+    try {
+      const html = internal.getHtmlContent(1) as string;
+      const start = html.indexOf('    function linkifyPaths(text) {');
+      const end = html.indexOf('    function formatAnnotation(annotation) {', start);
+      const source = html.slice(start, end);
+      const linkifyPaths = runInNewContext(
+        `${source}; linkifyPaths`,
+        {
+          escapeHtml: (text: string) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;'),
+          escapeAttr: (text: string) => String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;'),
+        },
+      ) as (text: string) => string;
+
+      const rendered = linkifyPaths('/home/user/My (Project)/src/main.cpp:42');
+      expect(rendered.match(/data-file="([^"]+)"/)?.[1]).toBe(
+        '/home/user/My (Project)/src/main.cpp',
+      );
+
+      const separateRoot = linkifyPaths('/old.log see /real/path.cpp:12');
+      expect(separateRoot.match(/data-file="([^"]+)"/)?.[1]).toBe('/real/path.cpp');
+    } finally {
+      fontSpy.mockRestore();
+      testPanel.dispose();
+      fs.rmSync(extensionRoot, { recursive: true, force: true });
+    }
   });
 });
 

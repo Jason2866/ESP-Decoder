@@ -219,7 +219,7 @@ export async function decodeCoredumpFile(
   log('coredump decode start', { toolPath, elfPath, inputPath });
   const client = new GdbMiClient(
     toolPath,
-    ['--interpreter=mi2', '-c', inputPath, elfPath],
+    ['-nx', '--interpreter=mi2', '-c', inputPath, elfPath],
     options,
   );
   const results: ThreadDecodeResult[] = [];
@@ -305,6 +305,9 @@ export async function decodeCoredumpFile(
           const raw = await fs.readFile(inputPath);
           repairResult = await tryRawElfFallback(params, raw, options);
         } catch (err) {
+          if (options.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+            throw err;
+          }
           log('coredump repair failed after empty thread list', err);
         }
         if (repairResult?.length) {
@@ -328,6 +331,7 @@ export async function decodeCoredumpFile(
         const selectError = miErrorRecord(selectOut);
         if (selectError) {
           const msg = `Thread ${tid}: thread selection failed (${selectError})`;
+          lastError = new Error(msg);
           log('thread-select failed; skipping thread', tid, selectError);
           options.onWarning?.(msg);
           continue;
@@ -383,6 +387,9 @@ export async function decodeCoredumpFile(
             options.onWarning?.(msg);
           }
         } catch (err) {
+          if (options.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+            throw err;
+          }
           const msg = `Thread ${tid}: stack-list-arguments failed (${err instanceof Error ? err.message : String(err)})`;
           log('stack-list-arguments failed; continuing without args', err);
           options.onWarning?.(msg);

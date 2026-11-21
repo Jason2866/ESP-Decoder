@@ -30,7 +30,7 @@ export interface CapturerEvent {
   lightweight: CapturerLightweight;
 }
 
-export type CapturerEventName = 'eventDetected' | 'eventUpdated';
+export type CapturerEventName = 'eventDetected' | 'eventUpdated' | 'eventRemoved';
 export type CapturerListener = (event: CapturerEvent) => void;
 
 /** One framed block's own capture, kept so an event can revert to it when
@@ -430,13 +430,41 @@ export class Capturer {
     // legitimately fail (register lines arriving late change detectKind).
     const revisionId = this.blockEventIndex.get(block.id);
     const revision = revisionId === undefined ? undefined : this.eventsById.get(revisionId);
-    // A revision of the event's own block is the same occurrence by framer
-    // identity — apply it unconditionally. The compatibility recheck exists
-    // for cross-block provisional merges, and running it on own-block
-    // revisions would split one crash when a pending-line preview held a
-    // truncated value (e.g. 'RA : 0x4200') that completes differently.
+    // A revision of the event's own block is normally the same occurrence,
+    // but when its identifying data changes, check whether a finalized event
+    // now matches the complete capture. Pending-line previews can be
+    // truncated, so keep the original ID unless a finalized match is found.
     const ownsRevision =
       revision !== undefined && this.eventOwnerBlock.get(revision.id) === block.id;
+    if (revision && ownsRevision) {
+      const current = revision.lightweight;
+      const incoming = candidate.lightweight;
+      const identifyingDataChanged =
+        revision.kind !== candidate.kind ||
+        current.reasonLine !== incoming.reasonLine ||
+        current.programCounter !== incoming.programCounter ||
+        current.faultCode !== incoming.faultCode ||
+        current.faultAddr !== incoming.faultAddr ||
+        current.regs.RA !== incoming.regs.RA ||
+        current.backtraceAddrs.length !== incoming.backtraceAddrs.length ||
+        current.backtraceAddrs.some((addr, index) => addr !== incoming.backtraceAddrs[index]);
+      const finalizedMatch =
+        identifyingDataChanged && !this.eventAggregate.has(revision.id)
+          ? this.findRecentFinalizedMatch(revision.id, candidate)
+          : undefined;
+      if (finalizedMatch) {
+        this.removeEvent(revision);
+        this.mergeIntoExisting(
+          finalizedMatch,
+          candidate,
+          shouldPreferCandidate(finalizedMatch, candidate),
+          block.id,
+        );
+        return;
+      }
+      this.applyRevision(revision, candidate, block.id);
+      return;
+    }
     if (revision && (ownsRevision || this.revisionCompatible(revision, candidate))) {
       this.applyRevision(revision, candidate, block.id);
       return;
@@ -588,6 +616,72 @@ export class Capturer {
       this.btEvidenceFor(existing),
       candidate.lightweight.backtraceAddrs,
     );
+  }
+
+  /** Find a compatible finalized event while excluding the event being revised. */
+  private findRecentFinalizedMatch(
+    excludeId: string,
+    candidate: {
+      kind: CapturerEventKind;
+      rawText: string;
+      lastSeenAt: number;
+      lightweight: CapturerLightweight;
+      signature: string;
+    },
+  ): CapturerEvent | undefined {
+    const finalized = this.events.filter(
+      (event) =>
+        event.id !== excludeId &&
+        this.eventAggregate.has(event.id) &&
+        this.isWithinDedupWindow(event, candidate.lastSeenAt),
+    );
+    const compatible = (event: CapturerEvent) =>
+      backtracesCompatible(this.btEvidenceFor(event), candidate.lightweight.backtraceAddrs) &&
+      !faultPcsConflict(this.matchLightweight(event), candidate.lightweight) &&
+      returnAddressesCompatible(this.matchLightweight(event), candidate.lightweight) &&
+      this.revisionCompatible(event, candidate);
+
+    return (
+      [...finalized].reverse().find((event) => event.signature === candidate.signature && compatible(event)) ??
+      [...finalized].reverse().find((event) => {
+        if (!isLikelySameCrash(event, candidate)) {
+          return false;
+        }
+        const contains =
+          containsNormalizedText(event.rawText, candidate.rawText) ||
+          containsNormalizedText(candidate.rawText, event.rawText);
+        return contains && compatible(event);
+      }) ??
+      [...finalized].reverse().find((event) => {
+        const fingerprint = createFingerprint(candidate.kind, candidate.lightweight);
+        return fingerprint !== '' &&
+          createFingerprint(event.kind, event.lightweight) === fingerprint &&
+          compatible(event);
+      })
+    );
+  }
+
+  /** Remove a provisional-only event and tell consumers to retire its card. */
+  private removeEvent(event: CapturerEvent): void {
+    this.events = this.events.filter((candidate) => candidate.id !== event.id);
+    this.eventsById.delete(event.id);
+    this.raEvidence.delete(event.id);
+    this.pcEvidence.delete(event.id);
+    this.btEvidence.delete(event.id);
+    this.displayBlockIndex.delete(event.id);
+    this.eventOwnerBlock.delete(event.id);
+    this.eventAggregate.delete(event.id);
+    this.eventFallback.delete(event.id);
+    if (this.signatureIndex.get(event.signature) === event.id) {
+      this.signatureIndex.delete(event.signature);
+    }
+    for (const [blockId, eventId] of this.blockEventIndex) {
+      if (eventId === event.id) {
+        this.blockEventIndex.delete(blockId);
+        this.countedBlockIndex.delete(blockId);
+      }
+    }
+    this.eventBus.emit('eventRemoved', structuredClone(event));
   }
 
   private applyRevision(

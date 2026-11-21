@@ -183,6 +183,14 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         await this.decodeCrashEvent(existing);
       })
     );
+
+    this.disposables.push(
+      this.crashCapturer.onCrashRemoved((event) => {
+        this.crashEvents = this.crashEvents.filter((candidate) => candidate.id !== event.id);
+        this.crashDecodeRevisions.delete(event.id);
+        this.postMessage({ type: 'crashRemoved', eventId: event.id });
+      })
+    );
   }
 
   private nextCrashDecodeRevision(eventId: string): number {
@@ -653,6 +661,17 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     this.crashCapturer.flush();
   }
 
+  /** Clear buffered serial bytes without finalizing any pending crash. */
+  private discardPendingSerial(): void {
+    if (this.serialFlushTimer !== null) {
+      clearTimeout(this.serialFlushTimer);
+      this.serialFlushTimer = null;
+    }
+    this.pendingSerialData = '';
+    this.lineBuffer = '';
+    this.utf8Decoder.end();
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async handleMessage(message: any, webviewInstanceId = 0): Promise<void> {
     switch (message.type) {
@@ -747,12 +766,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         }
         break;
       case 'clear':
-        this.cancelSerialFlush();
+        this.discardPendingSerial();
         this.lineSeqBase += this.serialLines.length;
         this.serialLines = [];
         this.crashEvents = [];
         this.crashDecodeRevisions.clear();
         this.crashCapturer.reset();
+        this.postMessage({ type: 'clear' });
         break;
       case 'improvStart':
         await this.handleImprovStart(webviewInstanceId, message.sessionId);
@@ -2523,7 +2543,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       vscode.postMessage({ type: 'selectElf' });
     });
 
-    document.getElementById('btn-clear').addEventListener('click', () => {
+    function clearOutput() {
       serialOutput.textContent = '';
       // Reset ANSI colour state so stale styles don't bleed into the next run
       resetAnsiState();
@@ -2541,6 +2561,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       crashCountBadge.style.display = 'none';
       noCrashes.style.display = 'block';
       crashList.appendChild(noCrashes);
+    }
+
+    document.getElementById('btn-clear').addEventListener('click', () => {
+      clearOutput();
       vscode.postMessage({ type: 'clear' });
     });
 
@@ -3029,6 +3053,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         case 'crashUpdated':
           updateCrashEvent(msg.event);
           break;
+        case 'crashRemoved':
+          removeCrashEvent(msg.eventId);
+          break;
+        case 'clear':
+          clearOutput();
+          break;
         case 'crashDecoded':
           updateCrashDecoded(msg.eventId, msg.decoded);
           break;
@@ -3386,6 +3416,22 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       }
     }
 
+    function removeCrashEvent(eventId) {
+      var id = String(eventId);
+      clearedCrashIds.add(id);
+      var el = document.getElementById('crash-' + id);
+      if (el) {
+        el.remove();
+        crashCount = Math.max(0, crashCount - 1);
+      }
+      crashCountBadge.textContent = crashCount;
+      crashCountBadge.style.display = crashCount ? 'inline' : 'none';
+      if (crashCount === 0) {
+        noCrashes.style.display = 'block';
+        crashList.appendChild(noCrashes);
+      }
+    }
+
     function toggleCrash(id) {
       const el = document.getElementById('crash-' + id);
       el.classList.toggle('expanded');
@@ -3576,7 +3622,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       // continues the same path — a space followed by a separator starts a
       // new rooted path, so preceding diagnostic text is never absorbed
       // into the captured file (e.g. '/old.log see C:\\real\\f.cpp:12').
-      var re = /((?:(?:[A-Za-z]:)?[\\\\/]|\\.{1,2}[\\\\/])(?:[\\w.\\-\\/\\\\]| +(?!\\.{1,2}[\\\\/])(?=[\\w.\\-]))+\\.\\w+):(\\d+)/g;
+      var re = /((?:(?:[A-Za-z]:)?[\\\\/]|\\.{1,2}[\\\\/])(?:[\\w.()\\-\\/\\\\]| +(?!(?:[A-Za-z]:[\\\\/]|[\\\\/]|\\.{1,2}[\\\\/]))(?=[\\w.()\\-]))+\\.\\w+):(\\d+)/g;
       var m;
       while ((m = re.exec(text)) !== null) {
         result += escapeHtml(text.slice(lastIndex, m.index));

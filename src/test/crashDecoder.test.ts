@@ -1317,6 +1317,13 @@ describe('parseESP32PanicOutput – dual-core dumps', () => {
     expect(parsed.regs.PC).toBe(0x40000002);
     expect(parsed.backtraceAddrs).toEqual([0x40000002, 0x40000003]);
   });
+
+  it('accepts whitespace around backtrace colons and emits only PCs', () => {
+    const parsed = parseESP32PanicOutput(
+      'Backtrace: 0x40000001 : 0x3ffb0001 0x40000002: 0x3ffb0002',
+    );
+    expect(parsed.backtraceAddrs).toEqual([0x40000001, 0x40000002]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2181,6 +2188,17 @@ describe('gdbStubMain – partial stack reads', () => {
 // ---------------------------------------------------------------------------
 
 describe('CrashFramer – provisional quiet flush', () => {
+  it('only recognizes a stack marker at the start of a trimmed line', () => {
+    const framer = new CrashFramer(500);
+    framer.pushLine('assert failed: text mentions >>>stack>>> here', 0);
+    expect(framer.flush(1000, true)).toHaveLength(0);
+
+    framer.pushLine('  >>>stack>>>', 1100);
+    const partial = framer.flush(2000);
+    expect(partial).toHaveLength(1);
+    expect(partial[0].lines).toContain('  >>>stack>>>');
+  });
+
   it('only treats a leading ELF checksum marker as complete', () => {
     const embedded = new CrashFramer(500);
     embedded.pushLine('assert failed: checksum text', 0);
@@ -2263,14 +2281,14 @@ describe('CrashFramer – provisional quiet flush', () => {
     expect(out[0].lines).toContain('  40800000: 0x42000000 0x42000001');
   });
 
-  it('starts a fresh block for a crash-start line that also matches continuation', () => {
+  it('starts a fresh block for an assertion that mentions Backtrace mid-line', () => {
     const framer = new CrashFramer(500);
     framer.pushLine('assert failed: first', 0);
     framer.pushLine('Backtrace: 0x42000001:0x3ffb0001', 10);
     expect(framer.flush(1000, true)).toHaveLength(1);
 
-    // 'assert failed:' is a crash start even though the text contains
-    // 'Backtrace:' — it must not be appended to the open block.
+    // The mid-line 'Backtrace:' mention is diagnostic text, not a
+    // continuation row, so the assertion starts its own block.
     expect(
       framer.pushLine('assert failed: second crash Backtrace: 0x42000009:0x3ffb0009', 1100),
     ).toEqual([]);
@@ -2327,6 +2345,28 @@ describe('parseRiscvPanicOutput – bare-hex stack words', () => {
     const result = parseRiscvPanicDetailed(text);
     expect(result.stackDump).toHaveLength(1);
     expect(result.stackDump[0].data).toEqual([0, 0, 0, 0]);
+  });
+
+  it('keeps a zero stack base and checks contiguity after it', () => {
+    const contiguous = parseRiscvPanicOutput([
+      'Core 0 register dump:',
+      'MEPC : 0x42004abc',
+      'Stack memory:',
+      '00000000: 0x00000001',
+      '00000004: 0x00000002',
+    ].join('\n'));
+    expect(contiguous.stackBaseAddr).toBe(0);
+    expect(contiguous.stackData.length).toBe(8);
+
+    const gap = parseRiscvPanicOutput([
+      'Core 0 register dump:',
+      'MEPC : 0x42004abc',
+      'Stack memory:',
+      '00000000: 0x00000001',
+      '00000008: 0x00000002',
+    ].join('\n'));
+    expect(gap.stackBaseAddr).toBe(0);
+    expect(gap.stackData.length).toBe(0);
   });
 
   it('rejects rows with glued or truncated stack-word tokens', () => {
@@ -2548,6 +2588,38 @@ describe('decodeCrash – raw fallback core isolation', () => {
     expect(decoded.faultInfo?.coreId).toBe(1);
     expect(decoded.regs?.['MEPC']).toBe(0x42100001);
     expect(decoded.stacktrace.length).toBeGreaterThan(0);
+  });
+
+  it('recognizes the RISC-V S0/FP register without relying on shared A0', async () => {
+    const text = [
+      'Core 0 register dump:',
+      'S0/FP : 0x3fc80000',
+    ].join('\n');
+    const decoded = await decodeCrash(
+      makeEvent(text),
+      ELF_PATH,
+      '/nonexistent/riscv32-esp-elf-gdb',
+      'esp32s31',
+    );
+    expect(decoded.regs?.['S0/FP']).toBe(0x3fc80000);
+  });
+
+  it('does not take selected-core fault registers from diagnostics after Backtrace', async () => {
+    const text = [
+      "Core 0 panic'ed (Store access fault). Exception was unhandled.",
+      'Core 0 register dump:',
+      'MEPC : 0x42000001  MCAUSE : 0x00000007  MTVAL : 0x3fc80002',
+      'Backtrace: 0x42000001:0x3ffb0001',
+      'diagnostic MTVAL : 0xdeadbeef MCAUSE : 0xffffffff',
+    ].join('\n');
+    const decoded = await decodeCrash(
+      makeEvent(text),
+      ELF_PATH,
+      '/nonexistent/riscv32-esp-elf-gdb',
+      'esp32s31',
+    );
+    expect(decoded.faultInfo?.faultAddr).toBe('0x3fc80002');
+    expect(decoded.faultInfo?.faultCode).toBe(0x7);
   });
 
   it('suppresses another core\'s registers for a sectioned Xtensa dump with a missing selected core', async () => {
@@ -3037,6 +3109,33 @@ describe('Capturer – retained PC evidence prevents conflict merges', () => {
 });
 
 describe('decodeCoredumpFile – thread attribution and error resilience', () => {
+  it('reports the thread-selection error when no thread can be decoded', async () => {
+    const handshakeSpy = vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
+    const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockImplementation(async (cmd: string) => {
+      if (cmd === '-thread-info') {
+        return '^done,threads=[{id="1",target-id="process 100"}]\n';
+      }
+      if (cmd === '-thread-select 1') {
+        return '^error,msg="Thread ID 1 not known."\n';
+      }
+      return '^done\n';
+    });
+    const closeSpy = vi.spyOn(GdbMiClient.prototype, 'close').mockResolvedValue(undefined);
+
+    try {
+      await expect(decodeCoredumpFile(
+        { elfPath: '/dummy.elf', toolPath: 'fake-gdb' } as DecodeParams,
+        '/dummy-coredump.elf',
+        {},
+        false,
+      )).rejects.toThrow('Thread 1: thread selection failed');
+    } finally {
+      sendSpy.mockRestore();
+      handshakeSpy.mockRestore();
+      closeSpy.mockRestore();
+    }
+  });
+
   it('preserves the no-thread error when a warning callback is supplied', async () => {
     const handshakeSpy = vi.spyOn(GdbMiClient.prototype, 'drainHandshake').mockResolvedValue(undefined);
     const sendSpy = vi.spyOn(GdbMiClient.prototype, 'sendCommand').mockResolvedValue('^done,threads=[]\n');

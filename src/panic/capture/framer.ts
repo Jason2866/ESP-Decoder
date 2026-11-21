@@ -286,7 +286,7 @@ function isAbortCalledLine(line: string): boolean {
 function isCompleteBlock(lines: string[]): boolean {
   const trimmed = lines.map((line) => line.trim());
   const esp8266StackOpen =
-    trimmed.some((line) => line.includes('>>>stack>>>')) &&
+    trimmed.some((line) => line.startsWith('>>>stack>>>')) &&
     !trimmed.some((line) => line.startsWith('<<<stack<<<'));
   for (const line of trimmed) {
     if (
@@ -319,7 +319,7 @@ function isFinalizableBlock(lines: string[]): boolean {
     lines.some((line) => {
       const trimmed = line.trim();
       return (
-        trimmed.includes('>>>stack>>>') ||
+        trimmed.startsWith('>>>stack>>>') ||
         /^Stack memory:/i.test(trimmed) ||
         isStackDataRow(trimmed) ||
         /^[A-Z][A-Z0-9/]*\s*:\s*0x[0-9a-fA-F]+/.test(trimmed)
@@ -362,7 +362,7 @@ function isContinuationLine(line: string): boolean {
     // ESP-IDF prints the firmware ELF SHA256 between the panic data and
     // 'Rebooting...' — keep a provisionally emitted block open for it.
     /^ELF file SHA256:/i.test(trimmed) ||
-    trimmed.includes('>>>stack>>>')
+    trimmed.startsWith('>>>stack>>>')
   );
 }
 

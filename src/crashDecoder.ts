@@ -156,8 +156,11 @@ export class CrashCapturer {
   readonly onCrashDetected = this._onCrashDetected.event;
   private readonly _onCrashUpdated = new vscode.EventEmitter<CrashEvent>();
   readonly onCrashUpdated = this._onCrashUpdated.event;
+  private readonly _onCrashRemoved = new vscode.EventEmitter<CrashEvent>();
+  readonly onCrashRemoved = this._onCrashRemoved.event;
   private unsubscribe: (() => void) | undefined;
   private unsubscribeUpdated: (() => void) | undefined;
+  private unsubscribeRemoved: (() => void) | undefined;
 
   constructor() {
     this.capturer = createCapturer({ quietPeriodMs: 500 });
@@ -166,6 +169,9 @@ export class CrashCapturer {
     });
     this.unsubscribeUpdated = this.capturer.on('eventUpdated', (capturerEvent: CapturerEvent) => {
       this._onCrashUpdated.fire(capturerEventToCrashEvent(capturerEvent));
+    });
+    this.unsubscribeRemoved = this.capturer.on('eventRemoved', (capturerEvent: CapturerEvent) => {
+      this._onCrashRemoved.fire(capturerEventToCrashEvent(capturerEvent));
     });
   }
 
@@ -190,6 +196,7 @@ export class CrashCapturer {
     // Create a fresh capturer instance to reset all state
     this.unsubscribe?.();
     this.unsubscribeUpdated?.();
+    this.unsubscribeRemoved?.();
     this.capturer.dispose();
     this.capturer = createCapturer({ quietPeriodMs: 500 });
     this.unsubscribe = this.capturer.on('eventDetected', (capturerEvent: CapturerEvent) => {
@@ -197,6 +204,9 @@ export class CrashCapturer {
     });
     this.unsubscribeUpdated = this.capturer.on('eventUpdated', (capturerEvent: CapturerEvent) => {
       this._onCrashUpdated.fire(capturerEventToCrashEvent(capturerEvent));
+    });
+    this.unsubscribeRemoved = this.capturer.on('eventRemoved', (capturerEvent: CapturerEvent) => {
+      this._onCrashRemoved.fire(capturerEventToCrashEvent(capturerEvent));
     });
   }
 
@@ -206,6 +216,7 @@ export class CrashCapturer {
     this.capturer.dispose();
     this._onCrashDetected.dispose();
     this._onCrashUpdated.dispose();
+    this._onCrashRemoved.dispose();
   }
 }
 
@@ -376,7 +387,7 @@ export async function decodeCrash(
       toolPath
     ) {
       postProcessTasks.push(
-        enhanceWithHeuristicStackFrames(decoded, crashEvent, elfPath, toolPath, log, romElfPath, addr2linePool)
+        enhanceWithHeuristicStackFrames(decoded, crashText, elfPath, toolPath, log, romElfPath, addr2linePool)
       );
     }
 
@@ -1365,7 +1376,7 @@ async function resolveAddressesViaGdb(
  */
 async function enhanceWithHeuristicStackFrames(
   decoded: DecodedCrash,
-  crashEvent: CrashEvent,
+  crashText: string,
   elfPath: string,
   toolPath: string,
   log?: DecodeLogger,
@@ -1377,7 +1388,7 @@ async function enhanceWithHeuristicStackFrames(
 
   // Extract candidate code addresses only from the selected core's section —
   // a multi-core dump must not resolve another core's addresses as frames.
-  const candidateAddrs = extractAllCandidateAddresses(extractRiscvCoreSection(crashEvent.rawText));
+  const candidateAddrs = extractAllCandidateAddresses(extractRiscvCoreSection(crashText));
 
   if (candidateAddrs.length === 0) {
     return;
@@ -1393,19 +1404,29 @@ async function enhanceWithHeuristicStackFrames(
     heuristicFrames = await resolveAddressesViaGdb(candidateAddrs, elfPath, toolPath, log);
   }
 
-  // The GDB/MI unwind stays authoritative for the frames it covers; the
-  // heuristic scan only appends candidates it resolved that the unwind did
-  // not reach (the unwind can stop early because code-memory reads return
-  // zeros). Unwind frames are never replaced or reordered.
+  // The GDB/MI unwind stays authoritative for the frames it covers. Heuristic
+  // results fill missing source fields on matching frames and append only
+  // addresses the unwind did not reach.
   if (heuristicFrames.length > 0) {
-    const known = new Set(
-      decoded.stacktrace.map((f) => f.address.replace(/^0x/i, '').toLowerCase()),
+    const known = new Map(
+      decoded.stacktrace.map((f) => [f.address.replace(/^0x/i, '').toLowerCase(), f]),
     );
     const extra: typeof heuristicFrames = [];
     for (const f of heuristicFrames) {
       const key = f.address.replace(/^0x/i, '').toLowerCase();
-      if (!known.has(key)) {
-        known.add(key);
+      const existing = known.get(key);
+      if (existing) {
+        if ((!existing.function || existing.function === '??') && f.function && f.function !== '??') {
+          existing.function = f.function;
+        }
+        if ((!existing.file || existing.file === '??') && f.file && f.file !== '??') {
+          existing.file = f.file;
+        }
+        if ((!existing.line || existing.line === '??') && f.line && f.line !== '??') {
+          existing.line = f.line;
+        }
+      } else {
+        known.set(key, f);
         extra.push(f);
       }
     }
@@ -1769,12 +1790,23 @@ function parseFaultInfo(
   if (hasDumpHeaders) {
     detailLines = [];
     let currentCore: number | undefined;
+    let inRegisterDump = false;
     for (const line of lines) {
       const dumpHeader = line.match(/^\s*Core\s+(\d+)\s+register dump:/i);
       if (dumpHeader) {
         currentCore = parseInt(dumpHeader[1], 10);
+        inRegisterDump = true;
+        if (currentCore === coreId) {
+          detailLines.push(line);
+        }
+        continue;
       }
-      if (currentCore === coreId) {
+      if (/^\s*(?:Stack memory:|Backtrace:)/i.test(line)) {
+        inRegisterDump = false;
+        currentCore = undefined;
+        continue;
+      }
+      if (inRegisterDump && currentCore === coreId) {
         detailLines.push(line);
       }
     }
@@ -1905,6 +1937,7 @@ function parseRiscvSections(crashText: string) {
     const hasRiscvRegs = parsed.regDumps.some(
       (d) =>
         d.regs.MEPC !== undefined ||
+        d.regs['S0/FP'] !== undefined ||
         d.faultCode !== undefined ||
         d.faultAddr !== undefined,
     );

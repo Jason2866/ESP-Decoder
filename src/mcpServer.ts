@@ -263,18 +263,18 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
       }
       let d = event.decoded;
       if (!d) {
-        const config = data.getSessionConfig();
-        if (!config.elfPath) {
-          throw new Error(
-            'No ELF file configured — build the project (so it can be auto-detected) or run "ESP Decoder: Select ELF File"'
-          );
-        }
         // Each attempt decodes a snapshot of the event. A crashUpdated
-        // merge can replace rawText while decodeCrash is running; the
-        // in-flight result would then be stale. Retry once against the
-        // fresh capture; if it keeps changing, leave the cache untouched.
+        // merge can replace rawText, and the active ELF/toolchain/target can
+        // change while decodeCrash is running. Retry once against fresh
+        // snapshots; only cache a result if both snapshots still match.
         let lastError: unknown;
         for (let attempt = 0; attempt < 2 && !event.decoded; attempt++) {
+          const config = data.getSessionConfig();
+          if (!config.elfPath) {
+            throw new Error(
+              'No ELF file configured — build the project (so it can be auto-detected) or run "ESP Decoder: Select ELF File"'
+            );
+          }
           const snapshot = { ...event };
           try {
             const decoded = await decodeCrash(
@@ -285,14 +285,28 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
               deps.log,
               config.romElfPath
             );
-            if (event.rawText === snapshot.rawText) {
+            const currentConfig = data.getSessionConfig();
+            const configUnchanged =
+              currentConfig.elfPath === config.elfPath &&
+              currentConfig.toolPath === config.toolPath &&
+              currentConfig.targetArch === config.targetArch &&
+              currentConfig.romElfPath === config.romElfPath;
+            if (event.rawText === snapshot.rawText && configUnchanged) {
               // Capture unchanged — cache only if still empty (another
               // request may have stored a decode while we awaited).
               event.decoded = event.decoded ?? decoded;
+            } else {
+              lastError = new Error('Crash capture or session configuration changed during decode — retry decode_crash');
             }
-            // Stale result: loop retries with the updated capture.
+            // Stale result: loop retries with the updated capture/config.
           } catch (err) {
-            if (event.rawText === snapshot.rawText) {
+            const currentConfig = data.getSessionConfig();
+            const configUnchanged =
+              currentConfig.elfPath === config.elfPath &&
+              currentConfig.toolPath === config.toolPath &&
+              currentConfig.targetArch === config.targetArch &&
+              currentConfig.romElfPath === config.romElfPath;
+            if (event.rawText === snapshot.rawText && configUnchanged) {
               throw err;
             }
             lastError = err;
