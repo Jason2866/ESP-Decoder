@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
-import { TrbrCrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
+import { CrashCapturer, CrashEvent, DecodedCrash, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, CoredumpDecodedResult, Addr2linePool } from './crashDecoder';
 import { ImprovSessionCancellation, withImprovSession } from './improvWiFi';
 
 export interface SessionConfig {
@@ -21,7 +21,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   private panel: vscode.WebviewPanel | undefined;
   private readonly extensionUri: vscode.Uri;
   private readonly serialManager: SerialPortManager;
-  private readonly crashCapturer: TrbrCrashCapturer;
+  private readonly crashCapturer: CrashCapturer;
   private readonly addr2linePool: Addr2linePool;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly log: vscode.OutputChannel;
@@ -31,6 +31,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   // cursors stable across buffer trimming and clears.
   private lineSeqBase = 0;
   private crashEvents: CrashEvent[] = [];
+  // Per-event decode generation: a newer decode (auto re-decode after an
+  // eventUpdated merge, or a manual request) supersedes in-flight older ones
+  // so stale results cannot overwrite event.decoded or post late messages.
+  private readonly crashDecodeRevisions = new Map<string, number>();
   private lineBuffer = '';
   private config: SessionConfig = {};
   private webviewInstanceGeneration = 0;
@@ -69,7 +73,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   ) {
     this.extensionUri = extensionUri;
     this.serialManager = serialManager;
-    this.crashCapturer = new TrbrCrashCapturer();
+    this.crashCapturer = new CrashCapturer();
     this.addr2linePool = new Addr2linePool();
     this.config = config || {};
     this.log = outputChannel || vscode.window.createOutputChannel('ESP Decoder');
@@ -144,7 +148,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       })
     );
 
-    // Listen to crash events from trbr's capturer
+    // Listen to crash events from the crash capturer
     this.disposables.push(
       this.crashCapturer.onCrashDetected(async (event) => {
         this.crashEvents.push(event);
@@ -153,48 +157,91 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           type: 'crashDetected',
           event: this.serializeCrashEvent(event),
         });
-
-        // Auto-decode if configured
-        if (this.config.elfPath) {
-          try {
-            const decoded = await decodeCrash(
-              event,
-              this.config.elfPath,
-              this.config.toolPath,
-              this.config.targetArch,
-              this.log,
-              this.config.romElfPath,
-              this.addr2linePool
-            );
-            event.decoded = decoded;
-            this.postMessage({
-              type: 'crashDecoded',
-              eventId: event.id,
-              decoded: this.serializeDecodedCrash(decoded),
-            });
-            if (decoded.toolsMissing) {
-              vscode.window.showWarningMessage(
-                'GDB/addr2line tools not found for this architecture. Build the project for the target chip first so the toolchain gets installed, or configure the tool path manually in settings.'
-              );
-            }
-          } catch (err) {
-            this.log.appendLine(`[ESP Decoder] Decode error for ${event.id}: ${err instanceof Error ? err.message : String(err)}`);
-            this.postMessage({
-              type: 'crashDecodeError',
-              eventId: event.id,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        } else {
-          this.log.appendLine('[ESP Decoder] Crash detected but no ELF file configured — cannot decode');
-          this.postMessage({
-            type: 'crashDecodeError',
-            eventId: event.id,
-            error: 'No ELF file configured. Build the project first so ESP Decoder can auto-detect the ELF, or use "ESP Decoder: Select ELF File" to select one.',
-          });
-        }
+        await this.decodeCrashEvent(event);
       })
     );
+
+    // A richer capture merged into an existing event (same id): refresh the
+    // stored event and re-decode so the webview shows the fuller dump.
+    this.disposables.push(
+      this.crashCapturer.onCrashUpdated(async (event) => {
+        const existing = this.crashEvents.find((e) => e.id === event.id);
+        if (!existing || existing.rawText === event.rawText) {
+          // Unknown id, or only the occurrence count changed — nothing to refresh.
+          return;
+        }
+        existing.kind = event.kind;
+        existing.lines = event.lines;
+        existing.rawText = event.rawText;
+        existing.timestamp = event.timestamp;
+        delete existing.decoded;
+        this.log.appendLine(`[ESP Decoder] Crash updated: id=${event.id}, lines=${event.lines.length}`);
+        this.postMessage({
+          type: 'crashUpdated',
+          event: this.serializeCrashEvent(event),
+        });
+        await this.decodeCrashEvent(existing);
+      })
+    );
+  }
+
+  private nextCrashDecodeRevision(eventId: string): number {
+    const rev = (this.crashDecodeRevisions.get(eventId) ?? 0) + 1;
+    this.crashDecodeRevisions.set(eventId, rev);
+    return rev;
+  }
+
+  private isCurrentCrashDecode(eventId: string, rev: number): boolean {
+    return this.crashDecodeRevisions.get(eventId) === rev;
+  }
+
+  /** Auto-decode a crash event when an ELF is configured and post the result. */
+  private async decodeCrashEvent(event: CrashEvent): Promise<void> {
+    const rev = this.nextCrashDecodeRevision(event.id);
+    if (this.config.elfPath) {
+      try {
+        const decoded = await decodeCrash(
+          event,
+          this.config.elfPath,
+          this.config.toolPath,
+          this.config.targetArch,
+          this.log,
+          this.config.romElfPath,
+          this.addr2linePool
+        );
+        if (!this.isCurrentCrashDecode(event.id, rev)) {
+          return;
+        }
+        event.decoded = decoded;
+        this.postMessage({
+          type: 'crashDecoded',
+          eventId: event.id,
+          decoded: this.serializeDecodedCrash(decoded),
+        });
+        if (decoded.toolsMissing) {
+          vscode.window.showWarningMessage(
+            'GDB/addr2line tools not found for this architecture. Build the project for the target chip first so the toolchain gets installed, or configure the tool path manually in settings.'
+          );
+        }
+      } catch (err) {
+        if (!this.isCurrentCrashDecode(event.id, rev)) {
+          return;
+        }
+        this.log.appendLine(`[ESP Decoder] Decode error for ${event.id}: ${err instanceof Error ? err.message : String(err)}`);
+        this.postMessage({
+          type: 'crashDecodeError',
+          eventId: event.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      this.log.appendLine('[ESP Decoder] Crash detected but no ELF file configured — cannot decode');
+      this.postMessage({
+        type: 'crashDecodeError',
+        eventId: event.id,
+        error: 'No ELF file configured. Build the project first so ESP Decoder can auto-detect the ELF, or use "ESP Decoder: Select ELF File" to select one.',
+      });
+    }
   }
 
   private wireWebview(webview: vscode.Webview): number {
@@ -549,8 +596,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       );
     }
 
-    // Feed raw bytes to trbr's capturer for crash detection.
-    // trbr handles line decoding, crash framing (including Stack memory:
+    // Feed raw bytes to the crash capturer for crash detection.
+    // The capturer handles line decoding, crash framing (including Stack memory:
     // sections for RISC-V), and deduplication internally.
     this.crashCapturer.pushData(data);
 
@@ -704,6 +751,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         this.lineSeqBase += this.serialLines.length;
         this.serialLines = [];
         this.crashEvents = [];
+        this.crashDecodeRevisions.clear();
         this.crashCapturer.reset();
         break;
       case 'improvStart':
@@ -748,6 +796,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       case 'decodeCrash': {
         const event = this.crashEvents.find((e) => e.id === message.eventId);
         if (event && this.config.elfPath) {
+          const rev = this.nextCrashDecodeRevision(event.id);
           try {
             const decoded = await decodeCrash(
               event,
@@ -758,6 +807,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
               this.config.romElfPath,
               this.addr2linePool
             );
+            if (!this.isCurrentCrashDecode(event.id, rev)) {
+              break;
+            }
             event.decoded = decoded;
             this.postMessage({
               type: 'crashDecoded',
@@ -770,6 +822,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
               );
             }
           } catch (err) {
+            if (!this.isCurrentCrashDecode(event.id, rev)) {
+              break;
+            }
             this.postMessage({
               type: 'crashDecodeError',
               eventId: event.id,
@@ -1082,7 +1137,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
   /**
    * Show a file picker to select a coredump ELF file, then decode it
-   * using trbr's coredump mode.
+   * using the coredump decoder.
    */
   private async handleDecodeCoredumpFile(): Promise<void> {
     if (!this.config.elfPath) {
@@ -2119,6 +2174,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     let connected = false;
     let autoscroll = true;
     let crashCount = 0;
+    const clearedCrashIds = new Set();
     // Guards against scheduling multiple requestAnimationFrame callbacks for scrolling.
     let scrollRAFPending = false;
     // Prevents programmatic scrollTop assignments from being misread as user
@@ -2476,6 +2532,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       currentLine = null;
       currentLineRaw = '';
       dedupResetLine();
+      crashList.querySelectorAll('.crash-event').forEach((el) => {
+        const id = el.id.replace(/^crash-/, '');
+        if (id) { clearedCrashIds.add(id); }
+      });
       crashList.innerHTML = '';
       crashCount = 0;
       crashCountBadge.style.display = 'none';
@@ -2966,6 +3026,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         case 'crashDetected':
           addCrashEvent(msg.event);
           break;
+        case 'crashUpdated':
+          updateCrashEvent(msg.event);
+          break;
         case 'crashDecoded':
           updateCrashDecoded(msg.eventId, msg.decoded);
           break;
@@ -3199,7 +3262,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
     function updateConfigDisplay(config) {
       if (config.elfPath) {
-        var parts = config.elfPath.split('/');
+        var parts = config.elfPath.replace(/\\\\/g, '/').split('/');
         var name = parts[parts.length - 1];
         document.getElementById('btn-elf').textContent = 'ELF: ' + name;
         document.getElementById('btn-elf').title = config.elfPath;
@@ -3247,6 +3310,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     }
 
     function addCrashEvent(event) {
+      clearedCrashIds.delete(String(event.id));
       if (noCrashes.parentElement === crashList) {
         noCrashes.style.display = 'none';
       }
@@ -3291,6 +3355,35 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       const crashTab = document.querySelector('[data-tab="crashes"]');
       crashTab.style.color = 'var(--error-fg)';
       setTimeout(() => { crashTab.style.color = ''; }, 2000);
+    }
+
+    function updateCrashEvent(event) {
+      const el = document.getElementById('crash-' + event.id);
+      if (!el) {
+        if (clearedCrashIds.has(String(event.id))) {
+          return;
+        }
+        // An update can arrive before its detection message; show it if it was
+        // not explicitly removed by Clear.
+        addCrashEvent(event);
+        return;
+      }
+      const rawEl = el.querySelector('.raw-output');
+      if (rawEl) {
+        rawEl.textContent = event.rawText;
+      }
+      const kindEl = el.querySelector('.crash-kind');
+      if (kindEl) {
+        kindEl.textContent = event.isCoredump ? 'coredump' : event.kind;
+      }
+      const timeEl = el.querySelector('.crash-time');
+      if (timeEl) {
+        timeEl.textContent = new Date(event.timestamp).toLocaleTimeString();
+      }
+      const section = document.getElementById('decode-section-' + event.id);
+      if (section) {
+        section.innerHTML = '<div class="decode-status">Decoding...</div>';
+      }
     }
 
     function toggleCrash(id) {
@@ -3339,7 +3432,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         });
       }
 
-      // Show raw trbr output at the bottom
+      // Show raw decoded output at the bottom
       if (result.rawOutput) {
         html += '<div class="crash-section">';
         html += '<div class="crash-section-title">Decoded Output</div>';
@@ -3393,7 +3486,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           html += '<td class="frame-func">' + escapeHtml(frame.function || '??') + '</td>';
 
           if (frame.file && frame.line) {
-            const shortFile = frame.file.split('/').pop();
+            const shortFile = frame.file.replace(/\\\\/g, '/').split('/').pop();
             html += '<td><span class="frame-file" data-file="' +
               escapeHtml(frame.file) + '" data-line="' + escapeHtml(frame.line) +
               '">' + escapeHtml(shortFile + ':' + frame.line) + '</span></td>';
@@ -3443,7 +3536,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         html += '</div>';
       }
 
-      // Show raw decoded output from trbr
+      // Show raw decoded output
       if (decoded.rawOutput) {
         html += '<div class="crash-section">';
         html += '<div class="crash-section-title">Decoded Output</div>';
@@ -3476,13 +3569,20 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       // paths used in data-file attributes are not corrupted by HTML entities.
       var result = '';
       var lastIndex = 0;
-      var re = /(\\/[\\w.\\-\\/]+\\.\\w+):(\\d+)/g;
+      // Anchored paths (drive letter, leading slash, './' or '../') may
+      // contain spaces — same rule as the serial link matcher — so Windows
+      // paths like 'C:\My Project\src\main.cpp:42' stay one data-file.
+      // A space inside the path is only allowed when the next character
+      // continues the same path — a space followed by a separator starts a
+      // new rooted path, so preceding diagnostic text is never absorbed
+      // into the captured file (e.g. '/old.log see C:\\real\\f.cpp:12').
+      var re = /((?:(?:[A-Za-z]:)?[\\\\/]|\\.{1,2}[\\\\/])(?:[\\w.\\-\\/\\\\]| +(?!\\.{1,2}[\\\\/])(?=[\\w.\\-]))+\\.\\w+):(\\d+)/g;
       var m;
       while ((m = re.exec(text)) !== null) {
         result += escapeHtml(text.slice(lastIndex, m.index));
         var file = m[1];
         var line = m[2];
-        var shortFile = file.split('/').pop();
+        var shortFile = file.replace(/\\\\/g, '/').split('/').pop();
         result += '<span class="frame-file" data-file="' +
           escapeAttr(file) + '" data-line="' + escapeAttr(line) +
           '">' + escapeHtml(shortFile + ':' + line) + '</span>';
@@ -3499,7 +3599,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         var func = match[1];
         var file = match[2];
         var line = match[3];
-        var shortFile = file.split('/').pop();
+        var shortFile = file.replace(/\\\\/g, '/').split('/').pop();
         return escapeHtml(func) + ' at <span class="frame-file" data-file="' +
           escapeAttr(file) + '" data-line="' + escapeAttr(line) +
           '">' + escapeHtml(shortFile + ':' + line) + '</span>';

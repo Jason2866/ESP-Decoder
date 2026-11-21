@@ -7,6 +7,7 @@ import { findPioEnvironments, getPioBuildDir, selectElfFile, getMonitorBaudRate 
 import { findEspIdfBuilds } from './espIdfIntegration';
 import { EspDecoderMcpHttpServer, McpServerDeps } from './mcpServer';
 import { runUpload } from './mcpUpload';
+import { chipArch, KNOWN_CHIPS } from './chipTargets';
 
 /** Shape of the public API exported by the pioarduino IDE extension. */
 interface PioarduinoApi {
@@ -364,6 +365,13 @@ async function tryAutoDetectElf(): Promise<void> {
     return;
   }
 
+  // Read the arch setting once: an explicit (non-'auto') value is a user
+  // override used for both the decision and the assignment below.
+  const configuredTargetArch = vscode.workspace
+    .getConfiguration('esp-decoder')
+    .get<string>('targetArch', 'auto');
+  const explicitArch = configuredTargetArch !== 'auto' ? configuredTargetArch : undefined;
+
   try {
     const envs = await findPioEnvironments(workspaceFolder);
     const idfBuilds = await findEspIdfBuilds(workspaceFolder);
@@ -389,11 +397,42 @@ async function tryAutoDetectElf(): Promise<void> {
       }
 
       if (newest) {
+        // A manual ELF selection may have arrived while discovery was
+        // pending — do not clobber it with the auto-detected candidate.
+        if (manualElfOverride || sessionConfig.elfPath) {
+          return;
+        }
+        // An explicit targetArch setting is a user override and always
+        // wins; otherwise the newest build's detected arch replaces any
+        // previous auto-detected value — including clearing it when the
+        // ELF is unreadable and no target was detected.
+        const effectiveArch = explicitArch ?? newest.targetArch;
+        // Only use the discovered tool when it matches the effective
+        // family — an explicit arch override must not be paired with an
+        // incompatible discovered GDB (decodeCrash would not search for
+        // another tool when a path is already supplied).
+        const normalizeArch = (arch: string): string => {
+          const normalized = arch.trim().toLowerCase();
+          const chipAlias = normalized.replace(/[-_]/g, '');
+          if (/^xtensa(?:$|[-_])/.test(normalized)) {
+            return 'xtensa';
+          }
+          if (/^riscv(?:32)?(?:$|[-_])/.test(normalized)) {
+            return 'riscv';
+          }
+          // Keep the original value for the effective target and chip-specific
+          // discovery; only compare canonical architecture families here.
+          return KNOWN_CHIPS.includes(chipAlias) ? chipArch(chipAlias) : normalized;
+        };
+        const archConflict =
+          explicitArch !== undefined &&
+          newest.targetArch !== undefined &&
+          normalizeArch(explicitArch) !== normalizeArch(newest.targetArch);
         sessionConfig = {
           ...sessionConfig,
           elfPath: newest.elfPath,
-          toolPath: sessionConfig.toolPath || newest.toolPath,
-          targetArch: sessionConfig.targetArch || newest.targetArch,
+          toolPath: sessionConfig.toolPath || (archConflict ? undefined : newest.toolPath),
+          targetArch: effectiveArch,
           romElfPath: newest.romElfPath,
         };
         if (viewProvider) {

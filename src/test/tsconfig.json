@@ -4,7 +4,8 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "types": ["vitest/globals", "node"],
-    "rootDir": "."
+    "noEmit": true
   },
-  "include": ["**/*.ts"]
+  "include": ["**/*.ts", "../pioarduino-node-helpers.d.ts"],
+  "exclude": ["../../node_modules"]
 }

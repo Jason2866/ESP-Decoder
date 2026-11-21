@@ -1,0 +1,521 @@
+import { addr2line } from './addr2line';
+import { GdbMiClient, extractMiListContent, parseMiTupleList, stripMiList, type GdbMiOptions } from './gdbMi';
+import { parseLines } from './gdbLineParse';
+import { GdbStubServer } from './gdbStub';
+import {
+  parseRiscvPanicOutput,
+  toHexString,
+} from './panicParse';
+import {
+  isGDBLine,
+  isParsedGDBLine,
+  type AddrLine,
+  type DecodeOptions,
+  type DecodeParams,
+  type DecodeResult,
+  type Debug,
+  type FrameArg,
+  type GDBLine,
+  type ParsedGDBLine,
+  type PanicInfoWithStackData,
+} from './types';
+
+// Based on esp-idf-panic-decoder's gdb_panic_server.py: parse the register/stack
+// dump, serve it over the GDB remote protocol, and let GDB/MI produce the
+// backtrace via `-stack-list-frames`.
+
+const miErrorPattern = /^\^error/m;
+
+function parseMiErrorMessage(raw: string): string | undefined {
+  const match = raw.match(/\^error(?:,[^\n]*?msg="((?:\\.|[^"])*)")?/m);
+  if (!match?.[1]) {
+    return undefined;
+  }
+  return match[1]
+    .replace(/\\\\/g, '\\')
+    .replace(/\\"/g, '"')
+    .replace(/\\n/g, '\n');
+}
+
+function summarizeMiOutput(raw: string): string {
+  const normalized = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(' ');
+  if (!normalized) {
+    return 'empty MI response';
+  }
+  const maxLength = 240;
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength)}...[truncated ${normalized.length - maxLength} chars]`;
+}
+
+function describeMiFailure(raw: string): string {
+  return parseMiErrorMessage(raw) ?? summarizeMiOutput(raw);
+}
+
+function toFrameArg(tuple: Record<string, string>): FrameArg | undefined {
+  if (!tuple.name) {
+    return undefined;
+  }
+  const arg: FrameArg = { name: tuple.name };
+  if (tuple.type) {
+    arg.type = tuple.type;
+  }
+  if (tuple.value !== undefined) {
+    arg.value = tuple.value;
+  }
+  return arg;
+}
+
+function toParsedFrame(frame: Record<string, string>): GDBLine | ParsedGDBLine {
+  const regAddr = frame.addr || '??';
+  const method = frame.func && frame.func !== '??' ? frame.func : undefined;
+  const fileRaw = frame.fullname || frame.file;
+  const file = fileRaw && fileRaw !== '??' ? fileRaw : undefined;
+  const lineNumber = frame.line && frame.line !== '??' ? frame.line : undefined;
+
+  if (!method && !file && !lineNumber) {
+    return { regAddr, lineNumber: '??' };
+  }
+
+  return {
+    regAddr,
+    method: method || '??',
+    file: file || '??',
+    lineNumber: lineNumber || '??',
+  };
+}
+
+function parseMiFrames(raw: string): Record<string, string>[] {
+  const listContent = extractMiListContent(raw, 'stack');
+  return parseMiTupleList(listContent, 'frame');
+}
+
+function parseMiStackArgs(raw: string, frameLevel: string): FrameArg[] | undefined {
+  if (miErrorPattern.test(raw)) {
+    return undefined;
+  }
+  const listContent = extractMiListContent(raw, 'stack-args');
+  if (listContent === undefined) {
+    return undefined;
+  }
+  const frames = parseMiTupleList(listContent, 'frame');
+  const frame = frames.find((entry) => entry.level === frameLevel) ?? frames[0];
+  if (!frame || !frame.args) {
+    return [];
+  }
+  const argsList = stripMiList(frame.args) ?? '';
+  return parseMiTupleList(argsList)
+    .map(toFrameArg)
+    .filter((a): a is FrameArg => a !== undefined);
+}
+
+function stripEntrySuffix(name: string): string {
+  return name.replace(/@entry$/, '');
+}
+
+export function dedupeArgs(args: FrameArg[] | undefined): FrameArg[] {
+  if (!args || !args.length) {
+    return [];
+  }
+  const byName = new Map<string, { current?: FrameArg; entry?: FrameArg }>();
+  const order: string[] = [];
+
+  for (const arg of args) {
+    if (!arg?.name) {
+      continue;
+    }
+    const baseName = stripEntrySuffix(arg.name);
+    const fromEntry = arg.name.endsWith('@entry');
+    let values = byName.get(baseName);
+    if (!values) {
+      values = {};
+      byName.set(baseName, values);
+      order.push(baseName);
+    }
+    const slot = fromEntry ? 'entry' : 'current';
+    const previous = values[slot];
+    if (!previous || ((!previous.value || previous.value === '<optimized out>') && arg.value && arg.value !== '<optimized out>')) {
+      values[slot] = { ...arg, name: baseName };
+    } else {
+      if (!previous.type && arg.type) {
+        previous.type = arg.type;
+      }
+      if (!previous.value && arg.value) {
+        previous.value = arg.value;
+      }
+    }
+  }
+
+  return order.flatMap((name) => {
+    const values = byName.get(name);
+    if (!values) {
+      return [];
+    }
+    const current = values.current;
+    const entry = values.entry;
+    const selected = current?.value && current.value !== '<optimized out>'
+      ? current
+      : entry?.value && entry.value !== '<optimized out>'
+        ? entry
+        : current ?? entry;
+    if (!selected) {
+      return [];
+    }
+    const fallback = selected === entry ? current : entry;
+    const result: FrameArg = {
+      ...selected,
+      name: selected === entry ? `${name}@entry` : name,
+    };
+    if (!result.type && fallback?.type) {
+      result.type = fallback.type;
+    }
+    if ((!result.value || result.value === '<optimized out>') && fallback?.value && fallback.value !== '<optimized out>') {
+      result.value = fallback.value;
+    }
+    return [result];
+  });
+}
+
+export function countResolvedMiFrames(
+  frames: (GDBLine | ParsedGDBLine)[],
+): number {
+  return frames.filter(
+    (line) => isParsedGDBLine(line) && (line.method !== '??' || line.file !== '??'),
+  ).length;
+}
+
+export async function fetchStacktraceWithMi(
+  params: DecodeParams,
+  panicInfo: PanicInfoWithStackData,
+  options: DecodeOptions & GdbMiOptions = {},
+  log: Debug = () => {},
+): Promise<(GDBLine | ParsedGDBLine)[]> {
+  const { elfPath, toolPath } = params;
+  let server: GdbStubServer | undefined;
+  let client: GdbMiClient | undefined;
+
+  try {
+    log('fetch stacktrace start', { elfPath, toolPath });
+    const { signal, debug } = options;
+    const gdbServer = new GdbStubServer(panicInfo, debug);
+    const { remoteSpec } = await gdbServer.start(signal);
+    server = gdbServer;
+    log('gdb stub ready', { remoteSpec });
+
+    client = new GdbMiClient(toolPath, ['--interpreter=mi2', '-n', elfPath], {
+      ...options,
+      ...(process.platform === 'win32'
+        ? { env: { ...process.env, ...options.env, ELECTRON_RUN_AS_NODE: '1' } }
+        : {}),
+    });
+    await client.drainHandshake();
+    const targetResult = await client.sendCommand(`-target-select remote ${remoteSpec}`);
+    if (miErrorPattern.test(targetResult)) {
+      throw new Error(`Failed to connect to GDB remote target: ${describeMiFailure(targetResult)}`);
+    }
+    log('gdb remote connected');
+
+    const framesRaw = await client.sendCommand('-stack-list-frames');
+    if (miErrorPattern.test(framesRaw)) {
+      throw new Error(`Failed to list stack frames: ${describeMiFailure(framesRaw)}`);
+    }
+    const frames = parseMiFrames(framesRaw);
+    const stacktraceLines = frames.map(toParsedFrame);
+    log('frames parsed', frames.length);
+
+    for (let i = 0; i < frames.length; i++) {
+      const frameLevel = frames[i].level ?? `${i}`;
+      try {
+        await client.sendCommand(`-stack-select-frame ${frameLevel}`);
+
+        const argsRaw = await client.sendCommand(
+          `-stack-list-arguments --simple-values ${frameLevel} ${frameLevel}`,
+        );
+        const rawArgs = parseMiStackArgs(argsRaw, frameLevel);
+        const args = dedupeArgs(rawArgs);
+        const parsedFrame = isParsedGDBLine(stacktraceLines[i])
+          ? (stacktraceLines[i] as ParsedGDBLine)
+          : undefined;
+        if (args.length && parsedFrame) {
+          parsedFrame.args = args;
+          log('frame args', frameLevel, parsedFrame.args);
+        }
+      } catch (err) {
+        // A transport failure stops argument annotation but keeps the
+        // frames already collected; cancellation stays terminal.
+        if (options.signal?.aborted) {
+          throw err;
+        }
+        log('frame argument lookup failed; keeping unannotated frames', err);
+        break;
+      }
+    }
+
+    log('fetch stacktrace done', stacktraceLines.length);
+    return stacktraceLines;
+  } finally {
+    await client?.close();
+    await server?.close();
+  }
+}
+
+const exceptions: { code: number; description: string }[] = [
+  { code: 0x0, description: 'Instruction address misaligned' },
+  { code: 0x1, description: 'Instruction access fault' },
+  { code: 0x2, description: 'Illegal instruction' },
+  { code: 0x3, description: 'Breakpoint' },
+  { code: 0x4, description: 'Load address misaligned' },
+  { code: 0x5, description: 'Load access fault' },
+  { code: 0x6, description: 'Store/AMO address misaligned' },
+  { code: 0x7, description: 'Store/AMO access fault' },
+  { code: 0x8, description: 'Environment call from U-mode' },
+  { code: 0x9, description: 'Environment call from S-mode' },
+  { code: 0xb, description: 'Environment call from M-mode' },
+  { code: 0xc, description: 'Instruction page fault' },
+  { code: 0xd, description: 'Load page fault' },
+  { code: 0xf, description: 'Store/AMO page fault' },
+];
+
+function createDecodeResult(
+  panicInfo: PanicInfoWithStackData,
+  programCounter: AddrLine | undefined,
+  faultAddr: AddrLine | undefined,
+  stacktraceLines: (GDBLine | ParsedGDBLine)[],
+): DecodeResult {
+  const exception = exceptions.find((e) => e.code === panicInfo.faultCode);
+
+  return {
+    faultInfo: {
+      coreId: panicInfo.coreId,
+      programCounter,
+      faultAddr,
+      faultCode: panicInfo.faultCode,
+      faultMessage: exception ? exception.description : undefined,
+    },
+    regs: panicInfo.regs,
+    stacktraceLines,
+  };
+}
+
+/**
+ * PCs from firmware-printed 'Backtrace:' PC:SP pairs. Some ESP-IDF RISC-V
+ * targets (e.g. ESP32-P4) print an unwound backtrace instead of a raw
+ * 'Stack memory:' dump; those PCs are resolved directly via addr2line.
+ */
+export function extractPrintedBacktraceAddrs(input: string, coreId: number): number[] {
+  const addrs: number[] = [];
+  let currentCore: number | undefined;
+  let sawCoreHeader = false;
+  for (const line of input.split(/\r?\n|\r/)) {
+    // 'Backtrace:' lines belong to the core section they appear under — the
+    // same attribution parseRiscvPanicDetailed applies to register dumps.
+    const dumpMatch = line.match(/^\s*Core\s+(\d+)\s+register dump:/);
+    if (dumpMatch) {
+      currentCore = parseInt(dumpMatch[1], 10);
+      sawCoreHeader = true;
+      continue;
+    }
+    // 'Backtrace:' must start the line (after optional indentation) so a
+    // diagnostic mention mid-line cannot contribute PCs.
+    if (!/^\s*Backtrace:/i.test(line)) {
+      continue;
+    }
+    if (sawCoreHeader && currentCore !== coreId) {
+      continue;
+    }
+    for (const match of line.matchAll(/(0x[0-9a-fA-F]+)\s*:\s*0x[0-9a-fA-F]+/g)) {
+      const addr = parseInt(match[1], 16);
+      if (!Number.isNaN(addr)) {
+        addrs.push(addr);
+      }
+    }
+  }
+  return addrs;
+}
+
+/**
+ * Minimum stack bytes worth attempting a GDB/MI unwind: below this a frame
+ * chain cannot be recovered anyway (a saved ra/sp pair needs ~16 bytes per
+ * frame). ESP32-S31 dumps a single mostly-zero 32-byte row — the
+ * firmware-printed backtrace is richer.
+ */
+const MIN_UNWIND_STACK_BYTES = 64;
+
+/**
+ * ESP code space (instruction bus) — the same range the raw fallback uses
+ * to spot candidate return addresses in stack dumps.
+ */
+const CODE_ADDR_MIN = 0x40000000;
+const CODE_ADDR_MAX = 0x50000000;
+
+function isToolAccessError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  const code = (err as Error & { code?: string }).code;
+  if (code === 'ENOENT' || code === 'EACCES' || code === 'EPERM') {
+    return true;
+  }
+  const message = err.message.toLowerCase();
+  return message.includes('spawn') && (message.includes('enoent') || message.includes('failed'));
+}
+
+/**
+ * Whether the captured stack bytes contain a recoverable RISC-V frame
+ * chain: at least two saved-return-address candidates (code-space words)
+ * in a buffer large enough to hold frames. A big but contentless dump
+ * (zeros, data pointers only) cannot be unwound — the printed 'Backtrace:'
+ * stays the better source even though it exceeds the size threshold.
+ */
+function stackHasRecoverableFrames(stackData: Buffer): boolean {
+  if (stackData.length < MIN_UNWIND_STACK_BYTES) {
+    return false;
+  }
+  let codePointers = 0;
+  for (let i = 0; i + 4 <= stackData.length; i += 4) {
+    const word = stackData.readUInt32LE(i);
+    if (word >= CODE_ADDR_MIN && word < CODE_ADDR_MAX) {
+      codePointers++;
+      if (codePointers >= 2) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * The printed-'Backtrace:' path applies only when the selected core printed
+ * an unwound backtrace AND the stack dump cannot provide a recoverable
+ * frame chain for the MI unwind — a stack with real ra/sp candidates is
+ * the richer source and keeps the MI unwind authoritative.
+ */
+export function printedBacktraceApplies(printedBacktrace: number[], stackData: Buffer): boolean {
+  return printedBacktrace.length > 0 && !stackHasRecoverableFrames(stackData);
+}
+
+/**
+ * Decode a RISC-V panic output: parse registers/stack dump, serve it to GDB
+ * over the remote protocol, and resolve frames via GDB/MI + addr2line.
+ */
+export async function decodeRiscv(
+  params: DecodeParams,
+  input: string,
+  options: DecodeOptions = {},
+): Promise<DecodeResult> {
+  const log: Debug = options.debug ?? (() => {});
+  log('decode start', { targetArch: params.targetArch });
+
+  const panicInfo = parseRiscvPanicOutput(input);
+  log('panic info', {
+    coreId: panicInfo.coreId,
+    programCounter: panicInfo.programCounter,
+    faultAddr: panicInfo.faultAddr,
+    faultCode: panicInfo.faultCode,
+  });
+
+  // Run the MI backtrace and the addr2line lookups under one decode-scoped
+  // abort signal: if either fails, abort the sibling so its GDB processes
+  // shut down instead of lingering until the outer timeout.
+  const decodeAbort = new AbortController();
+  const onOuterAbort = () => decodeAbort.abort();
+  options.signal?.addEventListener('abort', onOuterAbort, { once: true });
+  if (options.signal?.aborted) {
+    decodeAbort.abort();
+  }
+  const childOptions: DecodeOptions = { ...options, signal: decodeAbort.signal };
+
+  // When the firmware already printed an unwound 'Backtrace:', those PCs
+  // are always resolved via addr2line: they are the primary source when no
+  // recoverable stack exists, and the fallback when the MI unwind fails or
+  // recovers fewer frames than the firmware printed (code-space words in
+  // the dump alone do not prove a saved frame chain). A 'Stack memory:'
+  // dump that MI CAN unwind stays authoritative.
+  const printedBacktrace = extractPrintedBacktraceAddrs(input, panicInfo.coreId);
+  const usePrintedBacktrace = printedBacktraceApplies(printedBacktrace, panicInfo.stackData);
+
+  const addr2lineAddrs: (number | undefined)[] = [
+    panicInfo.programCounter,
+    panicInfo.faultAddr,
+    ...printedBacktrace,
+  ];
+  // addr2line throws on an empty address list; a missing MEPC/MTVAL must not
+  // discard the MI-unwound frames, so skip the lookup entirely then.
+  const hasLookupAddrs = addr2lineAddrs.some((a) => a !== undefined);
+  const miTask = usePrintedBacktrace
+    ? Promise.resolve([] as (GDBLine | ParsedGDBLine)[])
+    : fetchStacktraceWithMi(params, panicInfo, childOptions, log).catch(
+        (err: unknown) => {
+          // A printed backtrace remains available whenever MI cannot
+          // recover the stack — an abort still propagates.
+          if (printedBacktrace.length === 0 || childOptions.signal?.aborted) {
+            throw err;
+          }
+          log('MI unwind failed; falling back to printed backtrace', err);
+          return [] as (GDBLine | ParsedGDBLine)[];
+        },
+      );
+  const tasks = [
+    miTask,
+    hasLookupAddrs
+      ? addr2line(params, addr2lineAddrs, childOptions).catch((err: unknown) => {
+          // An ordinary symbol-lookup failure must not discard valid MI
+          // frames — the caller falls back to raw fault addresses.
+          // Cancellation stays terminal. Spawn/access errors must bubble
+          // up to decodeCrash so the toolsMissing warning is shown.
+          if (childOptions.signal?.aborted || isToolAccessError(err)) {
+            throw err;
+          }
+          log('addr2line resolution failed; using raw addresses', err);
+          return [] as (AddrLine | undefined)[];
+        })
+      : Promise.resolve([] as (AddrLine | undefined)[]),
+  ] as const;
+
+  const rawAddrLine = (addr: number | undefined): AddrLine | undefined =>
+    addr === undefined
+      ? undefined
+      : { addr, location: { regAddr: toHexString(addr), lineNumber: '??' } };
+
+  try {
+    const [miLines, resolved] = await Promise.all(tasks);
+    let [programCounter, faultAddr, ...printedLocations] = resolved;
+    if (resolved.length === 0) {
+      // Resolution unavailable: keep the raw fault addresses (and printed
+      // backtrace PCs as unresolved frames) so the result still identifies
+      // where the panic occurred.
+      programCounter = rawAddrLine(panicInfo.programCounter);
+      faultAddr = rawAddrLine(panicInfo.faultAddr);
+      printedLocations = printedBacktrace.map(rawAddrLine);
+    }
+    const printedLines = printedLocations
+      .map((line) => line?.location)
+      .filter(isGDBLine);
+    log('addr2line done', { programCounter, faultAddr });
+    const resolvedMiFrameCount = countResolvedMiFrames(miLines);
+    const stacktraceLines =
+      !usePrintedBacktrace && resolvedMiFrameCount >= printedBacktrace.length
+        ? miLines
+        : printedLines;
+    stacktraceLines.forEach((line, index) => {
+      log('stacktrace line', index, line);
+    });
+
+    return createDecodeResult(panicInfo, programCounter, faultAddr, stacktraceLines);
+  } catch (err) {
+    decodeAbort.abort();
+    // Let the sibling settle so its GDB child processes exit cleanly.
+    await Promise.allSettled(tasks);
+    throw err;
+  } finally {
+    options.signal?.removeEventListener('abort', onOuterAbort);
+  }
+}
+
+// Re-exported for tests / callers that need the raw parsers.
+export { parseLines, toHexString };

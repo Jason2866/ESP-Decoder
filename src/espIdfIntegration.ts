@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { CHIP_TARGET_MAP, XTENSA_CHIPS } from './chipTargets';
+import { chipArch, detectElfArch, ChipArch } from './chipTargets';
 
 export interface EspIdfBuild {
   name: string;
@@ -52,30 +52,6 @@ function readProjectName(workspaceFolder: string): string | undefined {
   return undefined;
 }
 
-function findExecutableInPath(names: string[]): string | undefined {
-  const pathEnv = process.env.PATH;
-  if (!pathEnv) {
-    return undefined;
-  }
-
-  const ext = process.platform === 'win32' ? '.exe' : '';
-  const dirs = pathEnv.split(path.delimiter);
-
-  for (const dir of dirs) {
-    if (!dir) {
-      continue;
-    }
-    for (const name of names) {
-      const candidate = path.join(dir, name + ext);
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-  }
-
-  return undefined;
-}
-
 function gatherToolRoots(): string[] {
   const roots: string[] = [];
 
@@ -104,54 +80,147 @@ function findNewestVersionDir(parentDir: string): string | undefined {
   }
 }
 
-function findGdbFromIdfTools(chipTarget: string | undefined): string | undefined {
+/**
+ * GDB binary name patterns per architecture family, mirroring how
+ * esp-idf-panic-decoder resolves the toolchain prefix: only the arch family
+ * matters, not the specific MCU.
+ */
+function gdbMatcher(arch: ChipArch): { names: string[]; pattern: RegExp } {
   const ext = process.platform === 'win32' ? '.exe' : '';
-  const isXtensa = chipTarget ? XTENSA_CHIPS.has(chipTarget) : true;
+  if (arch === 'riscv') {
+    return {
+      names: [`riscv32-esp-elf-gdb${ext}`],
+      pattern: /^riscv32-esp-elf-gdb(\.exe)?$/,
+    };
+  }
+  return {
+    names: [`xtensa-esp-elf-gdb${ext}`],
+    pattern: /^xtensa-[a-z0-9]+-elf-gdb(\.exe)?$/,
+  };
+}
 
-  const preferredNames = isXtensa
-    ? chipTarget === 'esp8266'
-      ? ['xtensa-lx106-elf-gdb', 'xtensa-esp-elf-gdb', 'xtensa-esp32-elf-gdb', 'xtensa-esp32s2-elf-gdb', 'xtensa-esp32s3-elf-gdb']
-      : ['xtensa-esp-elf-gdb', 'xtensa-esp32-elf-gdb', 'xtensa-esp32s2-elf-gdb', 'xtensa-esp32s3-elf-gdb', 'xtensa-lx106-elf-gdb']
-    : ['riscv32-esp-elf-gdb'];
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
-  const fromPath = findExecutableInPath(preferredNames);
-  if (fromPath) {
-    return fromPath;
+/**
+ * Find a GDB binary in a list of directories. Preferred names are tried
+ * first across all dirs, then any name matching the arch pattern.
+ */
+function findGdbInDirs(dirs: string[], names: string[], pattern: RegExp): string | undefined {
+  for (const dir of dirs) {
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  for (const dir of dirs) {
+    try {
+      const match = fs
+        .readdirSync(dir)
+        .filter((entry) => pattern.test(entry))
+        .sort()[0];
+      if (match) {
+        return path.join(dir, match);
+      }
+    } catch {
+      // dir missing or unreadable
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Collect bin directories inside an ESP-IDF tool version directory.
+ * Layouts vary: <ver>/bin/<tool>, <ver>/<tool>/bin/<tool>, or deeper nesting.
+ */
+function toolVersionBinDirs(versionDir: string): string[] {
+  const dirs = [path.join(versionDir, 'bin')];
+  try {
+    for (const entry of fs.readdirSync(versionDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        dirs.push(path.join(versionDir, entry.name, 'bin'));
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return dirs;
+}
+
+function findGdbFromIdfTools(arch: ChipArch, chipTarget: string | undefined): string | undefined {
+  const { names, pattern } = gdbMatcher(arch);
+  // Prefer the tool dir matching the chip (esp32s3 -> xtensa-esp32s3-elf,
+  // esp8266 -> xtensa-lx106-elf), then most specific match first.
+  const chipHint = chipTarget === 'esp8266' ? 'lx106' : chipTarget;
+
+  // 1. Search PATH. For Xtensa, a chip-matching binary anywhere on PATH wins;
+  //    the generic xtensa-esp-elf-gdb is kept as a PATH fallback before the
+  //    ESP-IDF tool directories are searched.
+  const pathEnv = process.env.PATH;
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const chipGdb =
+    arch === 'xtensa' && chipHint
+      ? {
+          names: [`xtensa-${chipHint}-elf-gdb${ext}`],
+          pattern: new RegExp(`^xtensa-${escapeRegExp(chipHint)}-.*-gdb(\\.exe)?$`),
+        }
+      : undefined;
+  if (pathEnv) {
+    const dirs = pathEnv.split(path.delimiter).filter(Boolean);
+    let fromPath: string | undefined;
+    if (chipGdb) {
+      fromPath =
+        findGdbInDirs(dirs, chipGdb.names, chipGdb.pattern) ??
+        // Exact-name fallback only; the pattern must not match other chips.
+        findGdbInDirs(dirs, [`xtensa-esp-elf-gdb${ext}`], /$^/);
+    } else {
+      fromPath = findGdbInDirs(dirs, names, pattern);
+    }
+    if (fromPath) {
+      return fromPath;
+    }
   }
 
-  const roots = gatherToolRoots();
-  for (const toolsRoot of roots) {
+  // 2. Search ESP-IDF tool directories (~/.espressif/tools, $IDF_TOOLS_PATH/tools)
+  const toolPrefix = arch === 'riscv' ? 'riscv32-esp-elf' : 'xtensa-';
+  const scoreTool = (name: string): number => {
+    if (!chipHint) {
+      return 0;
+    }
+    return name.includes(`${chipHint}-`) || name.includes(`-${chipHint}`) ? 0 : 1;
+  };
+
+  for (const toolsRoot of gatherToolRoots()) {
     if (!fs.existsSync(toolsRoot)) {
       continue;
     }
 
-    const toolPrefixes = isXtensa
-      ? chipTarget === 'esp8266'
-        ? ['xtensa-lx106-elf', 'xtensa-esp-elf', 'xtensa-esp32-elf', 'xtensa-esp32s2-elf', 'xtensa-esp32s3-elf']
-        : ['xtensa-esp-elf', 'xtensa-esp32-elf', 'xtensa-esp32s2-elf', 'xtensa-esp32s3-elf', 'xtensa-lx106-elf']
-      : ['riscv32-esp-elf'];
+    let toolDirs: string[];
+    try {
+      toolDirs = fs
+        .readdirSync(toolsRoot, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && d.name.startsWith(toolPrefix))
+        .map((d) => d.name)
+        .sort((a, b) => scoreTool(a) - scoreTool(b) || a.localeCompare(b));
+    } catch {
+      continue;
+    }
 
-    for (const prefix of toolPrefixes) {
-      const toolDir = path.join(toolsRoot, prefix);
-      if (!fs.existsSync(toolDir)) {
+    for (const toolName of toolDirs) {
+      const versionDir = findNewestVersionDir(path.join(toolsRoot, toolName));
+      if (!versionDir) {
         continue;
       }
-
-      const newestVersionDir = findNewestVersionDir(toolDir);
-      if (!newestVersionDir) {
-        continue;
-      }
-
-      for (const name of preferredNames) {
-        const directBin = path.join(newestVersionDir, 'bin', `${name}${ext}`);
-        if (fs.existsSync(directBin)) {
-          return directBin;
-        }
-
-        const nestedBin = path.join(newestVersionDir, prefix, 'bin', `${name}${ext}`);
-        if (fs.existsSync(nestedBin)) {
-          return nestedBin;
-        }
+      const binDirs = toolVersionBinDirs(versionDir);
+      const gdb = chipGdb
+        ? findGdbInDirs(binDirs, chipGdb.names, chipGdb.pattern) ??
+          findGdbInDirs(binDirs, names, pattern)
+        : findGdbInDirs(binDirs, names, pattern);
+      if (gdb) {
+        return gdb;
       }
     }
   }
@@ -192,18 +261,51 @@ function findElfCandidates(buildDir: string, projectName?: string): string[] {
   return candidates;
 }
 
+/**
+ * Classify an IDF target into an arch family. chipArch() maps the four
+ * Xtensa targets to 'xtensa' and everything else (all RISC-V chips, known or
+ * not) to 'riscv'.
+ */
+function idfTargetFamily(idfTarget: string | undefined): ChipArch | undefined {
+  return idfTarget ? chipArch(idfTarget) : undefined;
+}
+
 export async function findEspIdfBuilds(workspaceFolder: string): Promise<EspIdfBuild[]> {
   const buildDir = path.join(workspaceFolder, 'build');
   const projectName = readProjectName(workspaceFolder);
   const idfTarget = parseIdfTarget(workspaceFolder);
-  const targetArch = idfTarget ? CHIP_TARGET_MAP[idfTarget] : undefined;
-  const toolPath = findGdbFromIdfTools(idfTarget);
-
   const elfCandidates = findElfCandidates(buildDir, projectName);
-  return elfCandidates.map((elfPath, index) => ({
-    name: index === 0 ? 'ESP-IDF (build)' : `ESP-IDF (build:${path.basename(elfPath, '.elf')})`,
-    elfPath,
-    toolPath,
-    targetArch,
-  }));
+  // sdkconfig is authoritative when present; otherwise EACH firmware ELF's
+  // e_machine decides its own arch and debugger lookup — candidates in one
+  // build dir can mix architectures.
+  const configuredFamily = idfTargetFamily(idfTarget);
+  const toolPathByArch = new Map<string, string | undefined>();
+  const gdbForArch = (arch: ChipArch | undefined): string | undefined => {
+    const key = arch ?? 'unknown';
+    if (!toolPathByArch.has(key)) {
+      // Only pass the sdkconfig chip hint when its family agrees with the
+      // requested arch — a stale sdkconfig must not direct the lookup to
+      // the wrong GDB family.  When arch is unknown the hint is harmless.
+      const chipHint = !arch || idfTargetFamily(idfTarget) === arch ? idfTarget : undefined;
+      // Unknown arch: try Xtensa first (legacy default), then RISC-V — a
+      // RISC-V-only ESP-IDF tool install must not be missed.
+      let found = findGdbFromIdfTools(arch ?? 'xtensa', chipHint);
+      if (!found && arch === undefined) {
+        found = findGdbFromIdfTools('riscv', chipHint);
+      }
+      toolPathByArch.set(key, found);
+    }
+    return toolPathByArch.get(key);
+  };
+  return elfCandidates.map((elfPath, index) => {
+    // The ELF header is authoritative: probe each file first. Fall back to
+    // sdkconfig only when the probe fails (e.g. empty placeholder file).
+    const targetArch = detectElfArch(elfPath) ?? configuredFamily;
+    return {
+      name: index === 0 ? 'ESP-IDF (build)' : `ESP-IDF (build:${path.basename(elfPath, '.elf')})`,
+      elfPath,
+      toolPath: gdbForArch(targetArch),
+      targetArch,
+    };
+  });
 }
