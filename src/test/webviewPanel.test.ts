@@ -235,6 +235,38 @@ describe('EspDecoderWebviewPanel – PR #42 file opening', () => {
     }
   });
 
+  it('re-decodes retained crash cards when PlatformIO supplies a newer ELF', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    internal.updateConfig({ elfPath: '/project/.pio/build/env-a/firmware.elf' });
+    const event: crashDecoder.CrashEvent = {
+      id: 'crash-new-pio-elf',
+      kind: 'xtensa',
+      lines: ['panic'],
+      rawText: 'panic',
+      timestamp: 1,
+      decodedContext: {
+        captureText: 'panic',
+        captureKind: 'xtensa',
+        elfPath: '/project/.pio/build/env-a/firmware.elf',
+      },
+      decoded: { stacktrace: [], rawOutput: 'old ELF result' },
+    };
+    internal.crashEvents = [event];
+    const decoded = { stacktrace: [], rawOutput: 'current PIO ELF result' };
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockResolvedValue(decoded);
+
+    try {
+      internal.updateConfig({ elfPath: '/project/.pio/build/env-b/firmware.elf' });
+      await vi.waitFor(() => expect(event.decoded?.rawOutput).toBe('current PIO ELF result'));
+      expect(decodeSpy).toHaveBeenCalledOnce();
+      expect(decodeSpy.mock.calls[0][1]).toBe('/project/.pio/build/env-b/firmware.elf');
+      expect(event.decodedContext?.elfPath).toBe('/project/.pio/build/env-b/firmware.elf');
+    } finally {
+      decodeSpy.mockRestore();
+    }
+  });
+
   it('rejects provisioning when the serial connection changed after discovery', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internal = panel as any;

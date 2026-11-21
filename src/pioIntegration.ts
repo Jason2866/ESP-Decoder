@@ -20,6 +20,8 @@ export interface PioEnvironment {
   romElfPath?: string;
 }
 
+export type ElfSelectionSource = 'pio' | 'esp-idf' | 'file';
+
 // ---------------------------------------------------------------------------
 // PlatformIO INI parsing (ported from esp-exception-decoder)
 // ---------------------------------------------------------------------------
@@ -892,13 +894,14 @@ export async function findPioEnvironments(workspaceFolder: string): Promise<PioE
 export async function selectElfFile(
   workspaceFolder: string | undefined,
   currentElfPath?: string
-): Promise<{ elfPath: string; toolPath?: string; targetArch?: string; romElfPath?: string } | undefined> {
+): Promise<{ elfPath: string; toolPath?: string; targetArch?: string; romElfPath?: string; source: ElfSelectionSource } | undefined> {
   type ElfPickItem = vscode.QuickPickItem & {
     elfPath?: string;
     toolPath?: string;
     targetArch?: string;
     romElfPath?: string;
     action?: string;
+    source?: ElfSelectionSource;
   };
   const items: ElfPickItem[] = [];
 
@@ -920,6 +923,7 @@ export async function selectElfFile(
         toolPath: env.toolPath,
         targetArch: env.targetArch,
         romElfPath: env.romElfPath,
+        source: 'pio',
       });
     }
 
@@ -936,6 +940,7 @@ export async function selectElfFile(
         elfPath: build.elfPath,
         toolPath: build.toolPath,
         targetArch: build.targetArch,
+        source: 'esp-idf',
       });
     }
   }
@@ -948,6 +953,7 @@ export async function selectElfFile(
       description: currentElfPath,
       detail: 'Currently active — manually selected',
       elfPath: currentElfPath,
+      source: 'file',
     });
   }
 
@@ -976,7 +982,7 @@ export async function selectElfFile(
       title: 'Select ELF File',
     });
     if (uris && uris.length > 0) {
-      return { elfPath: uris[0].fsPath };
+      return { elfPath: uris[0].fsPath, source: 'file' };
     }
     return undefined;
   }
@@ -986,5 +992,6 @@ export async function selectElfFile(
     toolPath: picked.toolPath,
     targetArch: picked.targetArch,
     romElfPath: picked.romElfPath,
+    source: picked.source ?? 'file',
   };
 }

@@ -28,6 +28,7 @@ let sessionConfig: SessionConfig = {};
 // Tracks whether the user has manually picked an ELF file.
 // When true, file-watcher auto-detection must not overwrite the selection.
 let manualElfOverride = false;
+let pioAutoDetectRequest = 0;
 
 export function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('ESP Decoder');
@@ -199,7 +200,10 @@ export function activate(context: vscode.ExtensionContext) {
 
       const result = await selectElfFile(workspaceFolder, viewProvider?.currentElfPath ?? sessionConfig.elfPath);
       if (result) {
-        manualElfOverride = true;
+        // A selected PIO environment should follow later builds of the active
+        // environment. A browsed ELF remains pinned to the user's choice.
+        manualElfOverride = result.source !== 'pio';
+        pioAutoDetectRequest += 1;
         sessionConfig = {
           elfPath: result.elfPath,
           toolPath: result.toolPath || sessionConfig.toolPath,
@@ -446,21 +450,28 @@ async function tryAutoDetectElf(): Promise<void> {
 }
 
 function autoDetectFromPio(elfPath: string): void {
-  if (manualElfOverride || hasUserConfiguredSession()) {
+  const config = vscode.workspace.getConfiguration('esp-decoder');
+  if (manualElfOverride || config.get<string>('elfPath', '')) {
     return; // User has manually selected an ELF — do not overwrite
   }
 
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceFolder) {
+    const request = ++pioAutoDetectRequest;
     findPioEnvironments(workspaceFolder)
       .then((envs) => {
+        if (request !== pioAutoDetectRequest || manualElfOverride || config.get<string>('elfPath', '')) {
+          return;
+        }
         const matched = envs.find((env) => env.elfPath === elfPath);
         if (matched) {
+          const configuredToolPath = config.get<string>('toolPath', '');
+          const configuredTargetArch = config.get<string>('targetArch', 'auto');
           sessionConfig = {
             ...sessionConfig,
             elfPath: matched.elfPath,
-            toolPath: matched.toolPath,
-            targetArch: matched.targetArch,
+            toolPath: configuredToolPath || matched.toolPath,
+            targetArch: configuredTargetArch !== 'auto' ? configuredTargetArch : matched.targetArch,
             romElfPath: matched.romElfPath,
           };
           if (viewProvider) {

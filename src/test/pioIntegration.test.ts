@@ -14,6 +14,10 @@ vi.mock('vscode', () => ({
   workspace: {
     getConfiguration: vi.fn(() => ({ get: (_key: string, defaultValue: unknown) => defaultValue })),
   },
+  window: {
+    showQuickPick: vi.fn(),
+    showOpenDialog: vi.fn(),
+  },
 }));
 
 vi.mock('pioarduino-node-helpers', () => ({
@@ -39,7 +43,8 @@ vi.mock('pioarduino-node-helpers', () => ({
 }));
 
 import { core as pioCore } from 'pioarduino-node-helpers';
-import { findPioEnvironments, findPioGdbToolPath, getPioBuildDir } from '../pioIntegration.js';
+import * as vscode from 'vscode';
+import { findPioEnvironments, findPioGdbToolPath, getPioBuildDir, selectElfFile } from '../pioIntegration.js';
 
 describe('findPioGdbToolPath – lx106 selection', () => {
   let packagesDir: string;
@@ -262,5 +267,22 @@ describe('findPioEnvironments build directory resolution', () => {
     expect(demo).toBeDefined();
     expect(demo!.elfPath).toBe(elfPath);
     expect(demo!.targetArch).toBeUndefined();
+  });
+
+  it('marks a selected PlatformIO ELF so later builds can follow the active environment', async () => {
+    fs.writeFileSync(
+      path.join(workspace, 'platformio.ini'),
+      '[env:current]\\nplatform = espressif32\\nboard = esp32dev\\n'
+    );
+    const elfPath = path.join(workspace, '.pio', 'build', 'current', 'firmware.elf');
+    fs.mkdirSync(path.dirname(elfPath), { recursive: true });
+    fs.writeFileSync(elfPath, '');
+    vi.mocked(vscode.window.showQuickPick).mockImplementation(
+      (items) => Promise.resolve((items as readonly vscode.QuickPickItem[])[0] as never),
+    );
+
+    const selection = await selectElfFile(workspace);
+
+    expect(selection).toMatchObject({ elfPath, source: 'pio' });
   });
 });

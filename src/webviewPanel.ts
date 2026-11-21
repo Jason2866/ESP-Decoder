@@ -403,6 +403,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   }
 
   public updateConfig(config: Partial<SessionConfig>): void {
+    const previous = this.config;
     this.config = { ...this.config, ...config };
     this.postMessage({
       type: 'configChanged',
@@ -410,6 +411,18 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       toolPath: this.config.toolPath,
       targetArch: this.config.targetArch,
     });
+    const decodeContextChanged =
+      previous.elfPath !== this.config.elfPath ||
+      previous.toolPath !== this.config.toolPath ||
+      previous.targetArch !== this.config.targetArch ||
+      previous.romElfPath !== this.config.romElfPath;
+    if (decodeContextChanged) {
+      for (const event of this.crashEvents) {
+        delete event.decoded;
+        delete event.decodedContext;
+        void this.decodeCrashEvent(event);
+      }
+    }
   }
 
   public get currentElfPath(): string | undefined {
