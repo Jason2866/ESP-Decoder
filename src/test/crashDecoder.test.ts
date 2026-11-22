@@ -69,6 +69,7 @@ import {
   parseESP8266PanicOutput,
   parseStackDataRow,
   parseRiscvPanicOutput,
+  parseRiscvPanicLightweight,
   extractPrintedBacktraceAddrs,
   printedBacktraceApplies,
   decodeCoredumpFile,
@@ -206,10 +207,11 @@ describe('CrashCapturer – architecture hints', () => {
 
     const xtensa = feedCrashText(new CrashCapturer(), [
       'assert failed: MCAUSE register check',
-      "Guru Meditation Error: Core 0 panic'ed (LoadProhibited).",
+      "Guru Meditation Error: Core 0 panic'ed (MCAUSE LoadProhibited).",
       'PC: 0x400d1234',
       'Backtrace: 0x400d1234:0x3ffb0000',
     ].join('\n'));
+    expect(xtensa?.rawText).toContain('MCAUSE');
     expect(xtensa?.kind).toBe('xtensa');
   });
 });
@@ -1280,9 +1282,9 @@ describe('RISC-V heuristic candidate extraction', () => {
     ].join('\n');
 
     expect(extractRiscvHeuristicCandidates(text)).toEqual([
-      '0x42100002',
       '0x42100003',
       '0x42100004',
+      '0x42100002',
     ]);
   });
 });
@@ -1476,6 +1478,24 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     expect(first?.lineNumber).toBe('1');
     expect(second?.file).toBe('/src/main-40000004.c');
     expect(second?.lineNumber).toBe('5');
+  }, 30_000);
+
+  it('uses the submitted positional keys if callers mutate addresses during GDB startup', async () => {
+    const objectAddress = { addr: '40000004', location: '0x40000004' };
+    const requested: (number | { addr: string; location: string } | undefined)[] = [
+      0x40000000,
+      objectAddress,
+      undefined,
+    ];
+    const resolving = addr2line(
+      { elfPath: '/nonexistent/firmware.elf', toolPath: fakeGdbPath },
+      requested,
+    );
+    requested[0] = 0x40000009;
+    objectAddress.addr = '40000009';
+
+    const results = await resolving;
+    expect(results.map((result) => result?.addr)).toEqual([0x40000000, 0x40000004, undefined]);
   }, 30_000);
 
   it('keeps the requested address when info line resolves to a range start', async () => {
@@ -2279,6 +2299,16 @@ describe('gdbStubMain – partial stack reads', () => {
 // ---------------------------------------------------------------------------
 
 describe('CrashFramer – provisional quiet flush', () => {
+  it('recognizes a valid Backtrace pair after a malformed token', () => {
+    const framer = new CrashFramer(500);
+    framer.pushLine('assert failed: malformed backtrace', 0);
+
+    expect(framer.isCompleteWithLine(
+      'Backtrace: invalid0x40000001:0x3ffb0001 0x40000002:0x3ffb0002',
+    )).toBe(true);
+    expect(framer.isCompleteWithLine('Backtrace: invalid token only')).toBe(false);
+  });
+
   it('only recognizes a stack marker at the start of a trimmed line', () => {
     const assertionOnly = new CrashFramer(500);
     assertionOnly.pushLine('assert failed: text mentions >>>stack>>> here', 0);
@@ -2413,6 +2443,24 @@ describe('CrashFramer – provisional quiet flush', () => {
 // ---------------------------------------------------------------------------
 
 describe('parseRiscvPanicOutput – bare-hex stack words', () => {
+  it('accepts a later valid PC:SP pair and uses abort PC when MEPC is absent', () => {
+    const text = [
+      "abort() was called on core 0 with PC 0x42000001",
+      'Core 0 register dump:',
+      'MCAUSE : 0x00000002',
+      'Backtrace: unreadable-token 0x42000001:0x3fc80000',
+    ].join('\n');
+    const full = parseRiscvPanicOutput(text);
+    expect(full.programCounter).toBe(0x42000001);
+    expect(parseRiscvPanicLightweight(text).programCounter).toBe(0x42000001);
+    expect(extractPrintedBacktraceAddrs(text, 0)).toEqual([0x42000001]);
+
+    const withMepc = text.replace('MCAUSE : 0x00000002', 'MEPC : 0x42000009  MCAUSE : 0x00000002');
+    expect(parseRiscvPanicOutput(withMepc).programCounter).toBe(0x42000009);
+    expect(parseRiscvPanicLightweight(withMepc).programCounter).toBe(0x42000009);
+    expect(() => parseRiscvPanicOutput('Backtrace: unreadable-token only')).toThrow();
+  });
+
   it('parses stack memory rows whose words lack 0x prefixes', () => {
     const text = [
       'Core 0 register dump:',
@@ -2669,6 +2717,26 @@ describe('decodeCrash – raw fallback core isolation', () => {
     expect(decoded.stacktrace).toEqual([]);
     // The raw capture is preserved for display.
     expect(decoded.rawOutput).toContain('Core  0 register dump:');
+  });
+
+  it('does not reopen a recognized RISC-V section during the raw generic rescan', async () => {
+    const text = [
+      'Core 0 register dump:',
+      'MEPC : 0x42000001',
+      'Stack memory:',
+      'invalid stack row',
+      'Backtrace:',
+      'Stack memory:',
+      '3fc80000: 0x42000002 0x00000000',
+    ].join('\n');
+    const decoded = await decodeCrash(
+      makeEvent(text),
+      ELF_PATH,
+      '/nonexistent/riscv32-esp-elf-gdb',
+    );
+
+    expect(decoded.stacktrace.map((frame) => frame.address)).toEqual([]);
+    expect(decoded.regs?.MEPC).toBe(0x42000001);
   });
 
   it('keeps structured data when the named core dump is present', async () => {

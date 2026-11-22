@@ -95,6 +95,8 @@ export interface CrashEvent {
   timestamp: number;
   decoded?: DecodedCrash;
   decodedContext?: CrashDecodeContext;
+  /** Synthetic coredump event; its results use the coredump decoder. */
+  isCoredump?: boolean;
 }
 
 /** Inputs that produced a cached decoded result. */
@@ -105,6 +107,8 @@ export interface CrashDecodeContext {
   toolPath?: string;
   targetArch?: string;
   romElfPath?: string;
+  /** Changes when the ELF file is rebuilt in place. */
+  elfRevision?: number;
 }
 
 export function createCrashDecodeContext(
@@ -114,8 +118,9 @@ export function createCrashDecodeContext(
   toolPath?: string,
   targetArch?: string,
   romElfPath?: string,
+  elfRevision?: number,
 ): CrashDecodeContext {
-  return { captureText, captureKind, elfPath, toolPath, targetArch, romElfPath };
+  return { captureText, captureKind, elfPath, toolPath, targetArch, romElfPath, elfRevision };
 }
 
 export function sameCrashDecodeContext(
@@ -127,7 +132,8 @@ export function sameCrashDecodeContext(
     left.elfPath === right.elfPath &&
     left.toolPath === right.toolPath &&
     left.targetArch === right.targetArch &&
-    left.romElfPath === right.romElfPath;
+    left.romElfPath === right.romElfPath &&
+    left.elfRevision === right.elfRevision;
 }
 
 export function hasCachedCrashDecode(
@@ -136,6 +142,7 @@ export function hasCachedCrashDecode(
 ): boolean {
   return event.decoded !== undefined &&
     !event.decoded.toolsMissing &&
+    !event.decoded.decodeFailed &&
     event.decodedContext !== undefined &&
     event.rawText === context.captureText &&
     event.kind === context.captureKind &&
@@ -172,6 +179,8 @@ export interface DecodedCrash {
   rawOutput: string;
   /** Set when decoding fell back to raw output because GDB/addr2line tools were not found. */
   toolsMissing?: boolean;
+  /** The decoder returned raw output after a timeout or execution error. */
+  decodeFailed?: boolean;
 }
 
 export interface StackFrame {
@@ -324,7 +333,13 @@ export async function decodeCrash(
   // Resolve the configured architecture up front so tool discovery uses the
   // same family the decoder will use — a recognized targetArch override must
   // not fall back to crash-kind guessing (e.g. kind 'unknown' + riscv).
-  const resolvedArch = resolveTargetArch(targetArch, crashKind);
+  let resolvedArch = resolveTargetArch(targetArch, crashKind);
+  if (!targetArch || targetArch.trim().toLowerCase() === 'auto') {
+    // Automatic decoding follows the selected ELF when its architecture is
+    // available. Printed-only captures do not identify architecture in the
+    // Backtrace syntax, so the ELF keeps them eligible for the right parser.
+    resolvedArch = await detectElfArch(elfPath, log) ?? resolvedArch;
+  }
 
   if (!toolPath) {
     const isEsp8266Crash = crashKind === 'xtensa'
@@ -466,7 +481,7 @@ export async function decodeCrash(
     const errMsg = err instanceof Error ? err.stack || err.message : String(err);
     write(`[ESP Decoder] decode failed: ${errMsg}`);
     const raw = createRawDecode(crashText);
-    
+    raw.decodeFailed = true;
     // Only set toolsMissing for actual tool access/execution errors
     if (isToolAccessError(err)) {
       raw.toolsMissing = true;
@@ -641,7 +656,16 @@ async function resolveCoredumpPath(
 
   const tmpDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'esp-coredump-'));
   const tmpPath = path.join(tmpDir, 'coredump.elf');
-  await fsPromises.writeFile(tmpPath, binary);
+  try {
+    await fsPromises.writeFile(tmpPath, binary);
+  } catch (writeError) {
+    try {
+      await fsPromises.rm(tmpDir, { recursive: true, force: true });
+    } catch {
+      // Keep the original write failure as the useful error.
+    }
+    throw writeError;
+  }
   write(`[ESP Decoder] Decoded b64 coredump to temp ELF: ${tmpPath} (${binary.length} bytes)`);
   return tmpPath;
 }
@@ -1491,9 +1515,9 @@ export function extractRiscvHeuristicCandidates(crashText: string): string[] {
   const backtraceAddresses = extractPrintedBacktraceAddrs(crashText, selectedCore)
     .filter(isCodeAddress)
     .map((address) => `0x${address.toString(16).padStart(8, '0')}`);
-  // Keep the first occurrence of each PC so repeated stack words do not use
-  // up the bounded address-resolution batch before distinct backtrace PCs.
-  return [...new Set([...stackAddresses, ...backtraceAddresses])];
+  // Printed PCs are authoritative and get the limited batch slots first.
+  // Deduplication preserves their order, then uses remaining slots for stack words.
+  return [...new Set([...backtraceAddresses, ...stackAddresses])];
 }
 
 /**
@@ -2118,75 +2142,75 @@ function createRawDecode(crashText: string): DecodedCrash {
         }
       }
     }
-    if (frames.length === 0) {
-    const lines = crashText.split(/\r\n?|\n/);
-    let inStackMemory = false;
-    let inEsp8266Stack = false;
-    let currentCore: number | undefined;
-    for (const line of lines) {
-      const trimmed = line.trim();
-      // Blank separator lines must not end an open 'Stack memory:' section —
-      // dumps can contain them between data rows.
-      if (trimmed === '') {
-        continue;
-      }
-      const dumpHeader = trimmed.match(/^Core\s+(\d+)\s+register dump:/i);
-      if (dumpHeader) {
-        currentCore = parseInt(dumpHeader[1], 10);
-        inStackMemory = false;
-        inEsp8266Stack = false;
-        continue;
-      }
-      // RISC-V "Stack memory:" format (values may be 0x-prefixed or bare hex)
-      if (/^Stack memory:/i.test(trimmed)) {
-        inStackMemory = true;
-        inEsp8266Stack = false;
-        continue;
-      }
-      // ESP8266 ">>>stack>>>" format (plain hex values)
-      if (/^>>>stack>>>/.test(trimmed)) {
-        inEsp8266Stack = true;
-        inStackMemory = false;
-        continue;
-      }
-      if (/^<<<stack<<</.test(trimmed)) {
-        inEsp8266Stack = false;
-        continue;
-      }
-      // Sectioned captures only contribute the selected core's rows.
-      const otherCore =
-        selectedCoreId !== undefined &&
-        currentCore !== undefined &&
-        currentCore !== selectedCoreId;
-      if (inStackMemory && !otherCore) {
-        const row = parseStackDataRow(trimmed);
-        if (row) {
-          for (const word of row.data) {
-            if (word >= 0x40000000 && word < 0x50000000) {
-              frames.push({
-                address: `0x${word.toString(16)}`,
-              });
-            }
-          }
-        } else {
+    if (frames.length === 0 && !riscv) {
+      const lines = crashText.split(/\r\n?|\n/);
+      let inStackMemory = false;
+      let inEsp8266Stack = false;
+      let currentCore: number | undefined;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        // Blank separator lines must not end an open 'Stack memory:' section —
+        // dumps can contain them between data rows.
+        if (trimmed === '') {
+          continue;
+        }
+        const dumpHeader = trimmed.match(/^Core\s+(\d+)\s+register dump:/i);
+        if (dumpHeader) {
+          currentCore = parseInt(dumpHeader[1], 10);
           inStackMemory = false;
+          inEsp8266Stack = false;
+          continue;
         }
-      }
-      if (inEsp8266Stack) {
-        // ESP8266 stack lines: "3ffffec0:  3ffee55c 3ffee55c 3ffee6dc 40201df1"
-        // Skip header lines (ctx:, sp:, end:, offset:)
-        const hexMatch = trimmed.match(/^([0-9a-fA-F]{8}):\s+((?:[0-9a-fA-F]{8}\s*)+)/);
-        if (hexMatch) {
-          const words = hexMatch[2].trim().split(/\s+/);
-          for (const word of words) {
-            const val = parseInt(word, 16);
-            if (val >= 0x40000000 && val < 0x50000000) {
-              frames.push({ address: `0x${val.toString(16).padStart(8, '0')}` });
+        // RISC-V "Stack memory:" format (values may be 0x-prefixed or bare hex)
+        if (/^Stack memory:/i.test(trimmed)) {
+          inStackMemory = true;
+          inEsp8266Stack = false;
+          continue;
+        }
+        // ESP8266 ">>>stack>>>" format (plain hex values)
+        if (/^>>>stack>>>/.test(trimmed)) {
+          inEsp8266Stack = true;
+          inStackMemory = false;
+          continue;
+        }
+        if (/^<<<stack<<</.test(trimmed)) {
+          inEsp8266Stack = false;
+          continue;
+        }
+        // Sectioned captures only contribute the selected core's rows.
+        const otherCore =
+          selectedCoreId !== undefined &&
+          currentCore !== undefined &&
+          currentCore !== selectedCoreId;
+        if (inStackMemory && !otherCore) {
+          const row = parseStackDataRow(trimmed);
+          if (row) {
+            for (const word of row.data) {
+              if (word >= 0x40000000 && word < 0x50000000) {
+                frames.push({
+                  address: `0x${word.toString(16)}`,
+                });
+              }
+            }
+          } else {
+            inStackMemory = false;
+          }
+        }
+        if (inEsp8266Stack) {
+          // ESP8266 stack lines: "3ffffec0:  3ffee55c 3ffee55c 3ffee6dc 40201df1"
+          // Skip header lines (ctx:, sp:, end:, offset:)
+          const hexMatch = trimmed.match(/^([0-9a-fA-F]{8}):\s+((?:[0-9a-fA-F]{8}\s*)+)/);
+          if (hexMatch) {
+            const words = hexMatch[2].trim().split(/\s+/);
+            for (const word of words) {
+              const val = parseInt(word, 16);
+              if (val >= 0x40000000 && val < 0x50000000) {
+                frames.push({ address: `0x${val.toString(16).padStart(8, '0')}` });
+              }
             }
           }
         }
       }
-    }
     }
   }
 

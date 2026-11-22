@@ -29,6 +29,7 @@ let sessionConfig: SessionConfig = {};
 // When true, file-watcher auto-detection must not overwrite the selection.
 let manualElfOverride = false;
 let pioAutoDetectRequest = 0;
+let elfArtifactRevision = 0;
 
 export function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('ESP Decoder');
@@ -254,18 +255,26 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     watcher.onDidCreate((uri) => {
+      if (!isSelectableFirmwareElf(uri.fsPath)) {
+        return;
+      }
+      const artifactRevision = ++elfArtifactRevision;
       if (isPlatformIoBuildElf(uri.fsPath)) {
-        autoDetectFromPio(uri.fsPath);
+        autoDetectFromPio(uri.fsPath, artifactRevision);
       } else if (isEspIdfBuildElf(uri.fsPath)) {
-        autoDetectFromEspIdf(uri.fsPath);
+        autoDetectFromEspIdf(uri.fsPath, artifactRevision);
       }
     });
 
     watcher.onDidChange((uri) => {
+      if (!isSelectableFirmwareElf(uri.fsPath)) {
+        return;
+      }
+      const artifactRevision = ++elfArtifactRevision;
       if (isPlatformIoBuildElf(uri.fsPath)) {
-        autoDetectFromPio(uri.fsPath);
+        autoDetectFromPio(uri.fsPath, artifactRevision);
       } else if (isEspIdfBuildElf(uri.fsPath)) {
-        autoDetectFromEspIdf(uri.fsPath);
+        autoDetectFromEspIdf(uri.fsPath, artifactRevision);
       }
     });
 
@@ -305,6 +314,13 @@ function isPlatformIoBuildElf(elfPath: string): boolean {
   return normalized.includes(`${path.sep}.pio${path.sep}build${path.sep}`);
 }
 
+function isSelectableFirmwareElf(elfPath: string): boolean {
+  const basename = elfPath.replace(/\\/g, '/').split('/').pop()?.toLowerCase();
+  return basename?.endsWith('.elf') === true &&
+    basename !== 'bootloader.elf' &&
+    basename !== 'partition-table.elf';
+}
+
 /**
  * Watch the resolved PlatformIO build directory when it is outside the default
  * .pio/build location. This covers PLATFORMIO_WORKSPACE_DIR, including paths
@@ -338,7 +354,12 @@ function watchPioBuildDirectory(context: vscode.ExtensionContext, workspaceFolde
         false,
         true
       );
-      const detectPioElf = (uri: vscode.Uri) => autoDetectFromPio(uri.fsPath);
+      const detectPioElf = (uri: vscode.Uri) => {
+        if (!isSelectableFirmwareElf(uri.fsPath)) {
+          return;
+        }
+        autoDetectFromPio(uri.fsPath, ++elfArtifactRevision);
+      };
       watcher.onDidCreate(detectPioElf);
       watcher.onDidChange(detectPioElf);
       context.subscriptions.push(watcher);
@@ -449,7 +470,12 @@ async function tryAutoDetectElf(): Promise<void> {
   }
 }
 
-function autoDetectFromPio(elfPath: string): void {
+function autoDetectFromPio(elfPath: string, artifactRevision = elfArtifactRevision): void {
+  // Filter ignored artifacts before advancing the request generation: a
+  // bootloader event must not cancel discovery for selectable firmware.
+  if (!isSelectableFirmwareElf(elfPath)) {
+    return;
+  }
   const config = vscode.workspace.getConfiguration('esp-decoder');
   if (manualElfOverride || config.get<string>('elfPath', '')) {
     return; // User has manually selected an ELF — do not overwrite
@@ -473,6 +499,7 @@ function autoDetectFromPio(elfPath: string): void {
             toolPath: configuredToolPath || matched.toolPath,
             targetArch: configuredTargetArch !== 'auto' ? configuredTargetArch : matched.targetArch,
             romElfPath: matched.romElfPath,
+            elfRevision: artifactRevision,
           };
           if (viewProvider) {
             viewProvider.updateConfig(sessionConfig);
@@ -486,7 +513,7 @@ function autoDetectFromPio(elfPath: string): void {
   }
 }
 
-function autoDetectFromEspIdf(elfPath: string): void {
+function autoDetectFromEspIdf(elfPath: string, artifactRevision = elfArtifactRevision): void {
   if (manualElfOverride || hasUserConfiguredSession()) {
     return;
   }
@@ -503,6 +530,7 @@ function autoDetectFromEspIdf(elfPath: string): void {
             toolPath: matched.toolPath,
             targetArch: matched.targetArch,
             romElfPath: undefined,
+            elfRevision: artifactRevision,
           };
           if (viewProvider) {
             viewProvider.updateConfig(sessionConfig);

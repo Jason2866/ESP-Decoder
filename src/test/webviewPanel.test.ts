@@ -267,6 +267,113 @@ describe('EspDecoderWebviewPanel – PR #42 file opening', () => {
     }
   });
 
+  it('invalidates cached panic decodes when the same ELF is rebuilt', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    internal.updateConfig({ elfPath: '/project/build/firmware.elf', elfRevision: 7 });
+    const event: crashDecoder.CrashEvent = {
+      id: 'crash-rebuilt-elf',
+      kind: 'riscv',
+      lines: ['panic'],
+      rawText: 'panic',
+      timestamp: 1,
+      decoded: { stacktrace: [], rawOutput: 'old artifact' },
+      decodedContext: {
+        captureText: 'panic',
+        captureKind: 'riscv',
+        elfPath: '/project/build/firmware.elf',
+        elfRevision: 7,
+      },
+    };
+    internal.crashEvents = [event];
+    const post = vi.spyOn(internal, 'postMessage').mockImplementation(() => {});
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockResolvedValue({
+      stacktrace: [],
+      rawOutput: 'new artifact',
+    });
+    try {
+      internal.updateConfig({ elfPath: '/project/build/firmware.elf', elfRevision: 8 });
+      await vi.waitFor(() => expect(event.decoded?.rawOutput).toBe('new artifact'));
+      expect(decodeSpy).toHaveBeenCalledOnce();
+      expect(event.decodedContext?.elfRevision).toBe(8);
+      expect(post).toHaveBeenCalledWith({ type: 'crashDecodeInvalidated', eventId: event.id });
+    } finally {
+      post.mockRestore();
+      decodeSpy.mockRestore();
+    }
+  });
+
+  it('does not send coredump cards through the panic decoder on config changes', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    const event: crashDecoder.CrashEvent = {
+      id: 'coredump-retained',
+      kind: 'unknown',
+      lines: ['Pasted base64 coredump'],
+      rawText: 'original coredump input',
+      timestamp: 1,
+      isCoredump: true,
+    };
+    internal.crashEvents = [event];
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockResolvedValue({
+      stacktrace: [],
+      rawOutput: 'wrong decoder',
+    });
+    try {
+      internal.updateConfig({ elfPath: '/fw/rebuilt.elf', elfRevision: 2 });
+      await Promise.resolve();
+      expect(decodeSpy).not.toHaveBeenCalled();
+      expect(event.rawText).toBe('original coredump input');
+    } finally {
+      decodeSpy.mockRestore();
+    }
+  });
+
+  it('bounds queued re-decodes and drops pending requests superseded by newer settings', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    internal.updateConfig({ elfPath: '/fw/old.elf' });
+    const events: crashDecoder.CrashEvent[] = Array.from({ length: 4 }, (_, index) => ({
+      id: `queued-crash-${index}`,
+      kind: 'riscv',
+      lines: ['panic'],
+      rawText: `panic ${index}`,
+      timestamp: index,
+    }));
+    internal.crashEvents = events;
+    let active = 0;
+    let peak = 0;
+    const pending: Array<() => void> = [];
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockImplementation(
+      (_event, elfPath) => new Promise((resolve) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        pending.push(() => {
+          active -= 1;
+          resolve({ stacktrace: [], rawOutput: elfPath });
+        });
+      }),
+    );
+    try {
+      for (const event of events) {
+        void internal.scheduleCrashDecodeEvent(event);
+      }
+      await vi.waitFor(() => expect(decodeSpy).toHaveBeenCalledTimes(2));
+      internal.updateConfig({ elfPath: '/fw/new.elf' });
+      pending.splice(0, 2).forEach((finish) => finish());
+
+      await vi.waitFor(() => expect(decodeSpy).toHaveBeenCalledTimes(4));
+      expect(decodeSpy.mock.calls.slice(2).every((call) => call[1] === '/fw/new.elf')).toBe(true);
+      pending.splice(0, 2).forEach((finish) => finish());
+      await vi.waitFor(() => expect(decodeSpy).toHaveBeenCalledTimes(6));
+      pending.splice(0, 2).forEach((finish) => finish());
+      await vi.waitFor(() => expect(active).toBe(0));
+      expect(peak).toBeLessThanOrEqual(2);
+    } finally {
+      decodeSpy.mockRestore();
+    }
+  });
+
   it('rejects provisioning when the serial connection changed after discovery', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internal = panel as any;
@@ -706,6 +813,12 @@ describe('webview crash source links', () => {
       const rendered = linkifyPaths('/home/user/My (Project)/src/main.cpp:42');
       expect(rendered.match(/data-file="([^"]+)"/)?.[1]).toBe(
         '/home/user/My (Project)/src/main.cpp',
+      );
+
+      const unicodePath = 'C:\\Users\\José\\project\\src\\main.cpp:42';
+      const unicodeRendered = linkifyPaths(unicodePath);
+      expect(unicodeRendered.match(/data-file="([^"]+)"/)?.[1]).toBe(
+        'C:\\Users\\José\\project\\src\\main.cpp',
       );
 
       const separateRoot = linkifyPaths('/old.log see /real/path.cpp:12');

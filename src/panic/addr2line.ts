@@ -325,27 +325,6 @@ class GDBSession {
   }
 }
 
-function buildAddr2LineAddrs(addrs: (number | AddrLine | undefined)[]): number[] {
-  const dedupedAddrs = new Set<number>();
-  for (const addr of addrs) {
-    let addrNumber: number | undefined;
-    if (typeof addr === 'object' && addr !== null) {
-      const a = addr.addr;
-      if (typeof a === 'string') {
-        addrNumber = parseInt(a, 16);
-      } else if (typeof a === 'number') {
-        addrNumber = a;
-      }
-    } else if (typeof addr === 'number') {
-      addrNumber = addr;
-    }
-    if (addrNumber !== undefined && !Number.isNaN(addrNumber) && !dedupedAddrs.has(addrNumber)) {
-      dedupedAddrs.add(addrNumber);
-    }
-  }
-  return Array.from(dedupedAddrs.values());
-}
-
 /**
  * Resolve addresses to source locations by driving GDB's `list`/`info line`
  * commands against the firmware ELF.
@@ -355,7 +334,15 @@ export async function addr2line(
   addrs: (number | AddrLine | undefined)[],
   options: DecodeOptions = {},
 ): Promise<(AddrLine | undefined)[]> {
-  const addresses = buildAddr2LineAddrs(addrs);
+  // Snapshot and normalize positional keys before the first await. Callers
+  // may mutate the array or its AddrLine objects while GDB is running.
+  const positionalKeys = addrs.map((value) => {
+    const addr = typeof value === 'object' && value !== null ? value.addr : value;
+    return typeof addr === 'string' ? parseInt(addr, 16) : addr;
+  });
+  const addresses = [...new Set(positionalKeys.filter(
+    (addr): addr is number => addr !== undefined && !Number.isNaN(addr),
+  ))];
   if (!addresses.length) {
     throw new Error('No register addresses found to decode');
   }
@@ -390,13 +377,11 @@ export async function addr2line(
     await session.close();
   }
 
-  return addrs.map((addrOrLine) => {
-    const addr = typeof addrOrLine === 'object' && addrOrLine !== null ? addrOrLine.addr : addrOrLine;
-    if (addr === undefined) {
+  return positionalKeys.map((addr) => {
+    if (addr === undefined || Number.isNaN(addr)) {
       return undefined;
     }
-    const numeric = typeof addr === 'string' ? parseInt(addr, 16) : addr;
-    return results.get(numeric);
+    return results.get(addr);
   });
 }
 

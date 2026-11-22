@@ -1,4 +1,5 @@
 import type { PanicInfoWithBacktrace, PanicInfoWithStackData } from './types';
+import { hasPrintedBacktracePair } from './printedBacktrace';
 
 type XtensaPanicInfo = Omit<PanicInfoWithBacktrace, 'backtraceAddrs'> & {
   backtraceAddrs: number[];
@@ -65,6 +66,8 @@ export interface RisvPanicParseResult {
   faultAddr?: number;
   /** Core named by the panic header ("Core N panic'ed"), if present. */
   panicCoreId?: number;
+  /** PC printed by abort() when the selected core has no MEPC. */
+  abortProgramCounter?: number;
 }
 
 const RISCV_REG_NAMES = new Set<string>(gdbRegsInfoRiscvIlp32);
@@ -114,6 +117,8 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
     input.match(/Core\s+(\d+)\s+panic/i) ??
     input.match(/abort\(\)\s+was\s+called\b.*?on\s+core\s+(\d+)/i);
   const panicCoreId = panicCoreMatch ? parseInt(panicCoreMatch[1], 10) : undefined;
+  const abortPcMatch = input.match(/abort\(\)\s+was\s+called\b.*?\bPC\s+(0x[0-9a-fA-F]+)/i);
+  const abortProgramCounter = abortPcMatch ? parseInt(abortPcMatch[1], 16) : undefined;
 
   for (const line of lines) {
     // Tolerate leading whitespace, matching the Xtensa parser and the
@@ -178,7 +183,7 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
     }
   }
 
-  return { regDumps, stackDump, programCounter, faultCode, faultAddr, panicCoreId };
+  return { regDumps, stackDump, programCounter, faultCode, faultAddr, panicCoreId, abortProgramCounter };
 }
 
 /**
@@ -249,7 +254,7 @@ function getStackAddrAndData(stackDump: StackDumpSegment[]): {
 function hasPrintedBacktrace(input: string): boolean {
   return input
     .split(/\r?\n|\r/)
-    .some((line) => /^\s*Backtrace:\s*0x[0-9a-fA-F]+\s*:\s*0x[0-9a-fA-F]+/i.test(line));
+    .some(hasPrintedBacktracePair);
 }
 
 export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
@@ -263,7 +268,7 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
     // the PCs remain available to decodeRiscv's printed-backtrace path.
     return {
       coreId: parsed.panicCoreId ?? 0,
-      programCounter: undefined,
+      programCounter: parsed.abortProgramCounter,
       faultAddr: undefined,
       faultCode: undefined,
       regs: {},
@@ -279,7 +284,7 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
     if (hasPrintedBacktrace(input)) {
       return {
         coreId: parsed.panicCoreId ?? 0,
-        programCounter: undefined,
+        programCounter: parsed.abortProgramCounter,
         faultAddr: undefined,
         faultCode: undefined,
         regs: {},
@@ -306,7 +311,7 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
 
   return {
     coreId,
-    programCounter: active.programCounter,
+    programCounter: active.programCounter ?? parsed.abortProgramCounter,
     faultAddr: active.faultAddr,
     faultCode: active.faultCode,
     regs,
@@ -330,7 +335,7 @@ export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrac
     // extractPrintedBacktraceAddrs.
     return {
       coreId: parsed.panicCoreId ?? 0,
-      programCounter: undefined,
+      programCounter: parsed.abortProgramCounter,
       faultCode: undefined,
       faultAddr: undefined,
       regs: {},
@@ -344,7 +349,7 @@ export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrac
     if (hasPrintedBacktrace(input)) {
       return {
         coreId: parsed.panicCoreId ?? 0,
-        programCounter: undefined,
+        programCounter: parsed.abortProgramCounter,
         faultCode: undefined,
         faultAddr: undefined,
         regs: {},
@@ -358,11 +363,13 @@ export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrac
   const { coreId, regs } = active;
   return {
     coreId,
-    programCounter: active.programCounter,
+    programCounter: active.programCounter ?? parsed.abortProgramCounter,
     faultCode: active.faultCode,
     faultAddr: active.faultAddr,
     regs,
-    backtraceAddrs: active.programCounter !== undefined ? [active.programCounter] : [],
+    backtraceAddrs: active.programCounter !== undefined
+      ? [active.programCounter]
+      : parsed.abortProgramCounter !== undefined ? [parsed.abortProgramCounter] : [],
   };
 }
 

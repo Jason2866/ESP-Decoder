@@ -1,4 +1,5 @@
 import { parseStackDataRow } from '../panicParse';
+import { hasPrintedBacktracePair } from '../printedBacktrace';
 
 export interface FramedCrashBlock {
   /**
@@ -295,7 +296,7 @@ function isCompleteBlock(lines: string[]): boolean {
       // Only a line-initial 'Backtrace:' record with at least one PC:SP pair
       // marks a complete dump — an assertion message merely mentioning the
       // marker does not.
-      /^Backtrace:\s*0x[0-9a-fA-F]+\s*:\s*0x[0-9a-fA-F]+/i.test(line) ||
+      hasPrintedBacktracePair(line) ||
       /^Rebooting\.\.\./i.test(line) ||
       /^ELF file SHA256:/i.test(line) ||
       line.startsWith('<<<stack<<<')

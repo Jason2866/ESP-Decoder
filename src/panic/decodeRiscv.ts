@@ -2,6 +2,7 @@ import { addr2line } from './addr2line';
 import { GdbMiClient, extractMiListContent, parseMiTupleList, stripMiList, type GdbMiOptions } from './gdbMi';
 import { parseLines } from './gdbLineParse';
 import { GdbStubServer } from './gdbStub';
+import { printedBacktraceAddresses } from './printedBacktrace';
 import {
   parseRiscvPanicOutput,
   toHexString,
@@ -328,12 +329,7 @@ export function extractPrintedBacktraceAddrs(input: string, coreId: number): num
     if (sawCoreHeader && currentCore !== coreId) {
       continue;
     }
-    for (const match of line.matchAll(/(0x[0-9a-fA-F]+)\s*:\s*0x[0-9a-fA-F]+/g)) {
-      const addr = parseInt(match[1], 16);
-      if (!Number.isNaN(addr)) {
-        addrs.push(addr);
-      }
-    }
+    addrs.push(...printedBacktraceAddresses(line));
   }
   return addrs;
 }

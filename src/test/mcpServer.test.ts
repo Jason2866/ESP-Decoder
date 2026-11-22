@@ -530,6 +530,31 @@ describe('MCP tools', () => {
     }
   });
 
+  it('retries a matching cached raw fallback marked decodeFailed', async () => {
+    const crash: CrashEvent = {
+      id: 'crash-failed-cache',
+      kind: 'xtensa',
+      lines: ['panic'],
+      rawText: 'panic',
+      timestamp: 1,
+      decodedContext: { captureText: 'panic', captureKind: 'xtensa', elfPath: '/fw/firmware.elf' },
+      decoded: { stacktrace: [], rawOutput: 'raw panic', decodeFailed: true },
+    };
+    const decoded = { stacktrace: [{ address: '0x40000001', function: 'resolved' }], rawOutput: '' };
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockResolvedValue(decoded);
+    const client = await connectClient(makeDeps({
+      data: makeDataSource([], [crash], '/fw/firmware.elf'),
+    }));
+
+    try {
+      const result = await callTool(client, 'decode_crash', { crash_id: crash.id });
+      expect(decodeSpy).toHaveBeenCalledOnce();
+      expect(result.frames).toEqual(decoded.stacktrace);
+    } finally {
+      decodeSpy.mockRestore();
+    }
+  });
+
   it('reports the context-change error when both failed decode attempts become stale', async () => {
     const crash: CrashEvent = {
       id: 'crash-stale-failures',

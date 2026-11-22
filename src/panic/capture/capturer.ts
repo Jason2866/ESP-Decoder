@@ -4,6 +4,7 @@ import {
   parseXtensaPanicOutput,
 } from '../panicParse';
 import { extractPrintedBacktraceAddrs } from '../decodeRiscv';
+import { hasPrintedBacktracePair } from '../printedBacktrace';
 import { CrashFramer, type FramedCrashBlock } from './framer';
 import { LineDecoder } from './lineDecoder';
 
@@ -53,6 +54,7 @@ interface EventAggregate {
   lastSeenAt: number;
   ra?: number;
   pc?: number;
+  faultCode?: number;
 }
 
 export interface CapturerOptions {
@@ -251,12 +253,16 @@ export class Capturer {
           if (agg.pc === undefined) {
             agg.pc = snap.lightweight.programCounter;
           }
+          if (agg.faultCode === undefined) {
+            agg.faultCode = snap.lightweight.faultCode;
+          }
         } else {
           this.eventAggregate.set(eventId, {
             firstSeenAt: snap.firstSeenAt,
             lastSeenAt: snap.lastSeenAt,
             ra: snap.lightweight.regs?.RA,
             pc: snap.lightweight.programCounter,
+            faultCode: snap.lightweight.faultCode,
           });
         }
         const fb = this.eventFallback.get(eventId);
@@ -601,6 +607,14 @@ export class Capturer {
     // still be growing and its truncated trace must not split the merge.
     const fallback = this.eventFallback.get(existing.id);
     const evidencePc = this.eventAggregate.get(existing.id)?.pc;
+    const evidenceFaultCode = this.eventAggregate.get(existing.id)?.faultCode;
+    if (
+      evidenceFaultCode !== undefined &&
+      candidate.lightweight.faultCode !== undefined &&
+      evidenceFaultCode !== candidate.lightweight.faultCode
+    ) {
+      return false;
+    }
     if (
       evidencePc !== undefined &&
       candidate.lightweight.programCounter !== undefined &&
@@ -1007,7 +1021,6 @@ function detectKind(lines: string[]): CapturerEventKind {
     return 'riscv';
   }
   const xtensaHints = [
-    /Backtrace:/i,
     /EXCCAUSE/i,
     /EXCVADDR/i,
     /Guru Meditation Error:/i,
@@ -1275,7 +1288,7 @@ function endsWithCompleteBacktracePair(text: string): boolean {
 
 function isCompletePendingCrashLine(text: string): boolean {
   return (
-    /^Backtrace:\s*0x[0-9a-fA-F]+\s*:\s*0x[0-9a-fA-F]+/i.test(text) ||
+    hasPrintedBacktracePair(text) ||
     /^[0-9a-fA-F]{4,}\s*:\s+(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,})(?:\s+(?:0x[0-9a-fA-F]+|[0-9a-fA-F]{4,}))*\s*$/.test(text) ||
     /^[A-Z][A-Z0-9/]*\s*:\s*0x[0-9a-fA-F]+/i.test(text) ||
     /^Stack memory:/i.test(text) ||

@@ -1,4 +1,5 @@
 import cp from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { AbortError } from './gdbStub';
 
 let clientSeq = 0;
@@ -83,6 +84,7 @@ export class GdbMiClient {
   private exitError: Error | undefined;
   private exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
   private closePromise: Promise<void> | undefined;
+  private closing = false;
   private handshakeResolve: (() => void) | null = null;
   private handshakeReject: ((err: Error) => void) | null = null;
 
@@ -179,8 +181,8 @@ export class GdbMiClient {
   }
 
   sendCommand(command: string): Promise<string> {
-    if (this.error) {
-      return Promise.reject(this.error);
+    if (this.error || this.closing) {
+      return Promise.reject(this.error ?? new Error('GDB client closed'));
     }
     this.log('send', command);
     return new Promise((resolve, reject) => {
@@ -313,14 +315,13 @@ export class GdbMiClient {
 
   close(): Promise<void> {
     this.log('close');
-    // Record the closed state so pending sendCommand() promises reject
-    // (kill() alone leaves cp.killed set, which skips fail() on exit) and
-    // later commands fail fast. fail() is idempotent.
-    this.fail(new Error('GDB client closed'));
+    // Reject new work immediately, but allow buffered output to settle any
+    // command already in flight before shutdown cleanup destroys the pipes.
+    this.closing = true;
     this.cp.stdin?.end();
-    // Repeated close() calls share one shutdown; an already-exited child
-    // resolves immediately without touching pipes or signals.
-    this.closePromise ??= this.shutdownChild();
+    this.closePromise ??= this.shutdownChild().finally(() => {
+      this.fail(new Error('GDB client closed'));
+    });
     return this.closePromise;
   }
 
@@ -330,20 +331,66 @@ export class GdbMiClient {
    * after a bounded timeout so no process or pipe is left behind.
    */
   private async shutdownChild(): Promise<void> {
-    // A failed spawn has no PID and never emits 'exit' — don't run the
-    // bounded waits for a child that never existed.
-    if (this.cp.pid === undefined) {
+    try {
+      // A failed spawn has no PID and never emits 'exit'.
+      if (this.cp.pid === undefined) {
+        return;
+      }
+      if (this.cp.exitCode !== null || this.cp.signalCode !== null) {
+        return;
+      }
+      this.cp.kill('SIGTERM');
+      if (await waitForChildExit(this.cp, SHUTDOWN_TIMEOUT_MS)) {
+        return;
+      }
+      this.cp.kill('SIGKILL');
+      await waitForChildExit(this.cp, SHUTDOWN_TIMEOUT_MS);
+    } finally {
+      // 'exit' can precede the final stdout/stderr data and stream 'close'.
+      // Drain both streams for a bounded interval before destroying handles.
+      await this.drainChildStreams(EXIT_DRAIN_TIMEOUT_MS);
+      this.cp.stdout?.destroy();
+      this.cp.stderr?.destroy();
+    }
+  }
+
+  private async drainChildStreams(timeoutMs: number): Promise<void> {
+    const streams = [this.cp.stdout, this.cp.stderr].filter(
+      (stream): stream is Readable =>
+        stream !== null && !stream.destroyed && !stream.readableEnded,
+    );
+    if (streams.length === 0) {
       return;
     }
-    if (this.cp.exitCode !== null || this.cp.signalCode !== null) {
-      return;
-    }
-    this.cp.kill('SIGTERM');
-    if (await waitForChildExit(this.cp, SHUTDOWN_TIMEOUT_MS)) {
-      return;
-    }
-    this.cp.kill('SIGKILL');
-    await waitForChildExit(this.cp, SHUTDOWN_TIMEOUT_MS);
+    await new Promise<void>((resolve) => {
+      const pending = new Set<Readable>(streams);
+      const handlers = new Map<Readable, () => void>();
+      let timer: ReturnType<typeof setTimeout>;
+      const onDone = (stream: Readable) => {
+        pending.delete(stream);
+        if (pending.size === 0) {
+          finish();
+        }
+      };
+      const finish = () => {
+        clearTimeout(timer);
+        for (const stream of streams) {
+          const handler = handlers.get(stream);
+          if (handler) {
+            stream.off('end', handler);
+            stream.off('close', handler);
+          }
+        }
+        resolve();
+      };
+      timer = setTimeout(finish, timeoutMs);
+      for (const stream of streams) {
+        const handler = () => onDone(stream);
+        handlers.set(stream, handler);
+        stream.once('end', handler);
+        stream.once('close', handler);
+      }
+    });
   }
 
   async drainHandshake(): Promise<void> {

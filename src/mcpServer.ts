@@ -254,6 +254,7 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
                 config.toolPath,
                 config.targetArch,
                 config.romElfPath,
+                config.elfRevision,
               )
             : undefined;
           const decoded = context !== undefined && hasCachedCrashDecode(e, context);
@@ -307,6 +308,7 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
           config.toolPath,
           config.targetArch,
           config.romElfPath,
+          config.elfRevision,
         );
         if (hasCachedCrashDecode(event, context)) {
           d = event.decoded;
@@ -339,6 +341,7 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
                 currentConfig.toolPath,
                 currentConfig.targetArch,
                 currentConfig.romElfPath,
+                currentConfig.elfRevision,
               )
             : undefined;
           if (currentContext && hasCachedCrashDecode(event, currentContext)) {
@@ -366,6 +369,7 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
                 currentConfig.toolPath,
                 currentConfig.targetArch,
                 currentConfig.romElfPath,
+                currentConfig.elfRevision,
               )
             : undefined;
           if (currentContext && hasCachedCrashDecode(event, currentContext)) {
