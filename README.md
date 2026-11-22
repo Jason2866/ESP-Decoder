@@ -1,6 +1,6 @@
 # ESP Crash Decoder — VS Code Extension
 
-Decode ESP32x/ESP8266 crash dumps directly from the serial port in VS Code.  
+Decode ESP32x/ESP8266 crash dumps directly from the serial port in VS Code.
 Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/items?itemName=pioarduino.pioarduino-ide) and
 [**Espressif IDF**](https://marketplace.visualstudio.com/items?itemName=espressif.esp-idf-extension).
 
@@ -146,7 +146,7 @@ npm run package   # Creates .vsix file
 ## Installing
 
 ```bash
-code --install-extension esp-decoder-0.30.0.vsix
+code --install-extension esp-decoder-0.40.0.vsix
 ```
 
 Or install from the Extensions sidebar: "Install from VSIX..."
