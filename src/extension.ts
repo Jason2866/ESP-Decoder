@@ -30,6 +30,7 @@ let sessionConfig: SessionConfig = {};
 let manualElfOverride = false;
 let pioAutoDetectRequest = 0;
 let elfArtifactRevision = 0;
+let committedAutoElfRevision = 0;
 
 export function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('ESP Decoder');
@@ -490,7 +491,7 @@ function autoDetectFromPio(elfPath: string, artifactRevision = elfArtifactRevisi
           return;
         }
         const matched = envs.find((env) => env.elfPath === elfPath);
-        if (matched) {
+        if (matched && artifactRevision >= committedAutoElfRevision) {
           const configuredToolPath = config.get<string>('toolPath', '');
           const configuredTargetArch = config.get<string>('targetArch', 'auto');
           sessionConfig = {
@@ -501,6 +502,7 @@ function autoDetectFromPio(elfPath: string, artifactRevision = elfArtifactRevisi
             romElfPath: matched.romElfPath,
             elfRevision: artifactRevision,
           };
+          committedAutoElfRevision = artifactRevision;
           if (viewProvider) {
             viewProvider.updateConfig(sessionConfig);
           }
@@ -523,7 +525,7 @@ function autoDetectFromEspIdf(elfPath: string, artifactRevision = elfArtifactRev
     findEspIdfBuilds(workspaceFolder)
       .then((builds) => {
         const matched = builds.find((build) => build.elfPath === elfPath);
-        if (matched) {
+        if (matched && artifactRevision >= committedAutoElfRevision) {
           sessionConfig = {
             ...sessionConfig,
             elfPath: matched.elfPath,
@@ -532,6 +534,7 @@ function autoDetectFromEspIdf(elfPath: string, artifactRevision = elfArtifactRev
             romElfPath: undefined,
             elfRevision: artifactRevision,
           };
+          committedAutoElfRevision = artifactRevision;
           if (viewProvider) {
             viewProvider.updateConfig(sessionConfig);
           }

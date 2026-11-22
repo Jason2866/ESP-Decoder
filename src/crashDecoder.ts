@@ -1045,6 +1045,7 @@ function convertDecodeResult(result: any, crashText: string): DecodedCrash {
     regs: regs && Object.keys(regs).length > 0 ? regs : undefined,
     allocInfo,
     rawOutput,
+    decodeFailed: decodeResult.decodeFailed,
   };
 }
 

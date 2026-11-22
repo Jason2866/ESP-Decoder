@@ -197,7 +197,7 @@ export class GdbMiClient {
    * with its command.
    */
   private pumpCommandQueue(): void {
-    if (this.commandInFlight || this.error || this.processExited) {
+    if (this.commandInFlight || this.error || this.processExited || this.closing) {
       return;
     }
     const executor = this.commandQueue[0];

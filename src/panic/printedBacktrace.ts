@@ -5,7 +5,7 @@ export function printedBacktraceAddresses(line: string): number[] {
     return [];
   }
   const addresses: number[] = [];
-  for (const pair of match[1].matchAll(/(?:^|\s)(0x[0-9a-fA-F]+)\s*:\s*0x[0-9a-fA-F]+(?=\s|$)/g)) {
+  for (const pair of match[1].matchAll(/(?:^|\s)(0x[0-9a-fA-F]{1,8})\s*:\s*0x[0-9a-fA-F]{1,8}(?=\s|$)/g)) {
     const address = parseInt(pair[1], 16);
     if (!Number.isNaN(address)) {
       addresses.push(address);

@@ -68,9 +68,35 @@ export interface RisvPanicParseResult {
   panicCoreId?: number;
   /** PC printed by abort() when the selected core has no MEPC. */
   abortProgramCounter?: number;
+  /** Core named on the same abort() line as abortProgramCounter. */
+  abortCoreId?: number;
 }
 
 const RISCV_REG_NAMES = new Set<string>(gdbRegsInfoRiscvIlp32);
+
+function parseAbortHeader(input: string): { coreId: number; programCounter: number } | undefined {
+  for (const line of input.split(/\r?\n|\r/)) {
+    if (!/abort\(\)\s+was\s+called\b/i.test(line)) {
+      continue;
+    }
+    const coreMatch = line.match(/\bon\s+core\s+(\d+)\b/i);
+    const pcMatch = line.match(/\bPC\s+(0x[0-9a-fA-F]+)\b/i);
+    if (coreMatch && pcMatch) {
+      return {
+        coreId: parseInt(coreMatch[1], 10),
+        programCounter: parseInt(pcMatch[1], 16),
+      };
+    }
+  }
+  return undefined;
+}
+
+function abortProgramCounterForCore(
+  parsed: Pick<RisvPanicParseResult, 'abortCoreId' | 'abortProgramCounter'>,
+  coreId: number,
+): number | undefined {
+  return parsed.abortCoreId === coreId ? parsed.abortProgramCounter : undefined;
+}
 
 /**
  * Whole-row validation for a 'Stack memory:' data row: '<hexaddr>: <word>
@@ -117,8 +143,9 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
     input.match(/Core\s+(\d+)\s+panic/i) ??
     input.match(/abort\(\)\s+was\s+called\b.*?on\s+core\s+(\d+)/i);
   const panicCoreId = panicCoreMatch ? parseInt(panicCoreMatch[1], 10) : undefined;
-  const abortPcMatch = input.match(/abort\(\)\s+was\s+called\b.*?\bPC\s+(0x[0-9a-fA-F]+)/i);
-  const abortProgramCounter = abortPcMatch ? parseInt(abortPcMatch[1], 16) : undefined;
+  const abortHeader = parseAbortHeader(input);
+  const abortProgramCounter = abortHeader?.programCounter;
+  const abortCoreId = abortHeader?.coreId;
 
   for (const line of lines) {
     // Tolerate leading whitespace, matching the Xtensa parser and the
@@ -165,7 +192,7 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
           currentRegDump.faultAddr = regAddr;
         }
       }
-      if (line.trim() === 'Stack memory:') {
+      if (/^\s*Stack memory:\s*$/i.test(line)) {
         inStackMemory = true;
       }
     } else if (inStackMemory && currentRegDump) {
@@ -183,7 +210,16 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
     }
   }
 
-  return { regDumps, stackDump, programCounter, faultCode, faultAddr, panicCoreId, abortProgramCounter };
+  return {
+    regDumps,
+    stackDump,
+    programCounter,
+    faultCode,
+    faultAddr,
+    panicCoreId,
+    abortProgramCounter,
+    abortCoreId,
+  };
 }
 
 /**
@@ -251,16 +287,30 @@ function getStackAddrAndData(stackDump: StackDumpSegment[]): {
  * least one PC:SP pair — the printed unwind some RISC-V targets emit
  * instead of a register/stack dump.
  */
-function hasPrintedBacktrace(input: string): boolean {
-  return input
-    .split(/\r?\n|\r/)
-    .some(hasPrintedBacktracePair);
+function hasPrintedBacktrace(input: string, coreId: number): boolean {
+  let currentCore: number | undefined;
+  let sawCoreHeader = false;
+  for (const line of input.split(/\r?\n|\r/)) {
+    const dumpMatch = line.match(/^\s*Core\s+(\d+)\s+register dump:/);
+    if (dumpMatch) {
+      currentCore = parseInt(dumpMatch[1], 10);
+      sawCoreHeader = true;
+      continue;
+    }
+    if (hasPrintedBacktracePair(line) && (!sawCoreHeader || currentCore === coreId)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
   const parsed = parseRiscvPanicDetailed(input);
   const { regDumps, stackDump } = parsed;
-  if (regDumps.length === 0 && !hasPrintedBacktrace(input)) {
+  const selectedCore = parsed.panicCoreId ?? regDumps[0]?.coreId ?? 0;
+  const hasBacktrace = hasPrintedBacktrace(input, selectedCore);
+  const fallbackAbortProgramCounter = abortProgramCounterForCore(parsed, selectedCore);
+  if (regDumps.length === 0 && !hasBacktrace) {
     throw new Error('No register dumps found');
   }
   if (regDumps.length === 0) {
@@ -268,7 +318,7 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
     // the PCs remain available to decodeRiscv's printed-backtrace path.
     return {
       coreId: parsed.panicCoreId ?? 0,
-      programCounter: parsed.abortProgramCounter,
+      programCounter: fallbackAbortProgramCounter,
       faultAddr: undefined,
       faultCode: undefined,
       regs: {},
@@ -281,10 +331,10 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
     // The named core has no register dump, but a printed 'Backtrace:' may
     // still carry its PCs — return them with empty registers/stack rather
     // than another core's data or a thrown parse.
-    if (hasPrintedBacktrace(input)) {
+    if (hasBacktrace) {
       return {
         coreId: parsed.panicCoreId ?? 0,
-        programCounter: parsed.abortProgramCounter,
+        programCounter: fallbackAbortProgramCounter,
         faultAddr: undefined,
         faultCode: undefined,
         regs: {},
@@ -308,10 +358,11 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
   // to avoid "Invalid base address" errors from non-contiguous segments.
   const filtered = stackDump.filter((seg) => seg.coreId === coreId);
   const { stackBaseAddr, stackData } = getStackAddrAndData(filtered);
+  const abortProgramCounter = abortProgramCounterForCore(parsed, coreId);
 
   return {
     coreId,
-    programCounter: active.programCounter ?? parsed.abortProgramCounter,
+    programCounter: active.programCounter ?? abortProgramCounter,
     faultAddr: active.faultAddr,
     faultCode: active.faultCode,
     regs,
@@ -327,7 +378,10 @@ export function parseRiscvPanicOutput(input: string): PanicInfoWithStackData {
 export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrace {
   const parsed = parseRiscvPanicDetailed(input);
   const { regDumps } = parsed;
-  if (regDumps.length === 0 && !hasPrintedBacktrace(input)) {
+  const selectedCore = parsed.panicCoreId ?? regDumps[0]?.coreId ?? 0;
+  const hasBacktrace = hasPrintedBacktrace(input, selectedCore);
+  const fallbackAbortProgramCounter = abortProgramCounterForCore(parsed, selectedCore);
+  if (regDumps.length === 0 && !hasBacktrace) {
     throw new Error('No register dumps found');
   }
   if (regDumps.length === 0) {
@@ -335,7 +389,7 @@ export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrac
     // extractPrintedBacktraceAddrs.
     return {
       coreId: parsed.panicCoreId ?? 0,
-      programCounter: parsed.abortProgramCounter,
+      programCounter: fallbackAbortProgramCounter,
       faultCode: undefined,
       faultAddr: undefined,
       regs: {},
@@ -346,10 +400,10 @@ export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrac
   if (!active) {
     // Same printed-only fallback as parseRiscvPanicOutput: the capturer
     // recovers the PCs via extractPrintedBacktraceAddrs.
-    if (hasPrintedBacktrace(input)) {
+    if (hasBacktrace) {
       return {
         coreId: parsed.panicCoreId ?? 0,
-        programCounter: parsed.abortProgramCounter,
+        programCounter: fallbackAbortProgramCounter,
         faultCode: undefined,
         faultAddr: undefined,
         regs: {},
@@ -361,15 +415,18 @@ export function parseRiscvPanicLightweight(input: string): PanicInfoWithBacktrac
     );
   }
   const { coreId, regs } = active;
+  const abortProgramCounter = abortProgramCounterForCore(parsed, coreId);
   return {
     coreId,
-    programCounter: active.programCounter ?? parsed.abortProgramCounter,
+    programCounter: active.programCounter ?? abortProgramCounter,
     faultCode: active.faultCode,
     faultAddr: active.faultAddr,
     regs,
     backtraceAddrs: active.programCounter !== undefined
       ? [active.programCounter]
-      : parsed.abortProgramCounter !== undefined ? [parsed.abortProgramCounter] : [],
+      : abortProgramCounter !== undefined
+        ? [abortProgramCounter]
+        : [],
   };
 }
 
@@ -450,8 +507,7 @@ export function parseESP32PanicOutput(input: string): XtensaPanicInfo {
     input.match(/Guru Meditation Error:\s*Core\s+(\d+)/i) ??
     input.match(/abort\(\)\s+was\s+called\b.*?on\s+core\s+(\d+)/i);
   const panicCoreId = coreIdMatch ? parseInt(coreIdMatch[1], 10) : undefined;
-  const abortPcMatch = input.match(/abort\(\)\s+was\s+called\b.*?\bPC\s+(0x[0-9a-fA-F]+)/i);
-  const abortProgramCounter = abortPcMatch ? parseInt(abortPcMatch[1], 16) : undefined;
+  const abortHeader = parseAbortHeader(input);
 
   interface CoreSection {
     regs: Record<string, number>;
@@ -524,6 +580,9 @@ export function parseESP32PanicOutput(input: string): XtensaPanicInfo {
   }
   const [coreId, { regs, backtraceAddrs }] =
     selected ?? [panicCoreId ?? 0, { regs: {}, backtraceAddrs: [] }];
+  const abortProgramCounter = abortHeader?.coreId === coreId
+    ? abortHeader.programCounter
+    : undefined;
 
   return {
     coreId,

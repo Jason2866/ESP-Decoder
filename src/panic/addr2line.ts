@@ -338,7 +338,13 @@ export async function addr2line(
   // may mutate the array or its AddrLine objects while GDB is running.
   const positionalKeys = addrs.map((value) => {
     const addr = typeof value === 'object' && value !== null ? value.addr : value;
-    return typeof addr === 'string' ? parseInt(addr, 16) : addr;
+    if (typeof addr !== 'string') {
+      return addr;
+    }
+    if (!/^(?:0x)?[0-9a-f]+$/i.test(addr)) {
+      return undefined;
+    }
+    return parseInt(addr.replace(/^0x/i, ''), 16);
   });
   const addresses = [...new Set(positionalKeys.filter(
     (addr): addr is number => addr !== undefined && !Number.isNaN(addr),

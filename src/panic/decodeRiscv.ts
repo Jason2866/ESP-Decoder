@@ -443,6 +443,7 @@ export async function decodeRiscv(
   // addr2line throws on an empty address list; a missing MEPC/MTVAL must not
   // discard the MI-unwound frames, so skip the lookup entirely then.
   const hasLookupAddrs = addr2lineAddrs.some((a) => a !== undefined);
+  let symbolLookupFailed = false;
   const miTask = usePrintedBacktrace
     ? Promise.resolve([] as (GDBLine | ParsedGDBLine)[])
     : fetchStacktraceWithMi(params, panicInfo, childOptions, log).catch(
@@ -467,6 +468,7 @@ export async function decodeRiscv(
           if (childOptions.signal?.aborted || isToolAccessError(err)) {
             throw err;
           }
+          symbolLookupFailed = true;
           log('addr2line resolution failed; using raw addresses', err);
           return [] as (AddrLine | undefined)[];
         })
@@ -502,7 +504,11 @@ export async function decodeRiscv(
       log('stacktrace line', index, line);
     });
 
-    return createDecodeResult(panicInfo, programCounter, faultAddr, stacktraceLines);
+    const result = createDecodeResult(panicInfo, programCounter, faultAddr, stacktraceLines);
+    if (symbolLookupFailed && countResolvedMiFrames(miLines) === 0) {
+      result.decodeFailed = true;
+    }
+    return result;
   } catch (err) {
     decodeAbort.abort();
     // Let the sibling settle so its GDB child processes exit cleanly.

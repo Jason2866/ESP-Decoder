@@ -62,6 +62,8 @@ export interface DecodeResult {
   stacktraceLines: (GDBLine | ParsedGDBLine)[];
   allocInfo?: AllocInfo;
   globals?: FrameVar[];
+  /** Retryable symbol resolution failure; raw addresses are still returned. */
+  decodeFailed?: boolean;
 }
 
 export interface DecodeParams {

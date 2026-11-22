@@ -14,6 +14,7 @@ import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'node:module';
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import cp from 'node:child_process';
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,7 @@ vi.mock('vscode', () => {
 import { CrashCapturer, decodeCrash, decodeCoredumpElf, decodeCoredumpBase64, containsBase64Coredump, extractRiscvHeuristicCandidates } from '../crashDecoder.js';
 import type { CrashEvent } from '../crashDecoder.js';
 import { getPioPackagesDir } from '../pioIntegration.js';
+import { printedBacktraceAddresses } from '../panic/printedBacktrace.js';
 import { countResolvedMiFrames, dedupeArgs } from '../panic/decodeRiscv.js';
 import {
   registerSets,
@@ -1498,6 +1500,25 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     expect(results.map((result) => result?.addr)).toEqual([0x40000000, 0x40000004, undefined]);
   }, 30_000);
 
+  it('leaves malformed hexadecimal address slots unresolved', async () => {
+    const results = await addr2line(
+      { elfPath: '/nonexistent/firmware.elf', toolPath: fakeGdbPath },
+      [
+        { addr: '0x40000000trailing', location: '0x40000000trailing' },
+        { addr: '40000004', location: '40000004' },
+        { addr: '0X40000008', location: '0X40000008' },
+        { addr: '0x', location: '0x' },
+      ],
+    );
+
+    expect(results.map((result) => result?.addr)).toEqual([
+      undefined,
+      0x40000004,
+      0x40000008,
+      undefined,
+    ]);
+  }, 30_000);
+
   it('keeps the requested address when info line resolves to a range start', async () => {
     const infoGdbPath = path.join(tmpDir, 'info-gdb.cjs');
     fs.writeFileSync(
@@ -2192,8 +2213,8 @@ describe('GdbMiClient – controlled exit event order', () => {
   interface FakeGdbChild extends EventEmitter {
     killed: boolean;
     kill(): void;
-    stdout: EventEmitter & { setEncoding(encoding: string): void };
-    stderr: EventEmitter & { setEncoding(encoding: string): void };
+    stdout: PassThrough;
+    stderr: PassThrough;
     stdin: EventEmitter & { write(chunk: string): boolean; end(): void };
   }
 
@@ -2203,21 +2224,19 @@ describe('GdbMiClient – controlled exit event order', () => {
     child.kill = () => {
       child.killed = true;
     };
-    const stdout = new EventEmitter() as FakeGdbChild['stdout'];
-    stdout.setEncoding = () => {};
-    const stderr = new EventEmitter() as FakeGdbChild['stderr'];
-    stderr.setEncoding = () => {};
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
     const stdin = new EventEmitter() as FakeGdbChild['stdin'];
     stdin.write = () => true;
     stdin.end = () => {};
     child.stdout = stdout;
     child.stderr = stderr;
     child.stdin = stdin;
-    return { child, stdout, stdin };
+    return { child, stdout, stderr, stdin };
   }
 
   it('settles the terminal command on post-exit stdout and rejects unanswered work', async () => {
-    const { child, stdout, stdin } = makeFakeChild();
+    const { child, stdout, stderr, stdin } = makeFakeChild();
     const written: string[] = [];
     stdin.write = (cmd: string) => {
       written.push(cmd);
@@ -2228,7 +2247,7 @@ describe('GdbMiClient – controlled exit event order', () => {
       spawnProcess: (() => child) as unknown as typeof cp.spawn,
     });
     try {
-      stdout.emit('data', 'Fake GNU gdb\n(gdb) ');
+      stdout.write('Fake GNU gdb\n(gdb) ');
       await client.drainHandshake();
 
       const terminal = client.sendCommand('-gdb-exit');
@@ -2240,7 +2259,7 @@ describe('GdbMiClient – controlled exit event order', () => {
       // Controlled order — 'exit' first, then the buffered '^exit' record
       // on stdout, then 'close'. No reliance on the write callback.
       child.emit('exit', 0, null);
-      stdout.emit('data', '^exit\n');
+      stdout.write('^exit\n');
       child.emit('close');
 
       await expect(terminal).resolves.toContain('^exit');
@@ -2248,7 +2267,42 @@ describe('GdbMiClient – controlled exit event order', () => {
       // The queued command was never dispatched to the dead child.
       expect(written).toEqual(['-gdb-exit\n']);
     } finally {
-      client.close();
+      stdout.end();
+      stderr.end();
+      await client.close();
+    }
+  });
+
+  it('does not dispatch queued work after close begins', async () => {
+    const { child, stdout, stderr, stdin } = makeFakeChild();
+    const written: string[] = [];
+    stdin.write = (cmd: string) => {
+      written.push(cmd);
+      return true;
+    };
+    const client = new GdbMiClient('fake-gdb', [], {
+      spawnProcess: (() => child) as unknown as typeof cp.spawn,
+    });
+    try {
+      stdout.write('Fake GNU gdb\n(gdb) ');
+      await client.drainHandshake();
+      const current = client.sendCommand('-current');
+      const queued = client.sendCommand('-queued');
+      const queuedAssertion = expect(queued).rejects.toThrow('GDB client closed');
+
+      const closing = client.close();
+      stdout.write('^done\n(gdb) ');
+      stdout.end();
+      stderr.end();
+
+      await expect(current).resolves.toContain('^done');
+      await closing;
+      await queuedAssertion;
+      expect(written).toEqual(['-current\n']);
+    } finally {
+      stdout.end();
+      stderr.end();
+      await client.close();
     }
   });
 });
@@ -2306,7 +2360,7 @@ describe('CrashFramer – provisional quiet flush', () => {
     expect(framer.isCompleteWithLine(
       'Backtrace: invalid0x40000001:0x3ffb0001 0x40000002:0x3ffb0002',
     )).toBe(true);
-    expect(framer.isCompleteWithLine('Backtrace: invalid token only')).toBe(false);
+    expect(framer.isCompleteWithLine('Backtrace: invalid0x40000001:0x3ffb0001')).toBe(false);
   });
 
   it('only recognizes a stack marker at the start of a trimmed line', () => {
@@ -2806,6 +2860,28 @@ describe('decodeCrash – raw fallback core isolation', () => {
     expect(decoded.stacktrace).toEqual([]);
     expect(decoded.rawOutput).toContain('Core  0 register dump:');
   });
+
+  it.skipIf(isWindows)('keeps printed raw frames and marks failed symbol lookup retryable', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-riscv-symbol-failure-'));
+    const fakeGdbPath = path.join(tempDir, 'riscv32-esp-elf-gdb');
+    fs.writeFileSync(fakeGdbPath, '#!/usr/bin/env node\nprocess.exit(0);\n', { mode: 0o755 });
+    try {
+      const event = makeEvent([
+        'Core 0 register dump:',
+        'MEPC: 0x42000001',
+        'Backtrace: 0x42000001:0x3fc80000 0x42000002:0x3fc80004',
+      ].join('\n'));
+      const decoded = await decodeCrash(event, ELF_PATH, fakeGdbPath, 'riscv');
+
+      expect(decoded.decodeFailed).toBe(true);
+      expect(decoded.stacktrace.map((frame) => frame.address)).toEqual([
+        '0x42000001',
+        '0x42000002',
+      ]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2932,6 +3008,16 @@ describe('parseESP32PanicOutput – abort header PC', () => {
     expect(parsed.programCounter).toBe(0x40081234);
   });
 
+  it('does not use an abort PC printed for a different core', () => {
+    const parsed = parseESP32PanicOutput([
+      'Guru Meditation Error: Core 1 panic\'ed (LoadProhibited).',
+      'abort() was called at PC 0x40081234 on core 0',
+      'Core 1 register dump:',
+      'EXCCAUSE: 0x0000001d',
+    ].join('\n'));
+    expect(parsed.programCounter).toBeUndefined();
+  });
+
   it('keeps the captured PC register ahead of the abort header PC', () => {
     const parsed = parseESP32PanicOutput([
       'abort() was called at PC 0x40081234 on core 1',
@@ -3008,6 +3094,47 @@ describe('parseRiscvPanicOutput – stack row gaps', () => {
     expect(info.stackBaseAddr).toBe(0x3fc8f2d0);
     expect(info.stackData.length).toBe(32);
   });
+
+  it('recognizes differently cased stack headers', () => {
+    const info = parseRiscvPanicOutput([
+      'Core 0 register dump:',
+      'MEPC : 0x42001000',
+      'sTaCk MeMoRy:',
+      '3fc80000: 0x42000001 0x00000000',
+      'Backtrace:',
+      'Stack memory:',
+      '3fc80008: 0x42000002 0x00000000',
+    ].join('\n'));
+
+    expect(info.stackData.length).toBe(8);
+    expect(info.stackData.readUInt32LE(0)).toBe(0x42000001);
+  });
+
+  it('admits printed backtraces only for the selected core, including pre-header rows', () => {
+    const wrongCore = [
+      'Core 1 panic',
+      'Core 0 register dump:',
+      'Backtrace: 0x42000001:0x3fc80000',
+    ].join('\n');
+    expect(() => parseRiscvPanicOutput(wrongCore)).toThrow('No register dump found for panicking core 1');
+
+    const beforeHeader = [
+      'Core 1 panic',
+      'Backtrace: 0x42000001:0x3fc80000',
+      'Core 0 register dump:',
+      'MEPC: 0x42000002',
+    ].join('\n');
+    expect(parseRiscvPanicOutput(beforeHeader).coreId).toBe(1);
+  });
+});
+
+describe('printedBacktraceAddresses', () => {
+  it('rejects PC or SP tokens wider than eight hexadecimal digits', () => {
+    expect(printedBacktraceAddresses(
+      'Backtrace: 0x123456789:0x3ffb0001 0x40000001:0x3ffb000123 0x40000002:0x3ffb0002',
+    )).toEqual([0x40000002]);
+    expect(printedBacktraceAddresses('Backtrace: 0x123456789:0x3ffb0001')).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3082,6 +3209,19 @@ describe('abort core extraction', () => {
     const text = 'abort() was called at PC 0x42001234 on core 1\nCore 1 register dump:\nMEPC: 0x42001234';
     const parsed = parseRiscvPanicDetailed(text);
     expect(parsed.panicCoreId).toBe(1);
+  });
+
+  it('uses the abort PC only when its core matches the selected RISC-V core', () => {
+    const text = [
+      'Core 1 panic',
+      'abort() was called at PC 0x42001234 on core 0',
+      'Core 1 register dump:',
+      'MCAUSE: 0x00000002',
+    ].join('\n');
+    expect(parseRiscvPanicOutput(text).programCounter).toBeUndefined();
+    const lightweight = parseRiscvPanicLightweight(text);
+    expect(lightweight.programCounter).toBeUndefined();
+    expect(lightweight.backtraceAddrs).toEqual([]);
   });
 });
 
