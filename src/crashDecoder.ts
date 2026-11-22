@@ -1482,10 +1482,18 @@ async function enhanceWithHeuristicStackFrames(
         if ((!existing.function || existing.function === '??') && f.function && f.function !== '??') {
           existing.function = f.function;
         }
-        if ((!existing.file || existing.file === '??') && f.file && f.file !== '??') {
+        const hasExistingFile = !!existing.file && existing.file !== '??';
+        const hasHeuristicLocation = !!f.file && f.file !== '??' && !!f.line && f.line !== '??';
+        if (!hasExistingFile && hasHeuristicLocation) {
           existing.file = f.file;
-        }
-        if ((!existing.line || existing.line === '??') && f.line && f.line !== '??') {
+          existing.line = f.line;
+        } else if (
+          hasExistingFile &&
+          (!existing.line || existing.line === '??') &&
+          f.file === existing.file &&
+          f.line &&
+          f.line !== '??'
+        ) {
           existing.line = f.line;
         }
       } else {

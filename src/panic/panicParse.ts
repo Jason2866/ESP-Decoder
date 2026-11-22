@@ -73,6 +73,7 @@ export interface RisvPanicParseResult {
 }
 
 const RISCV_REG_NAMES = new Set<string>(gdbRegsInfoRiscvIlp32);
+const RISCV_DIAGNOSTIC_REG_NAMES = new Set(['MSTATUS', 'MTVEC', 'MHARTID']);
 
 function parseAbortHeader(input: string): { coreId: number; programCounter: number } | undefined {
   for (const line of input.split(/\r?\n|\r/)) {
@@ -177,7 +178,7 @@ export function parseRiscvPanicDetailed(input: string): RisvPanicParseResult {
         if (Number.isNaN(regAddr)) {
           continue;
         }
-        if (RISCV_REG_NAMES.has(regName)) {
+        if (RISCV_REG_NAMES.has(regName) || RISCV_DIAGNOSTIC_REG_NAMES.has(regName)) {
           // Record the register even when its value is 0 (e.g. X0 is always 0).
           currentRegDump.regs[regName] = regAddr;
           if (regName === 'MEPC') {

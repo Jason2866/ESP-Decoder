@@ -522,8 +522,12 @@ function autoDetectFromEspIdf(elfPath: string, artifactRevision = elfArtifactRev
 
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceFolder) {
+    const request = pioAutoDetectRequest;
     findEspIdfBuilds(workspaceFolder)
       .then((builds) => {
+        if (request !== pioAutoDetectRequest || manualElfOverride || hasUserConfiguredSession()) {
+          return;
+        }
         const matched = builds.find((build) => build.elfPath === elfPath);
         if (matched && artifactRevision >= committedAutoElfRevision) {
           sessionConfig = {

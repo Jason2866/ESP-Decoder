@@ -497,7 +497,8 @@ export async function decodeRiscv(
     log('addr2line done', { programCounter, faultAddr });
     const resolvedMiFrameCount = countResolvedMiFrames(miLines);
     const stacktraceLines =
-      !usePrintedBacktrace && resolvedMiFrameCount >= printedBacktrace.length
+      (symbolLookupFailed && resolvedMiFrameCount > 0) ||
+      (!usePrintedBacktrace && resolvedMiFrameCount >= printedBacktrace.length)
         ? miLines
         : printedLines;
     stacktraceLines.forEach((line, index) => {

@@ -31,6 +31,10 @@ export class GdbStubServer {
   /** Synchronous startup reservation: concurrent start() calls must not
    * both pass the tempDir check while mkdtemp is in flight. */
   private starting = false;
+  /** A close during setup prevents the remote spec from being published. */
+  private closeRequested = false;
+  private setupCompletion?: Promise<void>;
+  private closePromise?: Promise<void>;
   private abortSignal?: AbortSignal;
   private abortHandler?: () => void;
 
@@ -44,13 +48,18 @@ export class GdbStubServer {
    * `-target-select remote <remoteSpec>` (e.g. `|node stub.js info.json`).
    */
   async start(signal?: AbortSignal): Promise<{ remoteSpec: string }> {
-    if (this.tempDir || this.starting) {
+    if (this.tempDir || this.starting || this.closeRequested || this.closePromise) {
       throw new Error('Server already started');
     }
     if (signal?.aborted) {
       throw new AbortError();
     }
     this.starting = true;
+    let finishSetup!: () => void;
+    const setupCompletion = new Promise<void>((resolve) => {
+      finishSetup = resolve;
+    });
+    this.setupCompletion = setupCompletion;
     // The directory stays local until setup succeeds; this.tempDir is only
     // assigned on success so a failed start leaves no half-initialized
     // state and close() cannot delete a directory it does not own yet.
@@ -76,9 +85,12 @@ export class GdbStubServer {
 
       // The abort listener may have fired during the async setup above;
       // do not hand out a remote spec for a cancelled decode.
-      if (cancelled || signal?.aborted) {
+      if (cancelled || signal?.aborted || this.closeRequested) {
         signal?.removeEventListener('abort', onSetupAbort);
-        throw new AbortError();
+        if (cancelled || signal?.aborted) {
+          throw new AbortError();
+        }
+        throw new Error('Server closed during startup');
       }
 
       const scriptPath = path.join(__dirname, 'gdbStubMain.js');
@@ -112,6 +124,10 @@ export class GdbStubServer {
       throw err;
     } finally {
       this.starting = false;
+      if (this.setupCompletion === setupCompletion) {
+        this.setupCompletion = undefined;
+      }
+      finishSetup();
     }
   }
 
@@ -126,12 +142,30 @@ export class GdbStubServer {
     return `|ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} ${shellQuote(scriptPath)} ${shellQuote(infoPath)}`;
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closePromise) {
+      return this.closePromise;
+    }
+    const closePromise = this.closeInternal();
+    this.closePromise = closePromise;
+    return closePromise.finally(() => {
+      if (this.closePromise === closePromise) {
+        this.closePromise = undefined;
+      }
+      this.closeRequested = false;
+    });
+  }
+
+  private async closeInternal(): Promise<void> {
     // Repeated/concurrent calls await the same in-flight removal rather
     // than returning early while the directory is still being deleted.
     if (this.cleanupPromise) {
       await this.cleanupPromise;
       return;
+    }
+    if (this.starting) {
+      this.closeRequested = true;
+      await this.setupCompletion;
     }
     const dir = this.tempDir;
     this.tempDir = undefined;

@@ -201,6 +201,60 @@ describe('EspDecoderWebviewPanel – PR #42 file opening', () => {
     expect(editorPost).toHaveBeenCalledWith({ type: 'clear' });
   });
 
+  it('refreshes the last-seen time without clearing a decode for an unchanged crash', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    const decoded = { stacktrace: [], rawOutput: 'cached result' };
+    const event: crashDecoder.CrashEvent = {
+      id: 'crash-seen-again',
+      kind: 'riscv',
+      lines: ['panic'],
+      rawText: 'same crash text',
+      timestamp: 100,
+      decoded,
+    };
+    internal.crashEvents = [event];
+    const post = vi.spyOn(internal, 'postMessage').mockImplementation(() => {});
+
+    internal.crashCapturer._onCrashUpdated.fire({ ...event, timestamp: 200 });
+
+    expect(event.timestamp).toBe(200);
+    expect(event.decoded).toBe(decoded);
+    expect(post).toHaveBeenCalledWith({
+      type: 'crashSeen',
+      eventId: event.id,
+      timestamp: 200,
+    });
+    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'crashUpdated' }));
+  });
+
+  it('reports a disconnect-flushed crash but does not start its queued decode after disposal', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    internal.config = { elfPath: '/fw/firmware.elf' };
+    internal.activeCrashDecodes = 2;
+    const post = vi.spyOn(internal, 'postMessage').mockImplementation(() => {});
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockResolvedValue({
+      stacktrace: [],
+      rawOutput: 'unexpected decode',
+    });
+
+    internal.crashCapturer.pushData(Buffer.from([
+      'assert failed: disconnect crash',
+      'Backtrace: 0x42000001:0x3fc80000',
+      '',
+    ].join('\n')));
+    internal.cancelSerialFlush();
+    expect(internal.crashEvents).toHaveLength(1);
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: 'crashDetected' }));
+    expect(internal.pendingCrashDecodes.size).toBe(1);
+
+    internal.dispose();
+
+    expect(internal.pendingCrashDecodes.size).toBe(0);
+    expect(decodeSpy).not.toHaveBeenCalled();
+  });
+
   it('restarts an auto-decode when settings change before it completes', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internal = panel as any;
@@ -211,8 +265,8 @@ describe('EspDecoderWebviewPanel – PR #42 file opening', () => {
       rawText: 'panic',
       timestamp: 1,
     };
-    internal.crashEvents = [event];
     internal.updateConfig({ elfPath: '/fw/elf-a.elf' });
+    internal.crashEvents = [event];
 
     const pending = new Map<string, (value: { stacktrace: []; rawOutput: string }) => void>();
     const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockImplementation(

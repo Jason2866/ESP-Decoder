@@ -325,7 +325,8 @@ function isFinalizableBlock(lines: string[]): boolean {
         trimmed.startsWith('>>>stack>>>') ||
         /^Stack memory:/i.test(trimmed) ||
         isStackDataRow(trimmed) ||
-        /^[A-Z][A-Z0-9/]*\s*:\s*0x[0-9a-fA-F]+/.test(trimmed)
+        /^[A-Z][A-Z0-9/]*\s*:\s*0x[0-9a-fA-F]+/.test(trimmed) ||
+        /^epc\d+\s*=\s*0x[0-9a-fA-F]+/i.test(trimmed)
       );
     })
   );

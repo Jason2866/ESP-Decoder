@@ -42,6 +42,21 @@ export interface McpServerDeps {
 const READ_SERIAL_DEFAULT_LINES = 200;
 const READ_SERIAL_MAX_LINES = 1000;
 
+function createEventDecodeContext(event: CrashEvent, config: SessionConfig) {
+  if (!config.elfPath) {
+    return undefined;
+  }
+  return createCrashDecodeContext(
+    event.rawText,
+    event.kind,
+    config.elfPath,
+    config.toolPath,
+    config.targetArch,
+    config.romElfPath,
+    config.elfRevision,
+  );
+}
+
 /** Strip ANSI escape sequences (CSI and OSC) so the LLM sees plain text. */
 function stripAnsi(line: string): string {
   return line.replace(/\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)?)/g, '');
@@ -246,17 +261,7 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
       const config = data.getSessionConfig();
       return jsonResult({
         crashes: data.getCrashEvents().map((e) => {
-          const context = config.elfPath
-            ? createCrashDecodeContext(
-                e.rawText,
-                e.kind,
-                config.elfPath,
-                config.toolPath,
-                config.targetArch,
-                config.romElfPath,
-                config.elfRevision,
-              )
-            : undefined;
+          const context = createEventDecodeContext(e, config);
           const decoded = context !== undefined && hasCachedCrashDecode(e, context);
           return {
             id: e.id,
@@ -296,20 +301,12 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
           throw missingCrash();
         }
         const config = data.getSessionConfig();
-        if (!config.elfPath) {
+        const context = createEventDecodeContext(event, config);
+        if (!context) {
           throw new Error(
             'No ELF file configured — build the project (so it can be auto-detected) or run "ESP Decoder: Select ELF File"'
           );
         }
-        const context = createCrashDecodeContext(
-          event.rawText,
-          event.kind,
-          config.elfPath,
-          config.toolPath,
-          config.targetArch,
-          config.romElfPath,
-          config.elfRevision,
-        );
         if (hasCachedCrashDecode(event, context)) {
           d = event.decoded;
           break;
@@ -333,17 +330,7 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
             throw missingCrash();
           }
           const currentConfig = data.getSessionConfig();
-          const currentContext = currentConfig.elfPath
-            ? createCrashDecodeContext(
-                event.rawText,
-                event.kind,
-                currentConfig.elfPath,
-                currentConfig.toolPath,
-                currentConfig.targetArch,
-                currentConfig.romElfPath,
-                currentConfig.elfRevision,
-              )
-            : undefined;
+          const currentContext = createEventDecodeContext(event, currentConfig);
           if (currentContext && hasCachedCrashDecode(event, currentContext)) {
             // A concurrent panel or MCP decode won with matching inputs.
             d = event.decoded;
@@ -361,17 +348,7 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
             throw missingCrash();
           }
           const currentConfig = data.getSessionConfig();
-          const currentContext = currentConfig.elfPath
-            ? createCrashDecodeContext(
-                event.rawText,
-                event.kind,
-                currentConfig.elfPath,
-                currentConfig.toolPath,
-                currentConfig.targetArch,
-                currentConfig.romElfPath,
-                currentConfig.elfRevision,
-              )
-            : undefined;
+          const currentContext = createEventDecodeContext(event, currentConfig);
           if (currentContext && hasCachedCrashDecode(event, currentContext)) {
             d = event.decoded;
           } else if (currentContext && sameCrashDecodeContext(context, currentContext)) {

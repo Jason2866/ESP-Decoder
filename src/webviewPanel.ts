@@ -42,6 +42,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     resolve: () => void;
   }>();
   private activeCrashDecodes = 0;
+  private disposed = false;
   private static readonly MAX_CONCURRENT_CRASH_DECODES = 2;
   private lineBuffer = '';
   private config: SessionConfig = {};
@@ -174,8 +175,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     this.disposables.push(
       this.crashCapturer.onCrashUpdated(async (event) => {
         const existing = this.crashEvents.find((e) => e.id === event.id);
-        if (!existing || existing.rawText === event.rawText) {
-          // Unknown id, or only the occurrence count changed — nothing to refresh.
+        if (!existing) {
+          return;
+        }
+        if (existing.rawText === event.rawText && existing.kind === event.kind) {
+          existing.timestamp = event.timestamp;
+          this.postMessage({ type: 'crashSeen', eventId: event.id, timestamp: event.timestamp });
           return;
         }
         existing.kind = event.kind;
@@ -241,7 +246,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   }
 
   private scheduleCrashDecodeEvent(event: CrashEvent): Promise<void> {
-    if (event.isCoredump) {
+    if (this.disposed || event.isCoredump) {
       return Promise.resolve();
     }
     const rev = this.nextCrashDecodeRevision(event.id);
@@ -257,6 +262,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
   private pumpCrashDecodeQueue(): void {
     while (
+      !this.disposed &&
       this.activeCrashDecodes < EspDecoderWebviewPanel.MAX_CONCURRENT_CRASH_DECODES &&
       this.pendingCrashDecodes.size > 0
     ) {
@@ -282,7 +288,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     event: CrashEvent,
     rev = this.nextCrashDecodeRevision(event.id),
   ): Promise<void> {
-    if (event.isCoredump) {
+    if (this.disposed || event.isCoredump) {
       return;
     }
     if (this.config.elfPath) {
@@ -305,7 +311,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           context.romElfPath,
           this.addr2linePool
         );
-        if (!this.isCurrentCrashDecode(event.id, rev)) {
+        if (this.disposed || !this.isCurrentCrashDecode(event.id, rev)) {
           return;
         }
         if (this.retryCrashDecodeIfContextChanged(event.id, context)) {
@@ -323,7 +329,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           );
         }
       } catch (err) {
-        if (!this.isCurrentCrashDecode(event.id, rev)) {
+        if (this.disposed || !this.isCurrentCrashDecode(event.id, rev)) {
           return;
         }
         if (this.retryCrashDecodeIfContextChanged(event.id, context)) {
@@ -933,7 +939,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       }
       case 'decodeCrash': {
         const event = this.crashEvents.find((e) => e.id === message.eventId);
-        if (event && !event.isCoredump && this.config.elfPath) {
+        if (!this.disposed && event && !event.isCoredump && this.config.elfPath) {
           const rev = this.nextCrashDecodeRevision(event.id);
           const context = createCrashDecodeContext(
             event.rawText,
@@ -954,7 +960,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
               context.romElfPath,
               this.addr2linePool
             );
-            if (!this.isCurrentCrashDecode(event.id, rev)) {
+            if (this.disposed || !this.isCurrentCrashDecode(event.id, rev)) {
               break;
             }
             if (this.retryCrashDecodeIfContextChanged(event.id, context)) {
@@ -972,7 +978,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
               );
             }
           } catch (err) {
-            if (!this.isCurrentCrashDecode(event.id, rev)) {
+            if (this.disposed || !this.isCurrentCrashDecode(event.id, rev)) {
               break;
             }
             if (this.retryCrashDecodeIfContextChanged(event.id, context)) {
@@ -1489,6 +1495,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   }
 
   public dispose(): void {
+    this.disposed = true;
     for (const request of this.pendingCrashDecodes.values()) {
       request.resolve();
     }
@@ -3193,6 +3200,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         case 'crashUpdated':
           updateCrashEvent(msg.event);
           break;
+        case 'crashSeen': {
+          const timeEl = document.querySelector('#crash-' + msg.eventId + ' .crash-time');
+          if (timeEl) {
+            timeEl.textContent = new Date(msg.timestamp).toLocaleTimeString();
+          }
+          break;
+        }
         case 'crashRemoved':
           removeCrashEvent(msg.eventId);
           break;

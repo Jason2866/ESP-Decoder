@@ -55,6 +55,7 @@ import type { CrashEvent } from '../crashDecoder.js';
 import { getPioPackagesDir } from '../pioIntegration.js';
 import { printedBacktraceAddresses } from '../panic/printedBacktrace.js';
 import { countResolvedMiFrames, dedupeArgs } from '../panic/decodeRiscv.js';
+import { GdbStubServer } from '../panic/gdbStub.js';
 import {
   registerSets,
   gdbRegsInfoRiscvIlp32,
@@ -1240,7 +1241,7 @@ describe('parseRiscvPanicDetailed – multi-core dumps', () => {
       '',
       'Core  0 register dump:',
       'MEPC    : 0x42000001  RA      : 0x42000002  SP      : 0x3fc80000  GP      : 0x3fc80001',
-      'MCAUSE  : 0x00000007  MTVAL   : 0x3fc80002  MHARTID : 0x00000000',
+      'MCAUSE  : 0x00000007  MTVAL   : 0x3fc80002  MHARTID : 0x00000000 MSTATUS : 0x00000008 MTVEC : 0x42001000',
       '',
       'Stack memory:',
       '3fc80000: 0x00000000 0x00000000 0x00000000 0x00000000',
@@ -1256,6 +1257,9 @@ describe('parseRiscvPanicDetailed – multi-core dumps', () => {
     const result = parseRiscvPanicDetailed(text);
     expect(result.regDumps).toHaveLength(2);
     expect(result.regDumps[0].regs.MEPC).toBe(0x42000001);
+    expect(result.regDumps[0].regs.MHARTID).toBe(0);
+    expect(result.regDumps[0].regs.MSTATUS).toBe(8);
+    expect(result.regDumps[0].regs.MTVEC).toBe(0x42001000);
     // Core 1's registers must be parsed even though core 0 ended in
     // stack-memory mode.
     expect(result.regDumps[1].regs.MEPC).toBe(0x42100001);
@@ -1426,15 +1430,18 @@ describe('LineDecoder', () => {
 describe.skipIf(isWindows)('addr2line – prompt boundary', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-a2l-'));
   const fakeGdbPath = path.join(tmpDir, 'fake-gdb.cjs');
+  const embeddedPromptMarker = path.join(tmpDir, 'embedded-prompt-written');
 
   // Fake interactive GDB: emits a '(gdb) ' prompt after each command. Each
-  // `list` response embeds a standalone '(gdb)' token mid-output, emitted
-  // as a separate stdout event on the next tick so it really lands on a
-  // transport chunk boundary. Each lookup gets a distinct location so the
-  // test proves the second command still received its own response.
+  // `list` response first writes an embedded prompt token without a leading
+  // line break, then delays the real prompt so the reader must keep waiting.
+  // Each lookup gets a distinct location so the test proves the second
+  // command still received its own response.
   fs.writeFileSync(
     fakeGdbPath,
     `#!/usr/bin/env node
+const fs = require('fs');
+const marker = ${JSON.stringify(embeddedPromptMarker)};
 const readline = require('readline');
 process.stdout.write('Fake GNU gdb\\n(gdb) ');
 readline.createInterface({ input: process.stdin }).on('line', (line) => {
@@ -1443,10 +1450,11 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     const num = parseInt(addr.replace('*', ''), 16);
     const file = '/src/main-' + num.toString(16) + '.c';
     const lineNo = (num & 0xff) + 1;
-    process.stdout.write('note: token (gdb)', () => {
-      setImmediate(() => {
-        process.stdout.write(' appears mid-output\\n' + addr + ' is at ' + file + ':' + lineNo + '\\n(gdb) ');
-      });
+    process.stdout.write('note: token (gdb) ', () => {
+      fs.writeFileSync(marker, 'sent');
+      setTimeout(() => {
+        process.stdout.write('appears mid-output\\n' + addr + ' is at ' + file + ':' + lineNo + '\\n(gdb) ');
+      }, 100);
     });
   } else {
     process.stdout.write('OK\\n(gdb) ');
@@ -1461,12 +1469,17 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   });
 
   it('does not terminate the response at a (gdb) token inside list output', async () => {
-    // Two lookups: the second must still receive its own response after
-    // the first one's embedded '(gdb)' token failed to fake a boundary.
-    const results = await addr2line(
+    fs.rmSync(embeddedPromptMarker, { force: true });
+    const pendingResults = addr2line(
       { elfPath: '/nonexistent/firmware.elf', toolPath: fakeGdbPath },
       [0x40000000, 0x40000004],
     );
+    await vi.waitFor(() => expect(fs.existsSync(embeddedPromptMarker)).toBe(true));
+    let settled = false;
+    void pendingResults.then(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+    const results = await pendingResults;
 
     expect(results).toHaveLength(2);
     // Each lookup resolved to its own distinct location — proving the
@@ -1716,19 +1729,21 @@ describe('Capturer – block revisions', () => {
 
     const first =
       "Core 0 panic'ed (Store access fault).\n" +
+      'Stack memory:\n' +
+      '3fc80000: 0x00000000 0x00000000\n' +
       'Core 0 register dump:\n' +
-      'MEPC : 0x42000001\n' +
-      'Backtrace: 0x42000001:0x3fc80000\n';
+      'MCAUSE : 0x00000007\n';
     capturer.push(Buffer.from(first, 'utf8'));
     capturer.flush();
     const finalizedId = capturer.getEvents()[0].id;
 
-    // The repeat initially looks like Xtensa because its RISC-V register row
-    // has not arrived yet, so it remains a provisional event of its own.
+    // The repeat initially has no architecture-specific register evidence,
+    // so it remains a provisional event until its selected-core row arrives.
     capturer.push(Buffer.from(
       "Core 0 panic'ed (Store access fault).\n" +
-        'Core 0 register dump:\n' +
-        'Backtrace: 0x42000001:0x3fc80000',
+        'Stack memory:\n' +
+        '3fc80000: 0x00000000 0x00000000\n' +
+        'Core 0 register dump:',
       'utf8',
     ));
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1738,9 +1753,9 @@ describe('Capturer – block revisions', () => {
     const provisionalId = capturer.getEvents().find((event) => event.id !== finalizedId)?.id;
     expect(provisionalId).toBeDefined();
 
-    // The pending MEPC/MCAUSE row updates the preview and architecture, but
+    // The pending MCAUSE/RA row updates the preview and architecture, but
     // does not retire its ID or increment the finalized occurrence count.
-    capturer.push(Buffer.from('\nMEPC : 0x42000001 MCAUSE : 0x00000007', 'utf8'));
+    capturer.push(Buffer.from('\nMCAUSE : 0x00000007 RA : 0x42000002', 'utf8'));
     await new Promise((resolve) => setTimeout(resolve, 100));
     const pendingEvents = capturer.getEvents();
     expect(pendingEvents).toHaveLength(2);
@@ -1756,8 +1771,36 @@ describe('Capturer – block revisions', () => {
     expect(events).toHaveLength(1);
     expect(events[0].id).toBe(finalizedId);
     expect(events[0].count).toBe(2);
+    expect(events[0].lightweight.faultCode).toBe(0x7);
+    expect(events[0].lightweight.regs.RA).toBe(0x42000002);
     expect(removed.some((event) => event.id === provisionalId)).toBe(true);
     capturer.dispose();
+
+    const conflicting = new Capturer({ quietPeriodMs: 50, dedupWindowMs: 60_000, maxEvents: 2 });
+    conflicting.on('eventDetected', () => {});
+    const conflictFirst =
+      "Core 0 panic'ed (Store access fault).\n" +
+      'Stack memory:\n' +
+      '3fc80000: 0x00000000 0x00000000\n' +
+      'Core 0 register dump:\n' +
+      'MCAUSE : 0x00000007\n';
+    conflicting.push(Buffer.from(conflictFirst, 'utf8'));
+    conflicting.flush();
+    conflicting.push(Buffer.from(
+      "Core 0 panic'ed (Store access fault).\n" +
+        'Stack memory:\n' +
+        '3fc80000: 0x00000000 0x00000000\n' +
+        'Core 0 register dump:',
+      'utf8',
+    ));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    conflicting.push(Buffer.from('\nMCAUSE : 0x0000000b RA : 0x42000002', 'utf8'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    conflicting.push(Buffer.from('\n', 'utf8'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(conflicting.getEvents()).toHaveLength(2);
+    expect(conflicting.getEvents()[0].count).toBe(1);
+    conflicting.dispose();
   });
 
   it('previews a complete pending Backtrace line without consuming its bytes', async () => {
@@ -2374,6 +2417,19 @@ describe('CrashFramer – provisional quiet flush', () => {
     const partial = standaloneMarker.flush(2000);
     expect(partial).toHaveLength(1);
     expect(partial[0].lines).toContain('  >>>stack>>>');
+  });
+
+  it('keeps ESP8266 register data on explicit flush but rejects a crash header alone', () => {
+    const withRegister = new CrashFramer(500);
+    withRegister.pushLine('Exception (28):', 0);
+    withRegister.pushLine('epc1=0x4020e41c', 10);
+    const partial = withRegister.flush(1000);
+    expect(partial).toHaveLength(1);
+    expect(partial[0].lines).toContain('epc1=0x4020e41c');
+
+    const headerOnly = new CrashFramer(500);
+    headerOnly.pushLine('Exception (28):', 1100);
+    expect(headerOnly.flush(2000)).toEqual([]);
   });
 
   it('only treats a leading ELF checksum marker as complete', () => {
@@ -3270,6 +3326,27 @@ import { fetchStacktraceWithMi } from '../panic/decodeRiscv.js';
 import type { DecodeParams, PanicInfoWithStackData } from '../panic/types.js';
 
 describe('GdbStubServer – Windows remote spec', () => {
+  it('waits for overlapping setup to clean up before close resolves', async () => {
+    const panicInfo: PanicInfoWithStackData = {
+      coreId: 0,
+      programCounter: 0x40000000,
+      regs: {},
+      stackBaseAddr: 0,
+      stackData: Buffer.alloc(0),
+    };
+    const existingDirs = new Set(
+      fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('esp-decoder-gdbstub-')),
+    );
+    const server = new GdbStubServer(panicInfo);
+    const starting = server.start();
+    await server.close();
+    await expect(starting).rejects.toThrow('Server closed during startup');
+    const remainingDirs = fs
+      .readdirSync(os.tmpdir())
+      .filter((name) => name.startsWith('esp-decoder-gdbstub-') && !existingDirs.has(name));
+    expect(remainingDirs).toEqual([]);
+  });
+
   it('passes the direct exec spec to target-select unchanged', async () => {
     const prevElectronNode = process.env.ELECTRON_RUN_AS_NODE;
     const platformSpy = vi
