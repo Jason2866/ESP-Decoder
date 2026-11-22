@@ -6,7 +6,7 @@
  * Improv-capable firmware can be handed WiFi credentials over the same UART.
  *
  * This module is transport-agnostic and free of any `vscode` import so it can
- * be unit-tested in Node (like ansiParser/trbr). The caller supplies a
+ * be unit-tested in Node (like ansiParser/panic). The caller supplies a
  * `write(Buffer)` function and pumps received bytes in via `feed(Buffer)`.
  *
  * Wire format of one packet:

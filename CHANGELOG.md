@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.40.0] - 2026-11-22
+
+## Replace vendored trbr crash decoder with src/panic module
+
+### New Features
+
+- Expanded panic and coredump decoding across Xtensa and RISC-V devices, including multicore captures, per-thread details, and broader chip coverage.
+- Crash captures update or disappear as serial output changes, with decoded results refreshed to match.
+- Firmware files can help identify architecture when project or board details are unavailable.
+
+### Bug Fixes
+
+- Prevented outdated decode results from replacing newer crash details; improved Windows paths and links in decoded output.
+
+### Improvements
+
+- Architecture selection offers `auto`, `xtensa`, or `riscv`, with broader debugger discovery.
+
+- **Workflow CI** — Build and packaging checks run across Windows, macOS, and Linux.
+
 ## [0.30.0] - 2026-11-14
 
 ### Added

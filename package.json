@@ -2,7 +2,7 @@
   "name": "esp-decoder",
   "displayName": "ESP Crash Decoder",
   "description": "Decode ESP32 / ESP8266 crash dumps from serial port",
-  "version": "0.30.0",
+  "version": "0.40.0",
   "publisher": "Jason2866",
   "license": "GPL-3.0",
   "icon": "assets/icon_large.png",
@@ -177,14 +177,7 @@
           "enum": [
             "auto",
             "xtensa",
-            "esp32c2",
-            "esp32c3",
-            "esp32c5",
-            "esp32c6",
-            "esp32h2",
-            "esp32h4",
-            "esp32p4",
-            "esp32s31"
+            "riscv"
           ],
           "description": "Target architecture for decoding (auto will try to detect from ELF/board)"
         },
@@ -288,12 +281,13 @@
     "vscode:prepublish": "npm run build",
     "build": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
-    "package": "npx @vscode/vsce package",
+    "package": "vsce package",
     "lint": "eslint src",
     "test": "vitest run"
   },
   "overrides": {
-    "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.5"
+    "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.5",
+    "minimatch": "11.0.5"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -301,12 +295,13 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@vscode/vsce": "4.1.1",
     "@types/node": "^24.0.0",
     "@types/vscode": "^1.85.0",
-    "@typescript-eslint/eslint-plugin": "^8.72.1",
+    "@typescript-eslint/eslint-plugin": "^8.72.2",
     "@typescript-eslint/parser": "^8.72.1",
     "esbuild": "^0.28.2",
-    "eslint": "^10.14.0",
+    "eslint": "^10.15.0",
     "pioarduino-node-helpers": "^12.7.1",
     "typescript": "6.0.3",
     "vitest": "^5.1.0"

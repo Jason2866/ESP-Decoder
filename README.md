@@ -1,6 +1,6 @@
 # ESP Crash Decoder — VS Code Extension
 
-Decode ESP32x/ESP8266 crash dumps directly from the serial port in VS Code.  
+Decode ESP32x/ESP8266 crash dumps directly from the serial port in VS Code.
 Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/items?itemName=pioarduino.pioarduino-ide) and
 [**Espressif IDF**](https://marketplace.visualstudio.com/items?itemName=espressif.esp-idf-extension).
 
@@ -13,7 +13,7 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 - **ESP-IDF Integration** — Auto-detects app ELF and toolchain from `build/` and ESP-IDF tools
 - **Click-to-Navigate** — Click on decoded file:line references to open source files
 - **Register Display** — Shows CPU register values at the time of crash
-- **Multi-Arch Support** — Xtensa (ESP32/S2/S3/ESP8266) and RISC-V (ESP32-C2/C3/C5/C6/C61/H2/H4/P4/S31)
+- **Multi-Arch Support** — Xtensa (ESP32/S2/S3/ESP8266) and all RISC-V variants (ESP32-C2/C3/C5/C6/C61/H2/H4/P4/S31)
 - **WiFi Provisioning** — Hand WiFi credentials to the connected board over the [Improv serial protocol](https://www.improv-wifi.com/serial/) (no browser required)
 
 ## Quick Start
@@ -68,7 +68,7 @@ message) if the firmware does not speak Improv.
 | `esp-decoder.autoDetectElf` | `true` | Auto-detect ELF from PlatformIO and ESP-IDF builds |
 | `esp-decoder.elfPath` | `""` | Manual ELF file path |
 | `esp-decoder.toolPath` | `""` | Manual GDB/addr2line path |
-| `esp-decoder.targetArch` | `auto` | Target architecture (`auto`, `xtensa`, `riscv32`) |
+| `esp-decoder.targetArch` | `auto` | Target architecture (`auto`, `xtensa`, `riscv`) |
 | `esp-decoder.serialMonitor.maxLines` | `5000` | Max lines in serial output |
 | `esp-decoder.serialMonitor.autoscroll` | `true` | Auto-scroll on new data |
 | `esp-decoder.logDirectory` | `logs` | Directory for Log2File output (relative to workspace by default) |
@@ -146,7 +146,7 @@ npm run package   # Creates .vsix file
 ## Installing
 
 ```bash
-code --install-extension esp-decoder-0.1.0.vsix
+code --install-extension esp-decoder-0.40.0.vsix
 ```
 
 Or install from the Extensions sidebar: "Install from VSIX..."
@@ -162,8 +162,7 @@ Or install from the Extensions sidebar: "Install from VSIX..."
 
 ## Credits
 
-[dankeboy](https://github.com/dankeboy36) for [TraceBreaker (trbr)](https://github.com/dankeboy36/trbr) code and 
-thx to [h2zero](https://github.com/h2zero) for contributing performance tweaks and testing.
+Crash decoding is modeled on [esp-idf-panic-decoder](https://github.com/espressif/esp-idf-panic-decoder) (GDB remote-protocol approach). Performance tweaks and testing by [h2zero](https://github.com/h2zero).
 
 ## License
 

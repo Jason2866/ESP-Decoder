@@ -9,7 +9,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { fileURLToPath } from 'url';
+import { runInNewContext } from 'node:vm';
 import { ImprovSessionCancellation } from '../improvWiFi';
 
 // Mock vscode before importing webviewPanel
@@ -94,6 +96,7 @@ vi.mock('vscode', () => {
 
 import { EspDecoderWebviewPanel } from '../webviewPanel.js';
 import { SerialPortManager } from '../serialPortManager.js';
+import * as crashDecoder from '../crashDecoder.js';
 
 // Mock SerialPortManager
 vi.mock('../serialPortManager.js', () => {
@@ -171,6 +174,260 @@ describe('EspDecoderWebviewPanel – PR #42 file opening', () => {
     internal.cancelImprovForWebview(11);
   });
 
+  it('clears buffered data without flushing crashes and notifies both monitor views', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    const sidebarPost = vi.fn();
+    const editorPost = vi.fn();
+    internal.view = { webview: { postMessage: sidebarPost } };
+    internal.panel = { webview: { postMessage: editorPost } };
+    internal.pendingSerialData = 'buffered serial';
+    internal.lineBuffer = 'partial line';
+    internal.serialLines = ['old line'];
+    internal.crashEvents = [{ id: 'old-crash' }];
+    internal.crashDecodeRevisions.set('old-crash', 1);
+    const flush = vi.spyOn(internal.crashCapturer, 'flush');
+    const reset = vi.spyOn(internal.crashCapturer, 'reset');
+
+    await internal.handleMessage({ type: 'clear' }, 1);
+
+    expect(flush).not.toHaveBeenCalled();
+    expect(reset).toHaveBeenCalled();
+    expect(internal.pendingSerialData).toBe('');
+    expect(internal.lineBuffer).toBe('');
+    expect(internal.crashEvents).toEqual([]);
+    expect(internal.crashDecodeRevisions.size).toBe(0);
+    expect(sidebarPost).toHaveBeenCalledWith({ type: 'clear' });
+    expect(editorPost).toHaveBeenCalledWith({ type: 'clear' });
+  });
+
+  it('refreshes the last-seen time without clearing a decode for an unchanged crash', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    const decoded = { stacktrace: [], rawOutput: 'cached result' };
+    const event: crashDecoder.CrashEvent = {
+      id: 'crash-seen-again',
+      kind: 'riscv',
+      lines: ['panic'],
+      rawText: 'same crash text',
+      timestamp: 100,
+      decoded,
+    };
+    internal.crashEvents = [event];
+    const post = vi.spyOn(internal, 'postMessage').mockImplementation(() => {});
+
+    internal.crashCapturer._onCrashUpdated.fire({ ...event, timestamp: 200 });
+
+    expect(event.timestamp).toBe(200);
+    expect(event.decoded).toBe(decoded);
+    expect(post).toHaveBeenCalledWith({
+      type: 'crashSeen',
+      eventId: event.id,
+      timestamp: 200,
+    });
+    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'crashUpdated' }));
+  });
+
+  it('reports a disconnect-flushed crash but does not start its queued decode after disposal', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    internal.config = { elfPath: '/fw/firmware.elf' };
+    internal.activeCrashDecodes = 2;
+    const post = vi.spyOn(internal, 'postMessage').mockImplementation(() => {});
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockResolvedValue({
+      stacktrace: [],
+      rawOutput: 'unexpected decode',
+    });
+
+    internal.crashCapturer.pushData(Buffer.from([
+      'assert failed: disconnect crash',
+      'Backtrace: 0x42000001:0x3fc80000',
+      '',
+    ].join('\n')));
+    internal.cancelSerialFlush();
+    expect(internal.crashEvents).toHaveLength(1);
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: 'crashDetected' }));
+    expect(internal.pendingCrashDecodes.size).toBe(1);
+
+    internal.dispose();
+
+    expect(internal.pendingCrashDecodes.size).toBe(0);
+    expect(decodeSpy).not.toHaveBeenCalled();
+  });
+
+  it('restarts an auto-decode when settings change before it completes', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    const event: crashDecoder.CrashEvent = {
+      id: 'crash-settings-race',
+      kind: 'xtensa',
+      lines: ['panic'],
+      rawText: 'panic',
+      timestamp: 1,
+    };
+    internal.updateConfig({ elfPath: '/fw/elf-a.elf' });
+    internal.crashEvents = [event];
+
+    const pending = new Map<string, (value: { stacktrace: []; rawOutput: string }) => void>();
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockImplementation(
+      (_event, elfPath) => new Promise((resolve) => pending.set(elfPath, resolve)),
+    );
+    try {
+      const firstAttempt = internal.decodeCrashEvent(event);
+      await vi.waitFor(() => expect(pending.has('/fw/elf-a.elf')).toBe(true));
+      internal.updateConfig({ elfPath: '/fw/elf-b.elf' });
+      pending.get('/fw/elf-a.elf')!({ stacktrace: [], rawOutput: 'old result' });
+      await firstAttempt;
+      await vi.waitFor(() => expect(pending.has('/fw/elf-b.elf')).toBe(true));
+
+      pending.get('/fw/elf-b.elf')!({ stacktrace: [], rawOutput: 'current result' });
+      await vi.waitFor(() => expect(event.decoded?.rawOutput).toBe('current result'));
+      expect(event.decodedContext?.elfPath).toBe('/fw/elf-b.elf');
+      expect(decodeSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      decodeSpy.mockRestore();
+    }
+  });
+
+  it('re-decodes retained crash cards when PlatformIO supplies a newer ELF', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    internal.updateConfig({ elfPath: '/project/.pio/build/env-a/firmware.elf' });
+    const event: crashDecoder.CrashEvent = {
+      id: 'crash-new-pio-elf',
+      kind: 'xtensa',
+      lines: ['panic'],
+      rawText: 'panic',
+      timestamp: 1,
+      decodedContext: {
+        captureText: 'panic',
+        captureKind: 'xtensa',
+        elfPath: '/project/.pio/build/env-a/firmware.elf',
+      },
+      decoded: { stacktrace: [], rawOutput: 'old ELF result' },
+    };
+    internal.crashEvents = [event];
+    const decoded = { stacktrace: [], rawOutput: 'current PIO ELF result' };
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockResolvedValue(decoded);
+
+    try {
+      internal.updateConfig({ elfPath: '/project/.pio/build/env-b/firmware.elf' });
+      await vi.waitFor(() => expect(event.decoded?.rawOutput).toBe('current PIO ELF result'));
+      expect(decodeSpy).toHaveBeenCalledOnce();
+      expect(decodeSpy.mock.calls[0][1]).toBe('/project/.pio/build/env-b/firmware.elf');
+      expect(event.decodedContext?.elfPath).toBe('/project/.pio/build/env-b/firmware.elf');
+    } finally {
+      decodeSpy.mockRestore();
+    }
+  });
+
+  it('invalidates cached panic decodes when the same ELF is rebuilt', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    internal.updateConfig({ elfPath: '/project/build/firmware.elf', elfRevision: 7 });
+    const event: crashDecoder.CrashEvent = {
+      id: 'crash-rebuilt-elf',
+      kind: 'riscv',
+      lines: ['panic'],
+      rawText: 'panic',
+      timestamp: 1,
+      decoded: { stacktrace: [], rawOutput: 'old artifact' },
+      decodedContext: {
+        captureText: 'panic',
+        captureKind: 'riscv',
+        elfPath: '/project/build/firmware.elf',
+        elfRevision: 7,
+      },
+    };
+    internal.crashEvents = [event];
+    const post = vi.spyOn(internal, 'postMessage').mockImplementation(() => {});
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockResolvedValue({
+      stacktrace: [],
+      rawOutput: 'new artifact',
+    });
+    try {
+      internal.updateConfig({ elfPath: '/project/build/firmware.elf', elfRevision: 8 });
+      await vi.waitFor(() => expect(event.decoded?.rawOutput).toBe('new artifact'));
+      expect(decodeSpy).toHaveBeenCalledOnce();
+      expect(event.decodedContext?.elfRevision).toBe(8);
+      expect(post).toHaveBeenCalledWith({ type: 'crashDecodeInvalidated', eventId: event.id });
+    } finally {
+      post.mockRestore();
+      decodeSpy.mockRestore();
+    }
+  });
+
+  it('does not send coredump cards through the panic decoder on config changes', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    const event: crashDecoder.CrashEvent = {
+      id: 'coredump-retained',
+      kind: 'unknown',
+      lines: ['Pasted base64 coredump'],
+      rawText: 'original coredump input',
+      timestamp: 1,
+      isCoredump: true,
+    };
+    internal.crashEvents = [event];
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockResolvedValue({
+      stacktrace: [],
+      rawOutput: 'wrong decoder',
+    });
+    try {
+      internal.updateConfig({ elfPath: '/fw/rebuilt.elf', elfRevision: 2 });
+      await Promise.resolve();
+      expect(decodeSpy).not.toHaveBeenCalled();
+      expect(event.rawText).toBe('original coredump input');
+    } finally {
+      decodeSpy.mockRestore();
+    }
+  });
+
+  it('bounds queued re-decodes and drops pending requests superseded by newer settings', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = panel as any;
+    internal.updateConfig({ elfPath: '/fw/old.elf' });
+    const events: crashDecoder.CrashEvent[] = Array.from({ length: 4 }, (_, index) => ({
+      id: `queued-crash-${index}`,
+      kind: 'riscv',
+      lines: ['panic'],
+      rawText: `panic ${index}`,
+      timestamp: index,
+    }));
+    internal.crashEvents = events;
+    let active = 0;
+    let peak = 0;
+    const pending: Array<() => void> = [];
+    const decodeSpy = vi.spyOn(crashDecoder, 'decodeCrash').mockImplementation(
+      (_event, elfPath) => new Promise((resolve) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        pending.push(() => {
+          active -= 1;
+          resolve({ stacktrace: [], rawOutput: elfPath });
+        });
+      }),
+    );
+    try {
+      for (const event of events) {
+        void internal.scheduleCrashDecodeEvent(event);
+      }
+      await vi.waitFor(() => expect(decodeSpy).toHaveBeenCalledTimes(2));
+      internal.updateConfig({ elfPath: '/fw/new.elf' });
+      pending.splice(0, 2).forEach((finish) => finish());
+
+      await vi.waitFor(() => expect(decodeSpy).toHaveBeenCalledTimes(4));
+      expect(decodeSpy.mock.calls.slice(2).every((call) => call[1] === '/fw/new.elf')).toBe(true);
+      pending.splice(0, 2).forEach((finish) => finish());
+      await vi.waitFor(() => expect(decodeSpy).toHaveBeenCalledTimes(6));
+      pending.splice(0, 2).forEach((finish) => finish());
+      await vi.waitFor(() => expect(active).toBe(0));
+      expect(peak).toBeLessThanOrEqual(2);
+    } finally {
+      decodeSpy.mockRestore();
+    }
+  });
+
   it('rejects provisioning when the serial connection changed after discovery', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internal = panel as any;
@@ -234,7 +491,8 @@ describe('EspDecoderWebviewPanel – PR #42 file opening', () => {
     it('resolves relative path against workspace folder when file exists', async () => {
       const workspacePath = '/workspace';
       const relativePath = 'src/main.cpp';
-      const fullPath = '/workspace/src/main.cpp';
+      // path.join emits platform-native separators (\\ on Windows).
+      const fullPath = path.join(workspacePath, relativePath);
 
       // Mock workspace folders
       Object.defineProperty(vscode.workspace, 'workspaceFolders', {
@@ -578,6 +836,52 @@ describe('SERIAL_LINK_RE regex matching', () => {
     const matches = getAllMatches(text);
     expect(matches).toHaveLength(1);
     expect(matches[0]).toMatchObject({ path: '/esp-idf/components/freertos/queue.c', line: '1234' });
+  });
+});
+
+describe('webview crash source links', () => {
+  it('keeps parentheses in the full data-file path and stops before another rooted path', () => {
+    const extensionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-webview-'));
+    fs.mkdirSync(path.join(extensionRoot, 'dist'));
+    fs.writeFileSync(path.join(extensionRoot, 'dist', 'ansiParser.js'), '');
+    const testPanel = new EspDecoderWebviewPanel(
+      vscode.Uri.file(extensionRoot),
+      new SerialPortManager(),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internal = testPanel as any;
+    const fontSpy = vi.spyOn(internal, 'getTerminalFontSize').mockReturnValue(13);
+    try {
+      const html = internal.getHtmlContent(1) as string;
+      const start = html.indexOf('    function linkifyPaths(text) {');
+      const end = html.indexOf('    function formatAnnotation(annotation) {', start);
+      const source = html.slice(start, end);
+      const linkifyPaths = runInNewContext(
+        `${source}; linkifyPaths`,
+        {
+          escapeHtml: (text: string) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;'),
+          escapeAttr: (text: string) => String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;'),
+        },
+      ) as (text: string) => string;
+
+      const rendered = linkifyPaths('/home/user/My (Project)/src/main.cpp:42');
+      expect(rendered.match(/data-file="([^"]+)"/)?.[1]).toBe(
+        '/home/user/My (Project)/src/main.cpp',
+      );
+
+      const unicodePath = 'C:\\Users\\José\\project\\src\\main.cpp:42';
+      const unicodeRendered = linkifyPaths(unicodePath);
+      expect(unicodeRendered.match(/data-file="([^"]+)"/)?.[1]).toBe(
+        'C:\\Users\\José\\project\\src\\main.cpp',
+      );
+
+      const separateRoot = linkifyPaths('/old.log see /real/path.cpp:12');
+      expect(separateRoot.match(/data-file="([^"]+)"/)?.[1]).toBe('/real/path.cpp');
+    } finally {
+      fontSpy.mockRestore();
+      testPanel.dispose();
+      fs.rmSync(extensionRoot, { recursive: true, force: true });
+    }
   });
 });
 

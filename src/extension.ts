@@ -7,6 +7,7 @@ import { findPioEnvironments, getPioBuildDir, selectElfFile, getMonitorBaudRate 
 import { findEspIdfBuilds } from './espIdfIntegration';
 import { EspDecoderMcpHttpServer, McpServerDeps } from './mcpServer';
 import { runUpload } from './mcpUpload';
+import { chipArch, KNOWN_CHIPS } from './chipTargets';
 
 /** Shape of the public API exported by the pioarduino IDE extension. */
 interface PioarduinoApi {
@@ -27,6 +28,9 @@ let sessionConfig: SessionConfig = {};
 // Tracks whether the user has manually picked an ELF file.
 // When true, file-watcher auto-detection must not overwrite the selection.
 let manualElfOverride = false;
+let pioAutoDetectRequest = 0;
+let elfArtifactRevision = 0;
+let committedAutoElfRevision = 0;
 
 export function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('ESP Decoder');
@@ -198,7 +202,10 @@ export function activate(context: vscode.ExtensionContext) {
 
       const result = await selectElfFile(workspaceFolder, viewProvider?.currentElfPath ?? sessionConfig.elfPath);
       if (result) {
-        manualElfOverride = true;
+        // A selected PIO environment should follow later builds of the active
+        // environment. A browsed ELF remains pinned to the user's choice.
+        manualElfOverride = result.source !== 'pio';
+        pioAutoDetectRequest += 1;
         sessionConfig = {
           elfPath: result.elfPath,
           toolPath: result.toolPath || sessionConfig.toolPath,
@@ -249,18 +256,26 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     watcher.onDidCreate((uri) => {
+      if (!isSelectableFirmwareElf(uri.fsPath)) {
+        return;
+      }
+      const artifactRevision = ++elfArtifactRevision;
       if (isPlatformIoBuildElf(uri.fsPath)) {
-        autoDetectFromPio(uri.fsPath);
+        autoDetectFromPio(uri.fsPath, artifactRevision);
       } else if (isEspIdfBuildElf(uri.fsPath)) {
-        autoDetectFromEspIdf(uri.fsPath);
+        autoDetectFromEspIdf(uri.fsPath, artifactRevision);
       }
     });
 
     watcher.onDidChange((uri) => {
+      if (!isSelectableFirmwareElf(uri.fsPath)) {
+        return;
+      }
+      const artifactRevision = ++elfArtifactRevision;
       if (isPlatformIoBuildElf(uri.fsPath)) {
-        autoDetectFromPio(uri.fsPath);
+        autoDetectFromPio(uri.fsPath, artifactRevision);
       } else if (isEspIdfBuildElf(uri.fsPath)) {
-        autoDetectFromEspIdf(uri.fsPath);
+        autoDetectFromEspIdf(uri.fsPath, artifactRevision);
       }
     });
 
@@ -300,6 +315,13 @@ function isPlatformIoBuildElf(elfPath: string): boolean {
   return normalized.includes(`${path.sep}.pio${path.sep}build${path.sep}`);
 }
 
+function isSelectableFirmwareElf(elfPath: string): boolean {
+  const basename = elfPath.replace(/\\/g, '/').split('/').pop()?.toLowerCase();
+  return basename?.endsWith('.elf') === true &&
+    basename !== 'bootloader.elf' &&
+    basename !== 'partition-table.elf';
+}
+
 /**
  * Watch the resolved PlatformIO build directory when it is outside the default
  * .pio/build location. This covers PLATFORMIO_WORKSPACE_DIR, including paths
@@ -333,7 +355,12 @@ function watchPioBuildDirectory(context: vscode.ExtensionContext, workspaceFolde
         false,
         true
       );
-      const detectPioElf = (uri: vscode.Uri) => autoDetectFromPio(uri.fsPath);
+      const detectPioElf = (uri: vscode.Uri) => {
+        if (!isSelectableFirmwareElf(uri.fsPath)) {
+          return;
+        }
+        autoDetectFromPio(uri.fsPath, ++elfArtifactRevision);
+      };
       watcher.onDidCreate(detectPioElf);
       watcher.onDidChange(detectPioElf);
       context.subscriptions.push(watcher);
@@ -364,6 +391,13 @@ async function tryAutoDetectElf(): Promise<void> {
     return;
   }
 
+  // Read the arch setting once: an explicit (non-'auto') value is a user
+  // override used for both the decision and the assignment below.
+  const configuredTargetArch = vscode.workspace
+    .getConfiguration('esp-decoder')
+    .get<string>('targetArch', 'auto');
+  const explicitArch = configuredTargetArch !== 'auto' ? configuredTargetArch : undefined;
+
   try {
     const envs = await findPioEnvironments(workspaceFolder);
     const idfBuilds = await findEspIdfBuilds(workspaceFolder);
@@ -389,11 +423,42 @@ async function tryAutoDetectElf(): Promise<void> {
       }
 
       if (newest) {
+        // A manual ELF selection may have arrived while discovery was
+        // pending — do not clobber it with the auto-detected candidate.
+        if (manualElfOverride || sessionConfig.elfPath) {
+          return;
+        }
+        // An explicit targetArch setting is a user override and always
+        // wins; otherwise the newest build's detected arch replaces any
+        // previous auto-detected value — including clearing it when the
+        // ELF is unreadable and no target was detected.
+        const effectiveArch = explicitArch ?? newest.targetArch;
+        // Only use the discovered tool when it matches the effective
+        // family — an explicit arch override must not be paired with an
+        // incompatible discovered GDB (decodeCrash would not search for
+        // another tool when a path is already supplied).
+        const normalizeArch = (arch: string): string => {
+          const normalized = arch.trim().toLowerCase();
+          const chipAlias = normalized.replace(/[-_]/g, '');
+          if (/^xtensa(?:$|[-_])/.test(normalized)) {
+            return 'xtensa';
+          }
+          if (/^riscv(?:32)?(?:$|[-_])/.test(normalized)) {
+            return 'riscv';
+          }
+          // Keep the original value for the effective target and chip-specific
+          // discovery; only compare canonical architecture families here.
+          return KNOWN_CHIPS.includes(chipAlias) ? chipArch(chipAlias) : normalized;
+        };
+        const archConflict =
+          explicitArch !== undefined &&
+          newest.targetArch !== undefined &&
+          normalizeArch(explicitArch) !== normalizeArch(newest.targetArch);
         sessionConfig = {
           ...sessionConfig,
           elfPath: newest.elfPath,
-          toolPath: sessionConfig.toolPath || newest.toolPath,
-          targetArch: sessionConfig.targetArch || newest.targetArch,
+          toolPath: sessionConfig.toolPath || (archConflict ? undefined : newest.toolPath),
+          targetArch: effectiveArch,
           romElfPath: newest.romElfPath,
         };
         if (viewProvider) {
@@ -406,24 +471,38 @@ async function tryAutoDetectElf(): Promise<void> {
   }
 }
 
-function autoDetectFromPio(elfPath: string): void {
-  if (manualElfOverride || hasUserConfiguredSession()) {
+function autoDetectFromPio(elfPath: string, artifactRevision = elfArtifactRevision): void {
+  // Filter ignored artifacts before advancing the request generation: a
+  // bootloader event must not cancel discovery for selectable firmware.
+  if (!isSelectableFirmwareElf(elfPath)) {
+    return;
+  }
+  const config = vscode.workspace.getConfiguration('esp-decoder');
+  if (manualElfOverride || config.get<string>('elfPath', '')) {
     return; // User has manually selected an ELF — do not overwrite
   }
 
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceFolder) {
+    const request = ++pioAutoDetectRequest;
     findPioEnvironments(workspaceFolder)
       .then((envs) => {
+        if (request !== pioAutoDetectRequest || manualElfOverride || config.get<string>('elfPath', '')) {
+          return;
+        }
         const matched = envs.find((env) => env.elfPath === elfPath);
-        if (matched) {
+        if (matched && artifactRevision >= committedAutoElfRevision) {
+          const configuredToolPath = config.get<string>('toolPath', '');
+          const configuredTargetArch = config.get<string>('targetArch', 'auto');
           sessionConfig = {
             ...sessionConfig,
             elfPath: matched.elfPath,
-            toolPath: matched.toolPath,
-            targetArch: matched.targetArch,
+            toolPath: configuredToolPath || matched.toolPath,
+            targetArch: configuredTargetArch !== 'auto' ? configuredTargetArch : matched.targetArch,
             romElfPath: matched.romElfPath,
+            elfRevision: artifactRevision,
           };
+          committedAutoElfRevision = artifactRevision;
           if (viewProvider) {
             viewProvider.updateConfig(sessionConfig);
           }
@@ -436,24 +515,30 @@ function autoDetectFromPio(elfPath: string): void {
   }
 }
 
-function autoDetectFromEspIdf(elfPath: string): void {
+function autoDetectFromEspIdf(elfPath: string, artifactRevision = elfArtifactRevision): void {
   if (manualElfOverride || hasUserConfiguredSession()) {
     return;
   }
 
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceFolder) {
+    const request = pioAutoDetectRequest;
     findEspIdfBuilds(workspaceFolder)
       .then((builds) => {
+        if (request !== pioAutoDetectRequest || manualElfOverride || hasUserConfiguredSession()) {
+          return;
+        }
         const matched = builds.find((build) => build.elfPath === elfPath);
-        if (matched) {
+        if (matched && artifactRevision >= committedAutoElfRevision) {
           sessionConfig = {
             ...sessionConfig,
             elfPath: matched.elfPath,
             toolPath: matched.toolPath,
             targetArch: matched.targetArch,
             romElfPath: undefined,
+            elfRevision: artifactRevision,
           };
+          committedAutoElfRevision = artifactRevision;
           if (viewProvider) {
             viewProvider.updateConfig(sessionConfig);
           }
