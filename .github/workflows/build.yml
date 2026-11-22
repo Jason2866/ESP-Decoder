@@ -123,8 +123,10 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
+      - name: Install VSCE
+        run: npm install --global @vscode/vsce@4.1.1
       - name: Publish to VS Code Marketplace
-        run: npx @vscode/vsce publish --packagePath *.vsix -p ${{ secrets.VSCE_TOKEN }}
+        run: vsce publish --packagePath *.vsix -p ${{ secrets.VSCE_TOKEN }}
         env:
           VSCE_TOKEN: ${{ secrets.VSCE_TOKEN }}
       - name: Publish to Open VSIX registry

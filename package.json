@@ -281,7 +281,7 @@
     "vscode:prepublish": "npm run build",
     "build": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
-    "package": "npx @vscode/vsce package",
+    "package": "vsce package",
     "lint": "eslint src",
     "test": "vitest run"
   },
@@ -295,6 +295,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@vscode/vsce": "4.1.1",
     "@types/node": "^24.0.0",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^8.72.2",
